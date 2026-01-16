@@ -1,0 +1,109 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "imperfekt"
+version = "0.2.5"
+description = "A framework to analyze imperfections (missingness, noise) in time-series datasets."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "Tamara Krafft" }
+]
+keywords = [
+    "missing-data",
+    "time-series",
+    "data-quality",
+    "missingness-analysis",
+    "healthcare",
+    "polars",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Healthcare Industry",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Typing :: Typed",
+]
+dependencies = [
+    "numpy>=1.24.0",
+    "pandas>=2.0.0",
+    "polars>=0.20.0",
+    "plotly>=5.18.0",
+    "rich>=13.0.0",
+    "scipy>=1.13.0",
+    "kaleido>=0.2.1",
+    "matplotlib>=3.8.0",
+    "scikit-posthocs>=0.9.0",
+    "statsmodels>=0.14.0",
+    "missingno>=0.5.2",
+    "scikit-learn>=1.3.0",
+    "upsetty>=0.1.0",
+    "pingouin>=0.5.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/krafftta/imperfekt"
+Repository = "https://github.com/krafftta/imperfekt"
+Issues = "https://github.com/krafftta/imperfekt/issues"
+
+[project.optional-dependencies]
+# For development
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.1.0",
+    "mypy>=1.7.0",
+    "pre-commit>=3.5.0",
+]
+# For documentation
+docs = [
+    "mkdocs>=1.5.0",
+    "mkdocs-material>=9.5.0",
+    "mkdocstrings[python]>=0.24.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["imperfekt"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "imperfekt/",
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
+]
+exclude = [
+    "data/",
+    "scripts/",
+    "examples/",
+    "tests/",
+    "docs/",
+    "*.egg-info",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W"]
+ignore = ["E501", "N806", "N803"]  # Line too long (handled by formatter) and variable should be lowercase (ignore ML style with X in uppercase)
+
+[tool.ruff.lint.per-file-ignores]
+"examples/**/*.py" = ["E402"]
+
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_ignores = true
+disallow_untyped_defs = true

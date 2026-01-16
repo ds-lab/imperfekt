@@ -1,0 +1,222 @@
+@startuml
+!define DIRECTION top to bottom direction
+' Primary (top‑level) namespace
+package Imperfection {
+    package intravariable {
+
+        ' ----------------------------
+        ' Core analysis class
+        ' ----------------------------
+        class IntravariableImperfection {
+            .. attributes ..
+            - df: DataFrame
+            - imperfection: str
+            - mask: DataFrame
+            - id_col: str
+            - clock_col: str
+            - clock_no_col: str
+            - cols: list
+            - save_path: Path
+            - plot_library: str
+            - renderer: str
+            - results: IntravariableResults
+
+            .. operations ..
+            + IntravariableImperfection()
+            + column_statistics()
+            + gap_statistics()
+            + markov_chain_summary()
+            + autocorrelation()
+            + windowed_significance()
+            + date_time_statistics()
+            + run()
+            + _path()
+            + _generate_clock_no_col()
+        }
+
+        ' ----------------------------
+        ' Dedicated sub‑package
+        ' ----------------------------
+        package column_statistics {}
+        package gap_statistics {}
+        package date_time_statistics {}
+        package markov_chain_summary {}
+        package autocorrelation {}
+        package windowed_significance {}
+        
+        
+        windowed_significance ---[hidden]up- IntravariableImperfection
+        column_statistics ---[hidden]up- IntravariableImperfection
+        gap_statistics---[hidden]up- IntravariableImperfection
+        date_time_statistics ---[hidden]up- IntravariableImperfection
+        markov_chain_summary --[hidden]up- IntravariableImperfection
+        autocorrelation --[hidden]up- IntravariableImperfection
+
+        ' ----------------------------
+        ' Container for computed tables
+        ' ----------------------------
+        class IntravariableResults {
+            ..attributes..
+                - column_statistics: DataFrame
+                - column_case_level_statistics: DataFrame
+                - gap_observation_runs: DataFrame
+                - gap_returns: DataFrame
+                - markov: DataFrame
+                - autocorrelation: DataFrame
+                - observations_around_indicated: dict[DataFrame]
+                - windowed_significance: DataFrame
+            .. operations ..
+                + __init__()
+        }
+
+        ' Association: each “imperfection” instance owns one results object
+        IntravariableImperfection *-- IntravariableResults
+    }
+
+    package intervariable {
+
+        ' ----------------------------
+        ' Core analysis class
+        ' ----------------------------
+        class IntervariableImperfection {
+            .. attributes ..
+            - df: DataFrame
+            - imperfection: str
+            - mask: DataFrame
+            - id_col: str
+            - clock_col: str
+            - clock_no_col: str
+            - cols: list
+            - save_path: Path
+            - plot_library: str
+            - renderer: str
+            - results: IntervariableResults
+
+            .. operations ..
+            + IntervariableImperfection()
+            + row_statistics()
+            + mcar_test()
+            + mar_mnar_test()
+            + symmetric_correlation()
+            + symmetric_lagged_cross_correlation()
+            + asymmetric_correlation()
+            + asymmetric_lagged_cross_correlation()
+            + visualize_missingness()
+            + run()
+            + _path()
+            + _generate_clock_no_col()
+            
+        }
+
+        ' ----------------------------
+        ' Dedicated sub‑package
+        ' ----------------------------
+        package row_statistics {}
+        package mcar {}
+        package symmetric {}
+        package asymmetric {}
+        
+        row_statistics --[hidden]up- IntervariableImperfection
+        mcar --[hidden]up- IntervariableImperfection
+        symmetric --[hidden]up- IntervariableImperfection
+        asymmetric --[hidden]up- IntervariableImperfection
+
+        ' ----------------------------
+        ' Container for computed tables
+        ' ----------------------------
+        class IntervariableResults {
+            .. attributes ..
+            - row_statistics: pl.DataFrame
+            - row_case_level_statistics: pl.DataFrame
+            - null_row_statistics: pl.DataFrame
+            - null_row_case_level_statistics: pl.DataFrame
+            - mcar_results: pl.DataFrame
+            - mar_mnar_results: pl.DataFrame
+            - symmetric_correlation: pl.DataFrame
+            - chi2_intervariable_matrix: pl.DataFrame
+            - symmetric_crosscorrelation: dict<pDataFrame>
+            - asymmetric_statistical_results: dict<pDataFrame>
+            - asymmetric_crosscorrelation: dict<pDataFrame>
+            
+        
+            .. operations ..
+            + __init__()
+        }
+
+        ' Association: each “imperfection” instance owns one results object
+        IntervariableImperfection *-- IntervariableResults
+    }
+
+        ' ----------------------------
+    ' Preliminary analysis package
+    ' ----------------------------
+    package preliminary {
+        class Preliminary {
+            .. attributes ..
+            - df: pl.DataFrame
+            - id_col: str
+            - clock_col: str
+            - clock_no_col: str
+            - cols: list
+            - save_path: Path
+            - plot_library: str
+            - renderer: str
+            - results: PreliminaryResults
+
+            .. operations ..
+            + __init__()
+            + correlation()
+            + autocorrelation()
+            + shapiro_wilk()
+            + describe_df()
+            + run()
+            + _plot_heatmap()
+            + _path()
+            + _generate_clock_no_col()
+        }
+
+        class PreliminaryResults {
+            .. attributes ..
+            - correlation: pl.DataFrame
+            - autocorrelation: dict<str, pl.DataFrame>
+            - shapiro_wilk: pl.DataFrame
+            - descriptive_stats: pl.DataFrame
+            .. operations ..
+            + __init__()
+        }
+
+        ' Association: each preliminary analysis instance owns one results object
+        Preliminary *-- PreliminaryResults
+    }
+
+    ' ----------------------------
+    ' Imperfekt class
+    ' ----------------------------
+    class Imperfekt {
+        .. attributes ..
+        - df: pl.DataFrame
+        - id_col: str
+        - clock_col: str
+        - clock_no_col: str
+        - cols: list
+        - save_path: Path
+        - plot_library: str
+        - renderer: str
+        - preliminary: Preliminary
+        - intravariable: IntravariableImperfection
+        - intervariable: IntervariableImperfection
+
+        .. operations ..
+        + __init__()
+        + run()
+    }
+
+    ' Associations for Imperfekt dependencies
+    Imperfekt *-- Preliminary
+    Imperfekt *-- IntravariableImperfection
+    Imperfekt *-- IntervariableImperfection
+
+    Preliminary -[hidden]right- IntravariableImperfection
+    IntravariableImperfection -[hidden]right- IntervariableImperfection
+}
+@enduml
