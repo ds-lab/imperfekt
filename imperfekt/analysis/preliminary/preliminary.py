@@ -61,7 +61,7 @@ class Preliminary:
                 "Visualizations will not be displayed or saved."
             )
         # Dataframe that will be analyzed
-        self.df = df
+        self.df: pl.DataFrame = df
         # Relevant columns for the analysis
         self.id_col = id_col
         self.clock_col = clock_col
@@ -92,7 +92,7 @@ class Preliminary:
         Returns:
             pl.DataFrame: Description of the dataframe.
         """
-        self.results.descriptive_stats = self.df.describe()
+        self.results.descriptive_stats = self.df.describe(percentiles=[0.05, 0.25, 0.5, 0.75, 0.95])
 
         if self.save_path and save_results:
             self.save_path = Path(self.save_path)
@@ -365,7 +365,7 @@ class Preliminary:
         """
         self.describe_df(save_results=save_results)
         self.shapiro_wilk(save_results=save_results)
-        self.intervariable_normality(save_results=save_results)
+        self.multivariate_normality(save_results=save_results)
         self.autocorrelation(lags=lags, save_results=save_results)
         self.correlation(use=use, save_results=save_results)
         return self
@@ -491,4 +491,4 @@ if __name__ == "__main__":
     )
 
     print("Running preliminary analysis...")
-    print(preliminary.run(lags=5, save_results=True, use="pairwise"))
+    print(preliminary.run(lags=5, save_results=False, use="pairwise"))
