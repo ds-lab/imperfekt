@@ -1,0 +1,27 @@
+# Data
+data/
+*.parquet
+*.csv
+*.sas7bdat
+
+# Python stuff
+/**/__pycache__/
+*$py.class
+**.egg-info
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+
+# etc
+.vscode
+.idea/
+.ruff_cache
+.ipynb_checkpoints/
+.DS_Store
+Thumbs.db
+
+.devcontainer
