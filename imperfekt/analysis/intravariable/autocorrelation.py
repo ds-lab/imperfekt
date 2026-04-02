@@ -15,6 +15,7 @@ def acf(
     stl_period: int = 7,
     save_path: str = None,
     save_results: bool = True,
+    addition_to_save_path: str = None
 ):
     """
     Compute lagged autocorrelation estimate of the imperfection indicator for a variable.
@@ -95,8 +96,8 @@ def acf(
             print(f"STL plot saved to {Path(save_path) / 'stl_plot.png'}")
 
     if save_results and save_path:
-        acf_df.write_csv(Path(save_path) / "autocorrelation.csv")
-        print(f"Autocorrelation results saved to {Path(save_path) / 'autocorrelation.csv'}")
+        acf_df.write_csv(Path(save_path) / str(addition_to_save_path or "autocorrelation.csv"))
+        print(f"Autocorrelation results saved to {Path(save_path) / (addition_to_save_path or 'autocorrelation.csv')}")
     return acf_df
 
 

@@ -22,6 +22,15 @@ Install the library using `pip`:
 pip install imperfekt
 ```
 
+> Note:
+> If you export Plotly figures as static images (`save_results=True`), some environments may raise a `plotly_get_chrome`/Kaleido error at runtime.
+> This happens because Kaleido needs a Chrome/Chromium binary.
+> Install Chrome manually, or run:
+>
+> ```bash
+> plotly_get_chrome
+> ```
+
 ## Quick Start
 
 ```python

@@ -330,8 +330,9 @@ class Preliminary:
                 id_col=self.id_col,
                 clock_no_col=self.clock_no_col,
                 max_lag=lags,
-                save_path=self._path(f"{c}_autocorrelation.csv"),
+                save_path=self.save_path,
                 save_results=save_results,
+                addition_to_save_path=f"{c}_autocorrelation.csv",
             )
 
             if self.renderer:
@@ -491,4 +492,4 @@ if __name__ == "__main__":
     )
 
     print("Running preliminary analysis...")
-    print(preliminary.run(lags=5, save_results=False, use="pairwise"))
+    print(preliminary.run(lags=5, save_results=True, use="pairwise"))

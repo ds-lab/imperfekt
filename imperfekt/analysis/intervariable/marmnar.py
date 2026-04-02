@@ -145,6 +145,7 @@ def temporal_mar_mnar_test(
             mask_df,
             var=c,
             id_col=id_col,
+            clock_col=clock_col,
             save_path=save_path,
             save_results=save_results,
         )
@@ -276,15 +277,16 @@ def plot_missingness_vs_lag_quantiles(
     mask_df: pl.DataFrame,
     var: str,
     id_col="id",
+    clock_col="clock",
     q=10,
     save_path: str = None,
     save_results: bool = True,
 ):
     # convert polars -> pandas if needed
     if hasattr(df, "to_pandas"):
-        df = df.sort([id_col, "clock"]).to_pandas()
+        df = df.sort([id_col, clock_col]).to_pandas()
     if hasattr(mask_df, "to_pandas"):
-        mask_df = mask_df.sort([id_col, "clock"]).to_pandas()
+        mask_df = mask_df.sort([id_col, clock_col]).to_pandas()
 
     lag_col = f"{var}_lag1"
     if lag_col not in df.columns:
