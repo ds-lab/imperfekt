@@ -1,0 +1,274 @@
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+import polars as pl
+import plotly.graph_objects as go
+
+
+############################################################
+#        Per-Entity and Global Interval Statistics         #
+############################################################
+
+
+def compute_entity_interval_statistics(
+    delta_t_df: pl.DataFrame,
+    id_col: str = "id",
+) -> pl.DataFrame:
+    """
+    Compute per-entity summary statistics of inter-observation intervals.
+
+    Parameters:
+        delta_t_df (pl.DataFrame): DataFrame with columns [id_col, ..., "interval_seconds"],
+                                   one row per interval (already filtered: not-null, > 0).
+        id_col (str): Entity identifier column.
+
+    Returns:
+        pl.DataFrame: One row per entity with columns:
+            id, n_intervals, mean_seconds, median_seconds, std_seconds,
+            cv, iqr_seconds, min_seconds, max_seconds.
+    """
+    entity_stats = (
+        delta_t_df
+        .group_by(id_col)
+        .agg(
+            pl.len().alias("n_intervals"),
+            pl.col("interval_seconds").mean().alias("mean_seconds"),
+            pl.col("interval_seconds").median().alias("median_seconds"),
+            pl.col("interval_seconds").std().alias("std_seconds"),
+            pl.col("interval_seconds").quantile(0.25, interpolation="nearest").alias("q25_seconds"),
+            pl.col("interval_seconds").quantile(0.75, interpolation="nearest").alias("q75_seconds"),
+            pl.col("interval_seconds").min().alias("min_seconds"),
+            pl.col("interval_seconds").max().alias("max_seconds"),
+        )
+        .with_columns(
+            (pl.col("q75_seconds") - pl.col("q25_seconds")).alias("iqr_seconds"),
+            pl.when(pl.col("mean_seconds") != 0)
+            .then(pl.col("std_seconds") / pl.col("mean_seconds"))
+            .otherwise(None)
+            .alias("cv"),
+        )
+        .drop(["q25_seconds", "q75_seconds"])
+        .select([
+            id_col,
+            "n_intervals",
+            "mean_seconds",
+            "median_seconds",
+            "std_seconds",
+            "cv",
+            "iqr_seconds",
+            "min_seconds",
+            "max_seconds",
+        ])
+        .sort(id_col)
+    )
+
+    # Preserve entities that have 0 intervals (single-observation entities)
+    all_entities = delta_t_df.select(pl.col(id_col).unique()).sort(id_col)
+    entity_stats = all_entities.join(entity_stats, on=id_col, how="left")
+
+    return entity_stats
+
+
+def compute_global_interval_statistics(
+    delta_t_df: pl.DataFrame,
+) -> pl.DataFrame:
+    """
+    Compute summary statistics over all pooled inter-observation intervals.
+
+    Parameters:
+        delta_t_df (pl.DataFrame): DataFrame with an "interval_seconds" column.
+
+    Returns:
+        pl.DataFrame: describe()-style summary over the interval_seconds column.
+    """
+    return delta_t_df.select("interval_seconds").describe(interpolation="linear")
+
+
+############################################################
+#         Dominant Frequency Analysis                      #
+############################################################
+
+
+def compute_dominant_frequency(
+    delta_t_df: pl.DataFrame,
+    bin_resolution_seconds: float = 60.0,
+    adherence_tolerance: float = 0.5,
+) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """
+    Identify the modal inter-observation interval and quantify adherence and entropy.
+
+    Parameters:
+        delta_t_df (pl.DataFrame): DataFrame with an "interval_seconds" column.
+        bin_resolution_seconds (float): Bin width in seconds for discretizing intervals.
+        adherence_tolerance (float): Fraction tolerance around the mode for adherence rate
+                                     (e.g. 0.5 means within [mode*0.5, mode*1.5]).
+
+    Returns:
+        tuple:
+            frequency_summary (pl.DataFrame): Single-row summary with columns:
+                - dominant_interval_seconds: center of the most frequent interval bin (the modal interval)
+                - dominant_interval_bin: integer bin index of the mode
+                - adherence_rate: fraction of all intervals within
+                  [dominant * (1 - tolerance), dominant * (1 + tolerance)].
+                  Answers "how often does the data follow its own dominant rhythm?"
+                  — values near 1.0 indicate a consistent schedule, even with small jitter.
+                - n_total_intervals: total number of inter-observation intervals
+                - n_adhering_intervals: count of intervals within the adherence band
+                - interval_entropy_bits: Shannon entropy H = -sum(p_i * log2(p_i)) over all bins.
+                  Measures how spread out the interval distribution is, regardless of which bin
+                  dominates. H = 0 when all intervals fall in one bin (perfectly regular).
+                - normalized_entropy: H / log2(n_unique_bins). Rescaled to [0, 1]:
+                  0 = perfectly regular (single bin), 1 = maximally irregular (uniform distribution).
+                  Unlike adherence_rate, captures how chaotic the non-dominant portion is.
+                - n_unique_bins: number of distinct interval bins observed
+                - bin_resolution_seconds: bin width used for discretization
+                - adherence_tolerance: fractional tolerance used for adherence_rate
+
+            bin_counts (pl.DataFrame): Frequency table of all interval bins, sorted by count desc.
+                Columns: interval_bin, interval_seconds_bin_center, count, fraction.
+    """
+    binned = delta_t_df.with_columns(
+        (pl.col("interval_seconds") / bin_resolution_seconds)
+        .round(0)
+        .cast(pl.Int64)
+        .alias("interval_bin")
+    )
+
+    bin_counts = (
+        binned
+        .group_by("interval_bin")
+        .agg(pl.len().alias("count"))
+        .with_columns(
+            (pl.col("interval_bin") * bin_resolution_seconds).alias("interval_seconds_bin_center"),
+        )
+        .sort("count", descending=True)
+    )
+
+    n_total = bin_counts["count"].sum()
+    bin_counts = bin_counts.with_columns(
+        (pl.col("count") / n_total).alias("fraction")
+    ).select(["interval_bin", "interval_seconds_bin_center", "count", "fraction"])
+
+    # Dominant bin = mode
+    dominant_row = bin_counts.row(0, named=True)
+    dominant_bin = dominant_row["interval_bin"]
+    dominant_interval_seconds = dominant_row["interval_seconds_bin_center"]
+
+    # Adherence: fraction of all intervals within [mode*(1-tol), mode*(1+tol)]
+    lo = dominant_interval_seconds * (1 - adherence_tolerance)
+    hi = dominant_interval_seconds * (1 + adherence_tolerance)
+    n_adhering = (
+        delta_t_df
+        .filter(pl.col("interval_seconds").is_between(lo, hi))
+        .height
+    )
+    adherence_rate = n_adhering / n_total if n_total > 0 else None
+
+    # Shannon entropy of bin distribution
+    fractions = bin_counts["fraction"].to_numpy()
+    fractions = fractions[fractions > 0]
+    entropy_bits = float(-np.sum(fractions * np.log2(fractions)))
+    n_unique_bins = len(fractions)
+    normalized_entropy = (entropy_bits / np.log2(n_unique_bins)) if n_unique_bins > 1 else 0.0
+
+    frequency_summary = pl.DataFrame({
+        "dominant_interval_seconds": [dominant_interval_seconds],
+        "dominant_interval_bin": [dominant_bin],
+        "adherence_rate": [adherence_rate],
+        "n_total_intervals": [n_total],
+        "n_adhering_intervals": [n_adhering],
+        "interval_entropy_bits": [entropy_bits],
+        "normalized_entropy": [normalized_entropy],
+        "n_unique_bins": [n_unique_bins],
+        "bin_resolution_seconds": [bin_resolution_seconds],
+        "adherence_tolerance": [adherence_tolerance],
+    })
+
+    return frequency_summary, bin_counts
+
+
+############################################################
+#        Interval Frequency Bar Chart                      #
+############################################################
+
+
+def plot_interval_frequency_bar(
+    bin_counts: pl.DataFrame,
+    dominant_bin: int,
+    top_n: int = 20,
+    library: str = "matplotlib",
+    renderer: str = None,
+    save_path: str = None,
+    save_results: bool = False,
+) -> "go.Figure | plt.Figure":
+    """
+    Bar chart of interval bin frequencies, with the dominant bin highlighted.
+
+    Parameters:
+        bin_counts (pl.DataFrame): Output of compute_dominant_frequency(), sorted by count desc.
+        dominant_bin (int): The bin index of the dominant (modal) interval.
+        top_n (int): Number of top bins to display.
+        library (str): "matplotlib" or "plotly".
+        renderer (str): Plotly renderer. None disables display.
+        save_path (str): File path to save the figure. None disables saving.
+        save_results (bool): Whether to save the figure.
+
+    Returns:
+        Figure object (matplotlib or plotly).
+    """
+    top = bin_counts.head(top_n).sort("interval_seconds_bin_center")
+    x_vals = top["interval_seconds_bin_center"].to_numpy()
+    y_vals = top["count"].to_numpy()
+    colors = ["#d62728" if b == dominant_bin else "#1f77b4" for b in top["interval_bin"].to_list()]
+    labels = [f"{v:.0f}s" for v in x_vals]
+
+    title = "Inter-Observation Interval Frequency (top bins)"
+    xaxis_title = "Interval (seconds)"
+    yaxis_title = "Count"
+
+    if library.lower() == "plotly":
+        fig = go.Figure(
+            go.Bar(
+                x=x_vals,
+                y=y_vals,
+                marker_color=colors,
+                text=[f"{v:.3f}" for v in top["fraction"].to_list()],
+                textposition="outside",
+            )
+        )
+        fig.update_layout(
+            title=title,
+            xaxis_title=xaxis_title,
+            yaxis_title=yaxis_title,
+            template="plotly_white",
+            xaxis=dict(tickvals=x_vals.tolist(), ticktext=labels),
+        )
+        if renderer:
+            fig.show(renderer=renderer)
+        if save_results and save_path:
+            save_path = Path(save_path)
+            fig.write_image(save_path)
+            print(f"Interval frequency bar chart saved to {save_path}")
+        return fig
+
+    elif library.lower() == "matplotlib":
+        fig, ax = plt.subplots(figsize=(max(10, top_n * 0.6), 6))
+        ax.bar(range(len(x_vals)), y_vals, color=colors)
+        ax.set_xticks(range(len(x_vals)))
+        ax.set_xticklabels(labels, rotation=45, ha="right")
+        ax.set_title(title)
+        ax.set_xlabel(xaxis_title)
+        ax.set_ylabel(yaxis_title)
+        ax.grid(True, alpha=0.3, axis="y")
+        fig.tight_layout()
+        if save_results and save_path:
+            save_path = Path(save_path)
+            fig.savefig(save_path, dpi=300, bbox_inches="tight")
+            print(f"Interval frequency bar chart saved to {save_path}")
+        if renderer:
+            plt.show()
+        plt.close(fig)
+        return fig
+    else:
+        raise ValueError(f"Library '{library}' is not supported. Choose 'plotly' or 'matplotlib'.")
