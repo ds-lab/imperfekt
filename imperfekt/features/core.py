@@ -3,7 +3,7 @@ import numpy as np
 import polars as pl
 from imperfekt.analysis.utils import pretty_printing
 
-from imperfekt.features import interaction, temporal, window
+from imperfekt.features import interaction, irregularity, temporal, window
 
 
 class FeatureGenerator:
@@ -192,6 +192,32 @@ class FeatureGenerator:
         )
         return self
 
+    def add_irregularity_features(self, acceleration_window_size: int = 5):
+        """
+        Adds all irregularity features derived from inter-observation intervals.
+
+        Interval features:
+            - ``interval_seconds``: gap to the previous observation (null for first row per entity).
+            - ``interval_z_score``: z-score of the gap relative to the entity's own mean/std.
+            - ``interval_cv_local``: rolling CV (std/mean) of the last 5 intervals per entity.
+
+        Windowed acceleration features:
+            - ``interval_acceleration``: Δ(interval) = interval_i − interval_{i-1}.
+            - ``rolling_mean_acceleration_{n}``: smoothed trend — are gaps steadily growing or shrinking?
+            - ``rolling_abs_acceleration_{n}``: rolling mean of |acceleration| — magnitude of rhythm change.
+            - ``rolling_std_acceleration_{n}``: rolling std of acceleration — volatility of rhythm change.
+
+        Parameters:
+            acceleration_window_size: Rolling window size for acceleration statistics. Default 5.
+        """
+        self.df = irregularity.add_interval_features(
+            self.df, self.id_col, self.clock_col
+        )
+        self.df = irregularity.add_windowed_acceleration(
+            self.df, self.id_col, self.clock_col, window_size=acceleration_window_size
+        )
+        return self
+
     def add_row_imperfection_pct(self, cols: list = None):
         """
         Adds the percentage of imperfect (missing) values for each row.
@@ -223,6 +249,8 @@ class FeatureGenerator:
         interaction_cols: list = None,
         # row imperfection percentage
         row_imperfection_pct_cols: list = None,
+        # irregularity features
+        irregularity_window_size: int = 5,
     ):
         """
         Convenience method to run all feature generation steps.
@@ -242,6 +270,7 @@ class FeatureGenerator:
             window_replace_nulls_with_zero: Replace nulls with zero in window features. Default True.
             interaction_cols: Columns for pairwise interaction features.
             row_imperfection_pct_cols: Columns used to compute the row-level imperfection percentage.
+            irregularity_window_size: Rolling window size for acceleration features. Default 5.
         """
         if window_rolling_window_sizes is None:
             window_rolling_window_sizes = [2]
@@ -264,6 +293,7 @@ class FeatureGenerator:
         )
         self.add_interaction_features(cols=interaction_cols)
         self.add_row_imperfection_pct(cols=row_imperfection_pct_cols)
+        self.add_irregularity_features(acceleration_window_size=irregularity_window_size)
         return self.df
 
 
