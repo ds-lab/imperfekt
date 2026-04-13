@@ -1,6 +1,7 @@
 # in imperfekt/features/core.py
 import numpy as np
 import polars as pl
+from imperfekt.analysis.utils import pretty_printing
 
 from imperfekt.features import interaction, temporal, window
 
@@ -53,15 +54,22 @@ class FeatureGenerator:
         else:
             raise ValueError(f"Unknown imperfection type: {self.imperfection}")
 
-    def add_binary_masks(self):
+    def add_binary_masks(self, cols: list = None):
         """
         Joins the pre-generated binary mask columns to the main DataFrame.
+
+        Parameters:
+            cols: Subset of variable_cols to include. Defaults to all variable_cols.
         """
+        cols = cols or self.variable_cols
         if self.mask is not None:
-            # Drop mask columns if they already exist to avoid duplicates
-            mask_cols = [c for c in self.mask.columns if c not in [self.id_col, self.clock_col]]
+            mask_subset = self.mask.select(
+                [self.id_col, self.clock_col, self.clock_no_col]
+                + [f"{c}_mask" for c in cols if f"{c}_mask" in self.mask.columns]
+            )
+            mask_cols = [c for c in mask_subset.columns if c not in [self.id_col, self.clock_col]]
             self.df = self.df.drop(mask_cols, strict=False)
-            self.df = self.df.join(self.mask, on=[self.id_col, self.clock_col], how="inner")
+            self.df = self.df.join(mask_subset, on=[self.id_col, self.clock_col], how="inner")
         return self
 
     def add_circular_features(self):
@@ -82,6 +90,7 @@ class FeatureGenerator:
         lag: int = 1,
         lag_mask_replace_nulls_with_zero: bool = True,
         time_since_upper_bound: int = 3600,
+        cols: list = None,
     ):
         """
         Adds features like lags, consecutive counts, and time-since.
@@ -90,24 +99,25 @@ class FeatureGenerator:
             lag: The lag to apply. Default is 1.
             lag_mask_replace_nulls_with_zero: Whether to replace nulls with zero in the lagged columns. If True, we assume that time before the first observation was not imperfect.
             time_since_upper_bound: Optional upper bound for time since features in seconds. Default is 3600 (1 hour).
+            cols: Subset of variable_cols to include. Defaults to all variable_cols.
         """
-        # This method can call functions from your temporal.py module
+        cols = cols or self.variable_cols
         self.df = temporal.add_lag_mask(
             self.df,
             self.mask,
-            self.variable_cols,
+            cols,
             self.id_col,
             self.clock_col,
             lag=lag,
             replace_nulls_with_zero=lag_mask_replace_nulls_with_zero,
         )
         self.df = temporal.add_consecutive_counts(
-            self.df, self.mask, self.variable_cols, self.id_col, self.clock_col
+            self.df, self.mask, cols, self.id_col, self.clock_col
         )
         self.df = temporal.add_time_since(
             self.df,
             self.mask,
-            self.variable_cols,
+            cols,
             self.id_col,
             self.clock_col,
             cap_seconds=time_since_upper_bound,  # e.g. cap at 1h
@@ -119,6 +129,7 @@ class FeatureGenerator:
         rolling_window_sizes: list,
         ewma_alphas: float,
         replace_nulls_with_zero: bool = True,
+        cols: list = None,
     ):
         """
         Adds rolling window statistics (of imperfect timestamps per variable):
@@ -128,14 +139,16 @@ class FeatureGenerator:
 
         Parameters:
             rolling_window_sizes(list of int): The sizes of the rolling windows to apply.
-            ewma_spans (list of int): The spans for the exponential moving average.
+            ewma_alphas (list of float): The alphas for the exponential moving average.
             replace_nulls_with_zero (bool): Whether to replace nulls with zero in the rolling window features.
+            cols: Subset of variable_cols to include. Defaults to all variable_cols.
         """
+        cols = cols or self.variable_cols
         for window_size in rolling_window_sizes:
             self.df = window.add_rolling_window_features(
                 self.df,
                 self.mask,
-                self.variable_cols,
+                cols,
                 self.id_col,
                 self.clock_col,
                 window_size=window_size,
@@ -145,16 +158,16 @@ class FeatureGenerator:
             self.df = window.add_exponential_moving_average(
                 self.df,
                 self.mask,
-                self.variable_cols,
+                cols,
                 self.id_col,
                 self.clock_col,
                 alpha=alpha,
             )
         return self
 
-    def add_interaction_features(self):
+    def add_interaction_features(self, cols: list = None):
         """
-        Adds pairwisecross-variable interaction features.
+        Adds pairwise cross-variable interaction features.
 
         Generates four types of interactions for each pair of variables (A, B):
         1. Concurrent value: var_a_t * mask_b_t
@@ -163,29 +176,94 @@ class FeatureGenerator:
         4. Predictive mask: mask_a_t-1 * mask_b_t
         Results in 4*N*(N-1) new features.
 
+        Parameters:
+            cols: Subset of variable_cols to include. Defaults to all variable_cols.
         """
+        cols = cols or self.variable_cols
+        # if cols len is 1 or less, skip interaction features, pretty print a warning
+        if len(cols) <= 1:
+            pretty_cols = ", ".join(cols)
+            pretty_printing.rich_warning(
+                "⚠️ Not enough columns for interaction features. Skipping interaction feature generation. Columns provided: "f"{pretty_cols}"
+            )
+            return self
         self.df = interaction.add_pairwise_interactions(
-            self.df, self.mask, self.variable_cols, self.id_col, self.clock_col
+            self.df, self.mask, cols, self.id_col, self.clock_col
         )
         return self
 
-    def add_row_imperfection_pct(self):
+    def add_row_imperfection_pct(self, cols: list = None):
         """
         Adds the percentage of imperfect (missing) values for each row.
+
+        Parameters:
+            cols: Subset of variable_cols to include. Defaults to all variable_cols.
         """
+        cols = cols or self.variable_cols
         self.df = interaction.add_row_level_features(
-            self.df, self.mask, self.variable_cols, self.id_col, self.clock_col
+            self.df, self.mask, cols, self.id_col, self.clock_col
         )
         return self
 
-    def generate_all_features(self):
-        """A convenience method to run all feature generation steps."""
-        self.add_binary_masks()
+    def generate_all_features(
+        self,
+        # binary masks
+        masks_cols: list = None,
+        # temporal features
+        temporal_cols: list = None,
+        temporal_lag: int = 1,
+        temporal_lag_mask_replace_nulls_with_zero: bool = True,
+        temporal_time_since_upper_bound: int = 3600,
+        # window features
+        window_cols: list = None,
+        window_rolling_window_sizes: list = None,
+        window_ewma_alphas: list = None,
+        window_replace_nulls_with_zero: bool = True,
+        # interaction features
+        interaction_cols: list = None,
+        # row imperfection percentage
+        row_imperfection_pct_cols: list = None,
+    ):
+        """
+        Convenience method to run all feature generation steps.
+
+        Parameters are grouped by feature set. For each step that accepts a `cols`
+        argument, omitting it (or passing ``None``) falls back to all ``variable_cols``.
+
+        Parameters:
+            masks_cols: Columns for binary mask features.
+            temporal_cols: Columns for temporal features (lag, consecutive count, time-since).
+            temporal_lag: Lag size for lag-mask features. Default 1.
+            temporal_lag_mask_replace_nulls_with_zero: Replace nulls with zero in lagged mask columns. Default True.
+            temporal_time_since_upper_bound: Cap (seconds) for time-since features. Default 3600.
+            window_cols: Columns for window features (rolling statistics, EWMA).
+            window_rolling_window_sizes: List of rolling window sizes. Default [2].
+            window_ewma_alphas: List of EWMA smoothing factors. Default [0.3, 0.5].
+            window_replace_nulls_with_zero: Replace nulls with zero in window features. Default True.
+            interaction_cols: Columns for pairwise interaction features.
+            row_imperfection_pct_cols: Columns used to compute the row-level imperfection percentage.
+        """
+        if window_rolling_window_sizes is None:
+            window_rolling_window_sizes = [2]
+        if window_ewma_alphas is None:
+            window_ewma_alphas = [0.3, 0.5]
+
+        self.add_binary_masks(cols=masks_cols)
         self.add_circular_features()
-        self.add_temporal_features()
-        self.add_window_features(rolling_window_sizes=[2], ewma_alphas=[0.3, 0.5])
-        self.add_interaction_features()
-        self.add_row_imperfection_pct()
+        self.add_temporal_features(
+            cols=temporal_cols,
+            lag=temporal_lag,
+            lag_mask_replace_nulls_with_zero=temporal_lag_mask_replace_nulls_with_zero,
+            time_since_upper_bound=temporal_time_since_upper_bound,
+        )
+        self.add_window_features(
+            cols=window_cols,
+            rolling_window_sizes=window_rolling_window_sizes,
+            ewma_alphas=window_ewma_alphas,
+            replace_nulls_with_zero=window_replace_nulls_with_zero,
+        )
+        self.add_interaction_features(cols=interaction_cols)
+        self.add_row_imperfection_pct(cols=row_imperfection_pct_cols)
         return self.df
 
 

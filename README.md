@@ -67,6 +67,14 @@ fg = FeatureGenerator(
     variable_cols=["var1", "var2"]
 )
 features_df = fg.add_binary_masks().add_temporal_features().df
+
+# Or restrict individual steps to a subset of variables
+features_df = (
+    fg.add_binary_masks(cols=["var1"])
+    .add_temporal_features(cols=["var1"])
+    .add_window_features(rolling_window_sizes=[2], ewma_alphas=[0.3], cols=["var1", "var2"])
+    .df
+)
 ```
 
 ## Library Structure
