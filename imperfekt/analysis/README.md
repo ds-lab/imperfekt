@@ -9,6 +9,7 @@ This module provides statistical analysis tools for characterizing imperfection 
 | `preliminary/` | Descriptive statistics, normality tests, correlation, and autocorrelation |
 | `intravariable/` | Within-column analysis: gap patterns, Markov chains, windowed significance |
 | `intervariable/` | Between-column analysis: MCAR tests, MAR/MNAR detection, symmetric/asymmetric correlation |
+| `irregularity/` | Time-grid irregularity: interval statistics, dominant frequency, burstiness, interval autocorrelation |
 | `utils/` | Shared utilities for statistics, visualization, and HTML reporting |
 
 ## Usage
@@ -52,6 +53,7 @@ Each submodule contains its own README with further details:
 - [Preliminary Analysis](preliminary/README.md)
 - [Intravariable Analysis](intravariable/README.md)
 - [Intervariable Analysis](intervariable/README.md)
+- [Irregularity Analysis](irregularity/README.md)
 
 ### Overview Figure
 ![Imperfekt Analysis Matrix](imperfekt.png "Imperfekt Analysis Matrix")
