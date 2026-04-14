@@ -10,6 +10,7 @@ This module generates features from imperfection (missingness/noise) patterns fo
 | `temporal.py` | Time-based features: lags, consecutive counts, time-since |
 | `window.py` | Rolling statistics: sum, variance, exponential moving average |
 | `interaction.py` | Cross-variable features: pairwise interactions, row-level statistics |
+| `irregularity.py` | Sampling-rhythm features: interval gaps, z-scores, local CV, acceleration |
 
 ---
 
@@ -146,7 +147,45 @@ where $\alpha \in (0, 1)$ is the smoothing factor.
 
 ---
 
-### 5. Interaction Features
+### 5. Irregularity Features
+
+```python
+fg.add_irregularity_features()                          # default window_size=5
+fg.add_irregularity_features(acceleration_window_size=10)
+```
+
+#### Interval Features
+
+Row-level features derived from inter-observation gaps per entity:
+
+`interval_z_score` $= \dfrac{\Delta t - \mu}{\sigma}$
+
+`interval_cv_local` $= \dfrac{\text{rolling\_std}_5(\Delta t)}{\text{rolling\_mean}_5(\Delta t)}$
+
+| Output Column | Description |
+|---------------|-------------|
+| `interval_seconds` | Gap to the previous observation (null for first row per entity) |
+| `interval_z_score` | Z-score of the gap relative to entity-level mean and std; null when σ = 0 |
+| `interval_cv_local` | Rolling coefficient of variation (std/mean) over the last 5 intervals; captures local rhythm irregularity |
+
+#### Windowed Acceleration Features
+
+First-order differences of the interval sequence — how fast the sampling rhythm is changing:
+
+`interval_acceleration`$_i = \Delta t_i - \Delta t_{i-1}$
+
+Positive values mean gaps are growing (spacing out); negative values mean gaps are shrinking (bunching together).
+
+| Output Column | Description |
+|---------------|-------------|
+| `interval_acceleration` | Raw Δ(interval); null for the first two observations per entity |
+| `rolling_mean_acceleration_{n}` | Smoothed trend of acceleration over window `n` |
+| `rolling_abs_acceleration_{n}` | Rolling mean of \|acceleration\| — magnitude of rhythm change |
+| `rolling_std_acceleration_{n}` | Rolling std of acceleration — volatility of rhythm change |
+
+---
+
+### 6. Interaction Features
 
 ```python
 fg.add_interaction_features()                       # all variable_cols
@@ -197,6 +236,7 @@ All `cols` parameters accept a list of column names from `variable_cols`. When o
 | `add_window_features(cols, rolling_window_sizes, ewma_alphas, …)` | ✓ | `{var}_mask_rolling_*`, `{var}_mask_ewma_*` |
 | `add_interaction_features(cols)` | ✓ | `inter_*` pairwise features |
 | `add_row_imperfection_pct(cols)` | ✓ | `row_imperfection_pct` |
+| `add_irregularity_features(acceleration_window_size)` | — | `interval_seconds`, `interval_z_score`, `interval_cv_local`, `interval_acceleration`, `rolling_*_acceleration_*` |
 | `generate_all_features(…)` | ✓ (per step) | All of the above |
 
 ### `generate_all_features` parameters
@@ -216,6 +256,7 @@ Parameters are prefixed by feature set so the call site is self-documenting.
 | `window_replace_nulls_with_zero` | `True` | Replace nulls in window features |
 | `interaction_cols` | `None` | Columns for pairwise interaction features |
 | `row_imperfection_pct_cols` | `None` | Columns for row-level imperfection percentage |
+| `irregularity_window_size` | `5` | Rolling window size for acceleration features |
 
 ---
 
