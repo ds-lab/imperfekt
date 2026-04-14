@@ -107,7 +107,14 @@ def gap_lengths(
     Returns:
         Visualizations of gap and observation lengths for the specified variable.
     """
-    gaps = lengths_df.filter(pl.col("variable") == col)
+    gaps = lengths_df.filter(
+        (pl.col("variable") == col) & (pl.col("count_clock_no") > 0)
+    )
+
+    if gaps.is_empty():
+        if renderer:
+            pretty_printing.rich_info(f"Gap Lengths for {col}: no true gaps found (all observations are adjacent).")
+        return gaps, None
 
     if renderer:
         pretty_printing.rich_info(f"Gap Lengths for {col}: {gaps.describe(interpolation='linear')}")

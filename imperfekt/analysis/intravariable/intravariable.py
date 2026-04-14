@@ -285,20 +285,13 @@ class IntravariableImperfection:
             self.results.gs_gaps_df[c] = gaps_df
             self.results.plots.gs_gap_lengths_violin[c] = gap_length_violin
 
-            # Filter to true gaps only (count_clock_no > 0 means at least one
-            # imperfect value sits between two observations). count_clock_no == 0
-            # are plain inter-observation intervals — identical to what the
-            # Irregularity module analyzes — and should not be included here.
-            col_gaps = self.results.gs_gaps_observation_runs.filter(
-                (pl.col("variable") == c) & (pl.col("count_clock_no") > 0)
-            )
             self.results.gs_gap_dominant[c] = gap_statistics.compute_gap_dominant_length(
-                gaps_df=col_gaps,
+                gaps_df=gaps_df,
                 bin_resolution_seconds=bin_resolution_seconds,
                 adherence_tolerance=adherence_tolerance,
             )
             self.results.gs_gap_burstiness[c] = gap_statistics.compute_gap_burstiness(
-                gaps_df=col_gaps,
+                gaps_df=gaps_df,
                 id_col=self.id_col,
             )
 
@@ -774,12 +767,10 @@ class IntravariableImperfection:
                     _set("cs_n_entities_above_threshold", c, int(cs[thresh_col].sum()))
 
         # --- Gap statistics ---
-        if self.results.gs_gaps_observation_runs is not None:
+        if self.results.gs_gaps_df:
             for c in self.cols:
-                col_gaps = self.results.gs_gaps_observation_runs.filter(
-                    (pl.col("variable") == c) & (pl.col("count_clock_no") > 0)
-                )["time_length"].drop_nulls()
-                print(col_gaps)
+                gaps_frame = self.results.gs_gaps_df.get(c)
+                col_gaps = gaps_frame["time_length"].drop_nulls() if gaps_frame is not None else pl.Series("time_length", [], dtype=pl.Float64)
                 if col_gaps.len() > 0:
                     _set("gs_gap_length_mean_seconds", c, float(col_gaps.mean()))
                     _set("gs_gap_length_median_seconds", c, float(col_gaps.median()))
@@ -895,38 +886,77 @@ class IntravariableImperfection:
 
 
 if __name__ == "__main__":
-    df = pl.DataFrame(
-        [
-            ("1", "2023-01-01 13:15:00", 120.0, 15.0, None, 90.0, 0),
-            ("1", "2023-01-02 13:15:40", 130.0, 16.0, None, 90.0, 1),
-            ("2023_225617845", "2023-01-02 13:15:41", None, 16.0, 180.0, 90.0, 0),
-            ("2023_225617845", "2023-01-02 13:15:48", 129.0, None, None, 86.0, 1),
-            ("2023_225617845", "2023-01-02 13:17:50", 38.0, None, None, 96.0, 2),
-            ("2023_225617845", "2023-01-02 13:19:57", None, None, None, None, 3),
-            ("2023_225617845", "2023-01-02 13:20:47", 121.0, None, 193.0, 90.0, 4),
-            ("2023_225617845", "2023-01-02 13:22:19", None, None, None, None, 5),
-            ("2023_225617845", "2023-01-02 13:22:50", 120.0, None, None, 96.0, 6),
-        ],
-        schema=["patient", "time", "heartrate", "blood_pressure", "sbp", "o2sat", "clock_no"],
-        orient="row",
+    # -----------------------------------------------------------------------
+    # Verification dataset — all expected values are hand-calculable.
+    #
+    # Layout: 2 patients (A, B), 10 observations each, timestamps every 60 s.
+    # clock_no is the 0-based integer index within each patient.
+    #
+    # hr missingness (mask = 1 where None):
+    #   patient A: indices 2, 3, 7  → 3/10 = 30%
+    #     - gap at idx 2-3: 2 consecutive missing → gap_length = 3*60 = 180 s
+    #       (from obs at idx 1 to obs at idx 4, spanning 2 missing clock steps)
+    #     - gap at idx 7:   1 missing            → gap_length = 2*60 = 120 s
+    #   patient B: indices 1, 5, 6  → 3/10 = 30%
+    #     - gap at idx 1:   1 missing            → gap_length = 2*60 = 120 s
+    #     - gap at idx 5-6: 2 consecutive missing → gap_length = 3*60 = 180 s
+    #   hr true gaps (count_clock_no > 0): lengths = [180, 120, 120, 180] s
+    #     mean = 150 s, median = 150 s, min = 120 s, max = 180 s
+    #
+    # bp missingness:
+    #   patient A: index 5   → 1/10 = 10%  (gap_length = 2*60 = 120 s)
+    #   patient B: index 8   → 1/10 = 10%  (gap_length = 2*60 = 120 s)
+    #   bp true gaps: lengths = [120, 120] s  → mean = median = 120 s
+    #
+    # Markov chain for hr (A): sequence = 0,0,1,1,0,0,0,1,0,0
+    #   transitions 0→0: 5, 0→1: 2, 1→0: 1, 1→1: 1
+    #   P00 = 5/7, P01 = 2/7, P10 = 1/2, P11 = 1/2
+    #   steady state: π1 = P01/(P01+P10) = (2/7)/(2/7+1/2) = 4/11 ≈ 0.364
+    #
+    # cs_indicated_pct for hr: (3+3)/(10+10) = 6/20 = 30%
+    # cs_indicated_pct for bp: (1+1)/(10+10) = 2/20 = 10%
+    # -----------------------------------------------------------------------
+
+    from datetime import datetime
+
+    base_A = datetime(2023, 1, 1, 8, 0, 0)
+    base_B = datetime(2023, 1, 2, 8, 0, 0)
+    times_A = [base_A + timedelta(seconds=60 * i) for i in range(10)]
+    times_B = [base_B + timedelta(seconds=60 * i) for i in range(10)]
+
+    # hr: None at A[2,3,7] and B[1,5,6]
+    hr_A = [70.0, 72.0, None, None, 68.0, 74.0, 71.0, None, 69.0, 73.0]
+    hr_B = [65.0, None, 66.0, 67.0, 64.0, None, None, 63.0, 68.0, 65.0]
+
+    # bp: None at A[5] and B[8]
+    bp_A = [120.0, 118.0, 122.0, 119.0, 121.0, None, 117.0, 123.0, 120.0, 119.0]
+    bp_B = [115.0, 116.0, 114.0, 117.0, 115.0, 118.0, 116.0, 119.0, None, 114.0]
+
+    rows = (
+        [("A", times_A[i], hr_A[i], bp_A[i], i) for i in range(10)]
+        + [("B", times_B[i], hr_B[i], bp_B[i], i) for i in range(10)]
     )
-    df = df.with_columns(
-        [
-            pl.col("time").str.strptime(pl.Datetime, format="%Y-%m-%d %H:%M:%S"),
-        ]
+
+    df = pl.DataFrame(
+        rows,
+        schema=["patient", "time", "heartrate", "blood_pressure", "clock_no"],
+        orient="row",
     )
 
     intravariable_imperfection = IntravariableImperfection(
         df=df,
         id_col="patient",
         clock_col="time",
-        clock_no_col="time_no",
+        clock_no_col="clock_no",
         renderer=None,
-        save_path="test",
+        save_path=Path("test"),
         cols=["heartrate", "blood_pressure"],
     )
 
     intravariable_imperfection.run(save_results=True)
+
+    print("\n=== intravariable_summary.csv ===")
+    print(pl.read_csv("test/intravariable_summary.csv"))
 
     # Generate HTML report
     intravariable_imperfection.generate_html_report("test_report.html")
