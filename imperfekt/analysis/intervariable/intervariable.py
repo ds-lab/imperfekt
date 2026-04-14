@@ -144,7 +144,7 @@ class IntervariableImperfection:
 
         self.alpha = alpha
         # Result persistence
-        self.save_path = save_path
+        self.save_path = Path(save_path) if save_path else None
 
         # Plotting library
         if plot_library not in ["matplotlib", "plotly"]:
@@ -835,6 +835,11 @@ class IntervariableImperfection:
         except Exception as e:
             print(traceback.format_exc())
             print(f"🚩Error in asymmetric lagged cross-correlation analysis: {e}")
+        try:
+            self._build_summary(save_results=save_results)
+        except Exception as e:
+            print(traceback.format_exc())
+            print(f"🚩Error building intervariable summary: {e}")
 
     def generate_html_report(
         self, report_path: str = "intervariable_report.html", title: str = None
@@ -860,6 +865,91 @@ class IntervariableImperfection:
             return self.save_path / subpath
         return None
 
+    def _build_summary(self, save_results: bool = True) -> pl.DataFrame:
+        """Build a tall two-column (name / value) summary CSV from all sub-analysis results.
+
+        Written to <save_path>/intervariable_summary.csv when save_results is True
+        and self.save_path is set.
+
+        Returns:
+            pl.DataFrame with columns ["name", "value"] (both pl.Utf8).
+        """
+        rows: list[tuple[str, str | None]] = []
+
+        def _add(name: str, value) -> None:
+            rows.append((name, str(value) if value is not None else None))
+
+        # --- Row statistics ---
+        if self.results.rs_overall_statistics is not None:
+            try:
+                rs = self.results.rs_overall_statistics
+                _add("rs_indicated_vars_pct_mean", rs["indicated_vars_pct"].mean())
+                _add("rs_indicated_vars_pct_median", rs["indicated_vars_pct"].median())
+                _add("rs_indicated_vars_pct_p25", rs["indicated_vars_pct"].quantile(0.25, interpolation="nearest"))
+                _add("rs_indicated_vars_pct_p75", rs["indicated_vars_pct"].quantile(0.75, interpolation="nearest"))
+                _add("rs_indicated_vars_pct_max", rs["indicated_vars_pct"].max())
+            except Exception:
+                pass
+
+        # --- MCAR test ---
+        if self.results.mcar_results is not None:
+            try:
+                mcar_r = self.results.mcar_results["little_mcar_test"]
+                _add("mcar_test_statistic", mcar_r.get("test_statistic"))
+                _add("mcar_p_value", mcar_r.get("p_value"))
+                _add("mcar_cramers_v", mcar_r.get("cramers_v"))
+            except Exception:
+                pass
+
+        # --- MAR/MNAR test ---
+        if self.results.mar_mnar_results is not None:
+            try:
+                for row in self.results.mar_mnar_results.iter_rows(named=True):
+                    col = row["column"]
+                    _add(f"mar_mnar_{col}_lrt_statistic", row.get("lrt_statistic"))
+                    _add(f"mar_mnar_{col}_p_value", row.get("p_value"))
+                    auc_mar = row.get("auc_mar")
+                    auc_mnar = row.get("auc_mnar")
+                    auc_delta = (auc_mnar - auc_mar) if (auc_mar is not None and auc_mnar is not None) else None
+                    _add(f"mar_mnar_{col}_auc_delta", auc_delta)
+            except Exception:
+                pass
+
+        # --- Symmetric correlation (upper triangle only, col_i < col_j lexicographically) ---
+        if self.results.sc_chi2_intervariable_matrix is not None:
+            try:
+                for row in self.results.sc_chi2_intervariable_matrix.iter_rows(named=True):
+                    ci, cj = row["col_i"], row["col_j"]
+                    if ci < cj:
+                        _add(f"sc_{ci}__{cj}_cramers_v", row.get("cramer_v"))
+                        _add(f"sc_{ci}__{cj}_p_value", row.get("p_value"))
+            except Exception:
+                pass
+
+        # --- Asymmetric cross-correlation at lag 0 ---
+        if self.results.ac_asymmetric_crosscorrelation:
+            try:
+                for pair_key, ccf_df in self.results.ac_asymmetric_crosscorrelation.items():
+                    lag0_rows = ccf_df.filter(pl.col("lag") == 0)
+                    if not lag0_rows.is_empty():
+                        val = lag0_rows["crosscorr"][0]
+                        _add(f"ac_{pair_key}_lag0", val if val == val else None)  # NaN check
+            except Exception:
+                pass
+
+        # --- Metadata ---
+        _add("meta_alpha", self.alpha)
+
+        summary = pl.DataFrame(
+            {"name": [r[0] for r in rows], "value": [r[1] for r in rows]},
+            schema={"name": pl.Utf8, "value": pl.Utf8},
+        )
+
+        if self.save_path and save_results:
+            summary.write_csv(self.save_path / "intervariable_summary.csv")
+
+        return summary
+
     def _generate_clock_no_col(self):
         self.df = self.df.sort([self.id_col, self.clock_col])
         if self.clock_no_col not in self.df.columns:
@@ -869,33 +959,60 @@ class IntervariableImperfection:
 
 
 if __name__ == "__main__":
-    df = pl.DataFrame(
-        {
-            "patient": ["a", "a", "a", "a", "a", "c", "c"],
-            "time": [
-                "2023-01-01 00:00:00",
-                "2023-01-01 00:05:00",
-                "2023-01-01 00:10:00",
-                "2023-01-01 00:15:00",
-                "2023-01-01 00:20:00",
-                "2023-02-02 00:25:00",
-                "2023-02-01 00:30:00",
-            ],
-            "heartrate": [60, None, 70, 65, None, 80, None],
-            "blood_pressure": [120, 130, None, None, None, 135, None],
-        }
-    ).with_columns(
-        [
-            pl.col("time").str.strptime(pl.Datetime, format="%Y-%m-%d %H:%M:%S"),
-        ]
+    # -----------------------------------------------------------------------
+    # Verification dataset — all expected values are hand-calculable.
+    #
+    # Layout: 2 patients (A, B), 10 observations each at 60-second intervals.
+    #
+    # hr missingness:  A=[2,3,7], B=[1,5,6]  →  6/20 = 30%
+    # bp missingness:  A=[5],     B=[8]       →  2/20 = 10%
+    #
+    # Row-level indicated_vars (how many of {hr, bp} are missing each row):
+    #   A: rows 2,3 → hr only (1); row 5 → bp only (1); row 7 → hr only (1)
+    #   B: row 1 → hr only (1); rows 5,6 → hr only (1 each); row 8 → bp only (1)
+    #   All other rows → 0 missing
+    #   indicated_vars values: 8 rows with 1 missing, 12 rows with 0 missing
+    #   mean = 8/20 = 0.4,  median = 0.0,  p25 = 0.0,  p75 = 1.0,  max = 1
+    #   indicated_vars_pct: 8 rows at 50%, 12 rows at 0%
+    #   mean_pct = 20%,  median_pct = 0%
+    #
+    # Symmetric co-imperfection: hr and bp are never both missing in the same row
+    #   → chi2 = 0, cramers_v = 0, p_value = 1.0
+    #
+    # MCAR: with no co-occurrence, test_statistic should be near 0.
+    #
+    # Asymmetric lag-0: hr_imperfect_vs_bp_observed and bp_imperfect_vs_hr_observed
+    #   → rank-biserial correlation at lag 0 comparing bp/hr values in missing vs
+    #     observed rows; with the values chosen uniformly, expect near 0.
+    # -----------------------------------------------------------------------
+
+    from datetime import datetime
+    from pathlib import Path
+
+    base_A = datetime(2023, 1, 1, 8, 0, 0)
+    base_B = datetime(2023, 1, 2, 8, 0, 0)
+
+    from datetime import timedelta
+    times_A = [base_A + timedelta(seconds=60 * i) for i in range(10)]
+    times_B = [base_B + timedelta(seconds=60 * i) for i in range(10)]
+
+    # hr: None at A[2,3,7] and B[1,5,6]
+    hr_A = [70.0, 72.0, None, None, 68.0, 74.0, 71.0, None, 69.0, 73.0]
+    hr_B = [65.0, None, 66.0, 67.0, 64.0, None, None, 63.0, 68.0, 65.0]
+
+    # bp: None at A[5] and B[8]  — never co-missing with hr
+    bp_A = [120.0, 118.0, 122.0, 119.0, 121.0, None, 117.0, 123.0, 120.0, 119.0]
+    bp_B = [115.0, 116.0, 114.0, 117.0, 115.0, 118.0, 116.0, 119.0, None, 114.0]
+
+    rows = (
+        [("A", times_A[i], hr_A[i], bp_A[i], i) for i in range(10)]
+        + [("B", times_B[i], hr_B[i], bp_B[i], i) for i in range(10)]
     )
 
-    # Binary missingness mask
-    mask_df = df.with_columns(
-        [
-            pl.col("heartrate").is_null().cast(pl.Int8).alias("heartrate"),
-            pl.col("blood_pressure").is_null().cast(pl.Int8).alias("blood_pressure"),
-        ]
+    df = pl.DataFrame(
+        rows,
+        schema=["patient", "time", "heartrate", "blood_pressure", "clock_no"],
+        orient="row",
     )
 
     intervariable_imperfection = IntervariableImperfection(
@@ -905,8 +1022,11 @@ if __name__ == "__main__":
         clock_no_col="clock_no",
         cols=["heartrate", "blood_pressure"],
         renderer=None,
-        save_path="test",
+        save_path=Path("test"),
     )
     intervariable_imperfection.run(
         save_results=True, lagged_crosscorr_max_lag=5, asymmetric_analysis_max_lag=5
     )
+
+    print("\n=== intervariable_summary.csv ===")
+    print(pl.read_csv("test/intervariable_summary.csv"))
