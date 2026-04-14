@@ -65,6 +65,8 @@ IntravariableImperfection
     ├── cs_case_level_statistics: pl.DataFrame
     ├── gs_gaps_observation_runs: pl.DataFrame
     ├── gs_gaps_df: dict[str, pl.DataFrame]
+    ├── gs_gap_dominant: dict[str, pl.DataFrame]     # per-column dominant gap length summary
+    ├── gs_gap_burstiness: dict[str, pl.DataFrame]   # per-column gap burstiness summary
     ├── gr_gap_returns: pl.DataFrame
     ├── gr_gap_kruskal: dict
     ├── mc_markov_summary: dict
@@ -111,6 +113,13 @@ Analyzes the temporal structure of gaps (consecutive imperfect values) and the v
 
 **Library**: [Polars](https://docs.pola.rs/), [SciPy](https://docs.scipy.org/) [[1]](#references)
 
+#### Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `bin_resolution_seconds` | `60.0` | Bin width in seconds for dominant gap length detection |
+| `adherence_tolerance` | `0.5` | Fractional tolerance around the dominant gap for adherence rate |
+
 #### Gap Length Analysis
 
 Computes the duration between consecutive observed values:
@@ -120,6 +129,40 @@ $$
 $$
 
 Where $t$ represents timestamps of observed (non-imperfect) values.
+
+#### Dominant Gap Length
+
+Identifies the most frequently occurring gap duration using the same binning approach as the Irregularity module, enabling direct comparison between the two.
+
+Only rows with `count_clock_no > 0` are used — i.e. intervals where at least one imperfect value sits between two observations. Rows with `count_clock_no == 0` are adjacent observations with no imperfection between them; those are equivalent to the inter-observation intervals analyzed by the Irregularity module and are excluded here to avoid overlap.
+
+Gap lengths are discretised into bins of width `bin_resolution_seconds`. The bin with the highest count is the **dominant gap**.
+
+| Metric | Description |
+|--------|-------------|
+| `dominant_gap_seconds` | Centre of the most frequent gap-length bin |
+| `gap_adherence_rate` | Fraction of all gaps within $[\text{dominant} \times (1 - \text{tol}),\ \text{dominant} \times (1 + \text{tol})]$ |
+| `gap_normalized_entropy` | $H / \log_2(n_{\text{bins}}) \in [0, 1]$: 0 = all gaps equal length, 1 = maximally spread |
+
+#### Gap Burstiness
+
+Quantifies whether gaps arrive in clusters or are evenly spaced, using the B coefficient [[4]](#references):
+
+$$
+B = \frac{\sigma - \mu}{\sigma + \mu}
+$$
+
+Where $\mu$ and $\sigma$ are the mean and standard deviation of all gap lengths for the variable. Range: $[-1, 1]$.
+
+| Value | Interpretation |
+|-------|----------------|
+| $B = -1$ | Perfectly regular gaps (all equal length) |
+| $B = 0$ | Poisson-like (random arrival) |
+| $B > 0$ | Bursty gaps (clusters separated by long silences) |
+
+Requires at least 3 gaps; returns `null` otherwise.
+
+**Comparability with Irregularity module**: `gap_adherence_rate`, `gap_normalized_entropy`, and `gap_burstiness_coeff` use the same underlying computations as the Irregularity module's `adherence_rate`, `normalized_entropy`, and `burstiness_coeff`. This allows direct comparison of the observation-time rhythm (Irregularity) with the gap-length rhythm (Gap Statistics).
 
 #### Gap Return Analysis (MNAR Investigation)
 
@@ -348,6 +391,8 @@ analysis = IntravariableImperfection(
 # Run all analyses
 analysis.run(
     save_results=True,
+    bin_resolution_seconds=60.0,   # bin width for dominant gap detection
+    adherence_tolerance=0.5,       # tolerance around dominant gap for adherence rate
     window_size=timedelta(minutes=5),
     window_location="both",
 )
@@ -373,3 +418,6 @@ analysis.generate_html_report(
 
 3. **Wikipedia contributors.** Autocorrelation. *Wikipedia, The Free Encyclopedia*. https://en.wikipedia.org/wiki/Autocorrelation
    - Used for: Sample autocorrelation coefficient estimator formula.
+
+4. **Goh, K.-I., & Barabási, A.-L.** (2008). Burstiness and memory in complex systems. *EPL (Europhysics Letters)*, 81(4), 48002. https://doi.org/10.48550/arXiv.physics/0610233
+   - Used for: Burstiness coefficient $B = (\sigma - \mu) / (\sigma + \mu)$ applied to gap length distributions.

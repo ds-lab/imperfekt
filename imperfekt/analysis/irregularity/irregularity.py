@@ -425,6 +425,85 @@ class Irregularity:
 
         return self
 
+    # ------------------------------------------------------------------
+    # Summary CSV
+    # ------------------------------------------------------------------
+
+    def _build_summary(
+        self,
+        bin_resolution_seconds: float,
+        adherence_tolerance: float,
+    ) -> pl.DataFrame:
+        """
+        Assemble a single-row summary DataFrame from all completed analyses.
+
+        Columns (all global / cross-entity):
+            Interval statistics (pooled):
+                mean_seconds, median_seconds, q25_seconds, q75_seconds,
+                min_seconds, max_seconds
+            Dominant frequency:
+                dominant_interval_seconds, adherence_rate, n_adhering_intervals,
+                n_total_intervals, interval_entropy_bits, normalized_entropy,
+                n_unique_bins
+            Burstiness:
+                burstiness_coeff_global
+            Metadata:
+                bin_resolution_seconds, adherence_tolerance
+
+        Returns:
+            pl.DataFrame: One-row summary, or None if no results are available.
+        """
+        row: dict = {}
+
+        # --- Interval statistics (global describe table) ---
+        if self.results.ins_global_statistics is not None:
+            stats = self.results.ins_global_statistics
+            # describe() returns rows keyed by "statistic" column
+            stat_map = {
+                r["statistic"]: r["interval_seconds"]
+                for r in stats.to_dicts()
+            }
+            for stat_key, col_name in [
+                ("mean",   "mean_seconds"),
+                ("50%",    "median_seconds"),
+                ("25%",    "q25_seconds"),
+                ("75%",    "q75_seconds"),
+                ("min",    "min_seconds"),
+                ("max",    "max_seconds"),
+            ]:
+                row[col_name] = stat_map.get(stat_key)
+
+        # --- Dominant frequency ---
+        if self.results.domf_frequency_summary is not None:
+            domf = self.results.domf_frequency_summary.row(0, named=True)
+            for key in [
+                "dominant_interval_seconds",
+                "adherence_rate",
+                "n_adhering_intervals",
+                "n_total_intervals",
+                "interval_entropy_bits",
+                "normalized_entropy",
+                "n_unique_bins",
+            ]:
+                row[key] = domf.get(key)
+
+        # --- Burstiness (global) ---
+        if self.results.bu_global_burstiness is not None:
+            bu = self.results.bu_global_burstiness.row(0, named=True)
+            row["burstiness_coeff_global"] = bu.get("burstiness_coeff")
+
+        # --- Metadata ---
+        row["bin_resolution_seconds"] = bin_resolution_seconds
+        row["adherence_tolerance"] = adherence_tolerance
+
+        if not row:
+            return None
+
+        return pl.DataFrame({
+            "name": list(row.keys()),
+            "value": [str(v) if v is not None else None for v in row.values()],
+        })
+
     def run(
         self,
         save_results: bool = True,
@@ -433,7 +512,9 @@ class Irregularity:
         autocorrelation_lags: int = 20,
     ) -> "Irregularity":
         """
-        Run all irregularity analyses in sequence.
+        Run all irregularity analyses in sequence, then write a single-row
+        summary CSV (``irregularity_summary.csv``) that consolidates the key
+        quantified results across all sub-analyses.
 
         Parameters:
             save_results (bool): Whether to save results to save_path.
@@ -471,6 +552,25 @@ class Irregularity:
         except Exception as e:
             print(traceback.format_exc())
             pretty_printing.rich_error(f"Error in interval_autocorrelation: {e}")
+
+        # --- Final consolidated summary ---
+        try:
+            summary = self._build_summary(
+                bin_resolution_seconds=bin_resolution_seconds,
+                adherence_tolerance=adherence_tolerance,
+            )
+            if summary is not None:
+                if self.renderer:
+                    pretty_printing.rich_info(
+                        "Irregularity Summary — consolidated quantified results across all analyses."
+                    )
+                    print(summary)
+                if save_results and self.save_path:
+                    self.save_path.mkdir(parents=True, exist_ok=True)
+                    summary.write_csv(self.save_path / "irregularity_summary.csv")
+        except Exception as e:
+            print(traceback.format_exc())
+            pretty_printing.rich_error(f"Error building irregularity summary: {e}")
 
         return self
 

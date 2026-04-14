@@ -96,8 +96,11 @@ def kruskal_wallis_effect_size_ci(
         h_stat, _ = stats.kruskal(*groups)
         n_total = sum(len(group) for group in groups)
         k_groups = len(groups)
-        eta_sq = (h_stat - k_groups + 1) / (n_total - k_groups)
-        return eta_sq
+        if n_total <= k_groups:
+            raise ValueError(f"Total sample size ({n_total}) must be greater than the number of groups ({k_groups}).")
+        else:
+            eta_sq = (h_stat - k_groups + 1) / (n_total - k_groups)
+            return eta_sq
 
     # Calculate observed effect size
     eta_observed = eta_squared_kw(*groups)

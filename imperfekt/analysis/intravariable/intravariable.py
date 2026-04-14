@@ -10,7 +10,7 @@ from imperfekt.analysis.intravariable import (
     date_time_statistics,
     gap_statistics,
     markov_chain_summary,
-    windowed_significance,
+    windowed_significance
 )
 from imperfekt.analysis.utils import masking, pretty_printing, statistics_utils, visualization_utils
 
@@ -37,6 +37,8 @@ class IntravariableResults:
         self.cs_case_level_statistics: pl.DataFrame = None
         self.gs_gaps_observation_runs: pl.DataFrame = None
         self.gs_gaps_df: dict[str, pl.DataFrame] = {}
+        self.gs_gap_dominant: dict[str, pl.DataFrame] = {}
+        self.gs_gap_burstiness: dict[str, pl.DataFrame] = {}
         self.gr_gap_returns: pl.DataFrame = None
         self.gr_gap_kruskal: dict = {}
         self.mc_markov_summary: dict = {}
@@ -141,7 +143,7 @@ class IntravariableImperfection:
                 )
 
         # Result persistence
-        self.save_path = save_path
+        self.save_path = Path(save_path) if save_path else None
 
         # Plotting library
         if plot_library not in ["matplotlib", "plotly"]:
@@ -160,6 +162,8 @@ class IntravariableImperfection:
         self.ws_window_location = None
         self.gr_gap_and_return_bins = None
         self.ac_autocorrelation_lags = None
+        self.gs_bin_resolution_seconds = None
+        self.gs_adherence_tolerance = None
 
     def column_statistics(self, threshold: float = 5, save_results: bool = True):
         """Analyzes the completeness of each column in the DataFrame and generate visualizations.
@@ -231,18 +235,28 @@ class IntravariableImperfection:
 
         return self
 
-    def gap_statistics(self, save_results: bool = True):
+    def gap_statistics(
+        self,
+        save_results: bool = True,
+        bin_resolution_seconds: float = 60.0,
+        adherence_tolerance: float = 0.5,
+    ):
         """Analyzes gaps and observation lengths.
 
         Parameters:
             save_results (bool): Whether to save the results to files.
-            gap_and_return_bins (list): Bins for gap and return analysis.
+            bin_resolution_seconds (float): Bin width in seconds for dominant gap length detection.
+            adherence_tolerance (float): Fractional tolerance around the dominant gap for adherence rate.
 
         Returns:
             self: Returns the instance of IntravariableImperfection for method chaining. Updates the following attributes:
                 results.gs_gaps_observation_runs (pl.DataFrame): DataFrame containing gaps and observation lengths.
-                results.gap_returns (pl.DataFrame): DataFrame containing gaps and return values.
+                results.gs_gap_dominant (dict): Per-column dominant gap length summary.
+                results.gs_gap_burstiness (dict): Per-column gap burstiness summary.
         """
+        self.gs_bin_resolution_seconds = bin_resolution_seconds
+        self.gs_adherence_tolerance = adherence_tolerance
+
         # Get gap and observation runs (and lengths) for each column, shape: (id_col, variable, count_clock_no, time_length, run_start_clock, run_end_clock)
         self.results.gs_gaps_observation_runs = gap_statistics.analyze_gap_lengths(
             mask_df=self.mask,
@@ -270,6 +284,23 @@ class IntravariableImperfection:
             )
             self.results.gs_gaps_df[c] = gaps_df
             self.results.plots.gs_gap_lengths_violin[c] = gap_length_violin
+
+            # Filter to true gaps only (count_clock_no > 0 means at least one
+            # imperfect value sits between two observations). count_clock_no == 0
+            # are plain inter-observation intervals — identical to what the
+            # Irregularity module analyzes — and should not be included here.
+            col_gaps = self.results.gs_gaps_observation_runs.filter(
+                (pl.col("variable") == c) & (pl.col("count_clock_no") > 0)
+            )
+            self.results.gs_gap_dominant[c] = gap_statistics.compute_gap_dominant_length(
+                gaps_df=col_gaps,
+                bin_resolution_seconds=bin_resolution_seconds,
+                adherence_tolerance=adherence_tolerance,
+            )
+            self.results.gs_gap_burstiness[c] = gap_statistics.compute_gap_burstiness(
+                gaps_df=col_gaps,
+                id_col=self.id_col,
+            )
 
         return self
 
@@ -363,7 +394,7 @@ class IntravariableImperfection:
                 print(self.results.mc_markov_summary[c]["steady_state"])
 
             heatmap_fig = markov_chain_summary.plot_markov_heatmap(
-                P=self.results.mc_markov_summary[c]["transition_matrix"],
+                probs=self.results.mc_markov_summary[c]["transition_matrix"],
                 labels=self.results.mc_markov_summary[c]["labels"],
                 title=f"Markov Chain Transition Matrix for {c}",
                 save_path=self._path(f"{new_path_level_name}/{c}_markov_chain_heatmap.png"),
@@ -394,12 +425,14 @@ class IntravariableImperfection:
         """
         self.ac_autocorrelation_lags = lags
         new_path_level_name = "autocorrelation"
+        path = None
         if self.save_path and save_results:
             path = self.save_path / new_path_level_name
             path.mkdir(parents=True, exist_ok=True)
 
         for c in self.cols:
-            (path / c).mkdir(parents=True, exist_ok=True)
+            if path is not None:
+                (path / c).mkdir(parents=True, exist_ok=True)
             self.results.ac_autocorrelation[c] = autocorrelation.acf(
                 mask_df=self.mask,
                 col=c,
@@ -408,7 +441,7 @@ class IntravariableImperfection:
                 max_lag=lags,
                 seasonal_trend_decomposition=seasonal_trend_decomposition,
                 stl_period=stl_period,
-                save_path=self._path(f"{path}/{c}"),
+                save_path=self._path(f"{new_path_level_name}/{c}"),
                 save_results=save_results,
             )
 
@@ -422,7 +455,7 @@ class IntravariableImperfection:
                 title=f"Lagged Autocorrelation of Imperfection: {c}",
                 xaxis_title="Lag",
                 yaxis_title="Autocorrelation",
-                save_path=self._path(f"{path}/{c}/{c}_autocorrelation_plot.png"),
+                save_path=self._path(f"{new_path_level_name}/{c}/{c}_autocorrelation_plot.png"),
                 save_results=save_results,
                 renderer=self.renderer,
                 library=self.plot_library,
@@ -591,20 +624,24 @@ class IntravariableImperfection:
         self,
         save_results: bool = True,
         gap_and_return_bins: list = None,
+        bin_resolution_seconds: float = 60.0,
+        adherence_tolerance: float = 0.5,
         window_size: timedelta = timedelta(minutes=5),
         window_location: str = "both",
         autocorrelation_lags: int = 20,
     ):
         """
-        Run all analyses in sequence.
+        Run all analyses in sequence, then write a wide summary CSV
+        (``intravariable_summary.csv``) consolidating key quantified results
+        across all sub-analyses.
 
         Parameters:
             save_results (bool): Whether to save the results to files.
             gap_and_return_bins (list): Bins for gap and return analysis.
+            bin_resolution_seconds (float): Bin width for dominant gap length detection.
+            adherence_tolerance (float): Fractional tolerance for gap adherence rate.
             window_size (timedelta): Size of the temporal window for the analysis of observations around Imperfect values.
             window_location (str): Location of the temporal window ('before', 'after', 'both').
-            visualize_gaps_and_obs_lengths (bool): Whether to visualize gaps and observation lengths.
-            visualize_returns (bool): Whether to visualize gap and return values.
         """
         try:
             self.column_statistics(save_results=save_results)
@@ -612,7 +649,11 @@ class IntravariableImperfection:
             print(traceback.format_exc())
             pretty_printing.rich_error(f"Error in column analysis: {e}")
         try:
-            self.gap_statistics(save_results=save_results)
+            self.gap_statistics(
+                save_results=save_results,
+                bin_resolution_seconds=bin_resolution_seconds,
+                adherence_tolerance=adherence_tolerance,
+            )
         except Exception as e:
             print(traceback.format_exc())
             pretty_printing.rich_error(f"Error in gap analysis: {e}")
@@ -646,6 +687,179 @@ class IntravariableImperfection:
             print(traceback.format_exc())
             pretty_printing.rich_error(f"Error in autocorrelation analysis: {e}")
 
+        # --- Final consolidated summary ---
+        try:
+            summary = self._build_summary()
+            if summary is not None:
+                if self.renderer:
+                    pretty_printing.rich_info(
+                        "Intravariable Summary — consolidated quantified results across all analyses."
+                    )
+                    print(summary)
+                if save_results and self.save_path:
+                    self.save_path.mkdir(parents=True, exist_ok=True)
+                    summary.write_csv(self.save_path / "intravariable_summary.csv")
+        except Exception as e:
+            print(traceback.format_exc())
+            pretty_printing.rich_error(f"Error building intravariable summary: {e}")
+
+    # ------------------------------------------------------------------
+    # Summary CSV
+    # ------------------------------------------------------------------
+
+    def _build_summary(self) -> pl.DataFrame:
+        """
+        Assemble a wide summary DataFrame: one row per metric, one column per
+        analyzed variable, plus a leading 'name' column.
+
+        Rows (metric names):
+            Column statistics:
+                cs_indicated_count, cs_indicated_pct,
+                cs_entity_pct_mean, cs_entity_pct_std,
+                cs_entity_pct_min, cs_entity_pct_max,
+                cs_n_entities_above_threshold
+            Gap statistics:
+                gs_gap_length_mean_seconds, gs_gap_length_median_seconds,
+                gs_gap_length_min_seconds, gs_gap_length_max_seconds,
+                gs_dominant_gap_seconds, gs_gap_adherence_rate,
+                gs_gap_normalized_entropy, gs_gap_burstiness_coeff
+            Gap returns / KW:
+                gr_kw_statistic, gr_kw_p_value, gr_kw_effect_size,
+                gr_kw_ci_lower, gr_kw_ci_upper
+            Markov chain:
+                mc_p_obs_to_obs, mc_p_obs_to_imp,
+                mc_p_imp_to_obs, mc_p_imp_to_imp,
+                mc_steady_state_observed, mc_steady_state_imperfect
+            Windowed significance / MWU:
+                ws_mwu_u_stat, ws_mwu_p_val, ws_mwu_significance,
+                ws_mwu_effect_size,
+                ws_mwu_mean_near_imperfect, ws_mwu_mean_outside
+            Metadata (shared across all columns):
+                meta_bin_resolution_seconds, meta_adherence_tolerance,
+                meta_window_size_seconds, meta_window_location
+
+        Returns:
+            pl.DataFrame with columns ['name', col1, col2, ...], values as strings.
+        """
+        # metric_name -> {col: value}
+        rows: dict[str, dict] = {}
+
+        def _set(metric: str, col: str, value):
+            rows.setdefault(metric, {})[col] = str(value) if value is not None else None
+
+        # --- Column statistics ---
+        if self.results.cs_overall_statistics is not None:
+            for row in self.results.cs_overall_statistics.to_dicts():
+                c = row["column"]
+                if c not in self.cols:
+                    continue
+                _set("cs_indicated_count", c, row.get("indicated_count"))
+                _set("cs_indicated_pct", c, row.get("indicated_pct"))
+
+        if self.results.cs_case_level_statistics is not None:
+            cs = self.results.cs_case_level_statistics
+            for c in self.cols:
+                pct_col = f"{c}_indicated_pct"
+                thresh_col = next(
+                    (col for col in cs.columns if col.startswith(f"{c}_above_") and col.endswith("_threshold")),
+                    None,
+                )
+                if pct_col in cs.columns:
+                    vals = cs[pct_col].drop_nulls()
+                    _set("cs_entity_pct_mean", c, float(vals.mean()) if vals.len() > 0 else None)
+                    _set("cs_entity_pct_std", c, float(vals.std()) if vals.len() > 0 else None)
+                    _set("cs_entity_pct_min", c, float(vals.min()) if vals.len() > 0 else None)
+                    _set("cs_entity_pct_max", c, float(vals.max()) if vals.len() > 0 else None)
+                if thresh_col and thresh_col in cs.columns:
+                    _set("cs_n_entities_above_threshold", c, int(cs[thresh_col].sum()))
+
+        # --- Gap statistics ---
+        if self.results.gs_gaps_observation_runs is not None:
+            for c in self.cols:
+                col_gaps = self.results.gs_gaps_observation_runs.filter(
+                    (pl.col("variable") == c) & (pl.col("count_clock_no") > 0)
+                )["time_length"].drop_nulls()
+                print(col_gaps)
+                if col_gaps.len() > 0:
+                    _set("gs_gap_length_mean_seconds", c, float(col_gaps.mean()))
+                    _set("gs_gap_length_median_seconds", c, float(col_gaps.median()))
+                    _set("gs_gap_length_min_seconds", c, float(col_gaps.min()))
+                    _set("gs_gap_length_max_seconds", c, float(col_gaps.max()))
+
+        for c in self.cols:
+            dom = self.results.gs_gap_dominant.get(c)
+            if dom is not None:
+                d = dom.row(0, named=True)
+                _set("gs_dominant_gap_seconds", c, d.get("dominant_gap_seconds"))
+                _set("gs_gap_adherence_rate", c, d.get("gap_adherence_rate"))
+                _set("gs_gap_normalized_entropy", c, d.get("gap_normalized_entropy"))
+            bu = self.results.gs_gap_burstiness.get(c)
+            if bu is not None:
+                b = bu.row(0, named=True)
+                _set("gs_gap_burstiness_coeff", c, b.get("gap_burstiness_coeff"))
+
+        # --- Gap returns / KW ---
+        for c, kw in self.results.gr_gap_kruskal.items():
+            if kw is None:
+                continue
+            _set("gr_kw_statistic", c, kw.get("statistic"))
+            _set("gr_kw_p_value", c, kw.get("p_value"))
+            _set("gr_kw_effect_size", c, kw.get("effect_size"))
+            _set("gr_kw_ci_lower", c, kw.get("ci_lower"))
+            _set("gr_kw_ci_upper", c, kw.get("ci_upper"))
+
+        # --- Markov chain ---
+        for c, mc in self.results.mc_markov_summary.items():
+            if mc is None:
+                continue
+            tm = mc.get("transition_matrix")
+            ss = mc.get("steady_state")
+            if tm is not None:
+                _set("mc_p_obs_to_obs", c, float(tm[0, 0]))
+                _set("mc_p_obs_to_imp", c, float(tm[0, 1]))
+                _set("mc_p_imp_to_obs", c, float(tm[1, 0]))
+                _set("mc_p_imp_to_imp", c, float(tm[1, 1]))
+            if ss is not None:
+                _set("mc_steady_state_observed", c, float(ss[0]))
+                _set("mc_steady_state_imperfect", c, float(ss[1]))
+
+        # --- Windowed significance / MWU ---
+        if self.results.ws_mwu_result is not None and not self.results.ws_mwu_result.is_empty():
+            mwu_df = self.results.ws_mwu_result
+            for row in mwu_df.to_dicts():
+                c = row.get("column")
+                if c not in self.cols:
+                    continue
+                _set("ws_mwu_u_stat", c, row.get("u_stat"))
+                _set("ws_mwu_p_val", c, row.get("p_val"))
+                _set("ws_mwu_significance", c, row.get("significance"))
+                _set("ws_mwu_effect_size", c, row.get("effect_size"))
+                _set("ws_mwu_mean_near_imperfect", c, row.get("mean_group_1"))
+                _set("ws_mwu_mean_outside", c, row.get("mean_group_2"))
+
+        # --- Metadata (same value broadcast across all columns) ---
+        for metric, value in [
+            ("meta_bin_resolution_seconds", self.gs_bin_resolution_seconds),
+            ("meta_adherence_tolerance", self.gs_adherence_tolerance),
+            (
+                "meta_window_size_seconds",
+                self.ws_window_size.total_seconds() if self.ws_window_size else None,
+            ),
+            ("meta_window_location", self.ws_window_location),
+        ]:
+            for c in self.cols:
+                _set(metric, c, value)
+
+        if not rows:
+            return None
+
+        names = list(rows.keys())
+        data = {"name": names}
+        for c in self.cols:
+            data[c] = [rows[m].get(c) for m in names]
+
+        return pl.DataFrame(data)
+
     def generate_html_report(
         self, report_path: str = "intravariable_report.html", title: str = None
     ):
@@ -657,7 +871,7 @@ class IntravariableImperfection:
             self.save_path = Path(self.save_path)
             self.save_path.mkdir(parents=True, exist_ok=True)
 
-        from .html_report_generator import IntravariableHTMLReportGenerator
+        from imperfekt.analysis.intravariable.html_report_generator import IntravariableHTMLReportGenerator
 
         # Create report generator and generate report
         report_generator = IntravariableHTMLReportGenerator(self)
@@ -682,21 +896,21 @@ class IntravariableImperfection:
 
 if __name__ == "__main__":
     df = pl.DataFrame(
-        {
-            "patient": ["a", "a", "a", "a", "a", "c", "c"],
-            "time": [
-                "2023-01-01 00:00:00",
-                "2023-01-01 00:05:00",
-                "2023-01-01 00:10:00",
-                "2023-01-01 00:15:00",
-                "2023-01-01 00:20:00",
-                "2023-02-02 00:25:00",
-                "2023-02-01 00:30:00",
-            ],
-            "heartrate": [60, None, 70, 65, None, 80, None],
-            "blood_pressure": [120, 130, None, None, None, 135, None],
-        }
-    ).with_columns(
+        [
+            ("1", "2023-01-01 13:15:00", 120.0, 15.0, None, 90.0, 0),
+            ("1", "2023-01-02 13:15:40", 130.0, 16.0, None, 90.0, 1),
+            ("2023_225617845", "2023-01-02 13:15:41", None, 16.0, 180.0, 90.0, 0),
+            ("2023_225617845", "2023-01-02 13:15:48", 129.0, None, None, 86.0, 1),
+            ("2023_225617845", "2023-01-02 13:17:50", 38.0, None, None, 96.0, 2),
+            ("2023_225617845", "2023-01-02 13:19:57", None, None, None, None, 3),
+            ("2023_225617845", "2023-01-02 13:20:47", 121.0, None, 193.0, 90.0, 4),
+            ("2023_225617845", "2023-01-02 13:22:19", None, None, None, None, 5),
+            ("2023_225617845", "2023-01-02 13:22:50", 120.0, None, None, 96.0, 6),
+        ],
+        schema=["patient", "time", "heartrate", "blood_pressure", "sbp", "o2sat", "clock_no"],
+        orient="row",
+    )
+    df = df.with_columns(
         [
             pl.col("time").str.strptime(pl.Datetime, format="%Y-%m-%d %H:%M:%S"),
         ]

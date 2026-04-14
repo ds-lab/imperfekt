@@ -1,5 +1,7 @@
 import polars as pl
 
+from imperfekt.analysis.irregularity import burstiness as burstiness_module
+from imperfekt.analysis.irregularity import interval_statistics as interval_statistics_module
 from imperfekt.analysis.utils import pretty_printing, visualization_utils
 from imperfekt.analysis.utils.kruskal_wallis import perform_statistical_analysis
 
@@ -282,6 +284,99 @@ def gap_returns(
     return kw_result, gap_return_boxplot, pval_heatmap_fig, es_heatmap_fig
 
 
+############################################################
+#        Dominant Gap Length and Gap Burstiness            #
+############################################################
+
+
+def compute_gap_dominant_length(
+    gaps_df: pl.DataFrame,
+    bin_resolution_seconds: float = 60.0,
+    adherence_tolerance: float = 0.5,
+) -> pl.DataFrame:
+    """
+    Identify the modal gap length and quantify adherence and entropy.
+
+    Delegates to interval_statistics_module.compute_dominant_frequency() after
+    renaming 'time_length' → 'interval_seconds'. Null gap lengths are dropped.
+
+    Parameters:
+        gaps_df (pl.DataFrame): Rows for a single variable from gs_gaps_observation_runs,
+                                must contain a 'time_length' column (seconds, non-null > 0).
+        bin_resolution_seconds (float): Bin width in seconds for discretising gap lengths.
+        adherence_tolerance (float): Fractional tolerance around the modal bin.
+
+    Returns:
+        pl.DataFrame: Single-row summary with columns:
+            dominant_gap_seconds, dominant_gap_bin, gap_adherence_rate,
+            n_total_gaps, n_adhering_gaps, gap_entropy_bits,
+            gap_normalized_entropy, gap_n_unique_bins,
+            bin_resolution_seconds, adherence_tolerance.
+        Returns None if the input is empty after filtering nulls.
+    """
+    valid = gaps_df.filter(pl.col("time_length").is_not_null()).rename(
+        {"time_length": "interval_seconds"}
+    )
+    if valid.is_empty():
+        return None
+
+    summary, _ = interval_statistics_module.compute_dominant_frequency(
+        delta_t_df=valid,
+        bin_resolution_seconds=bin_resolution_seconds,
+        adherence_tolerance=adherence_tolerance,
+    )
+
+    return summary.rename({
+        "dominant_interval_seconds": "dominant_gap_seconds",
+        "dominant_interval_bin": "dominant_gap_bin",
+        "adherence_rate": "gap_adherence_rate",
+        "n_total_intervals": "n_total_gaps",
+        "n_adhering_intervals": "n_adhering_gaps",
+        "interval_entropy_bits": "gap_entropy_bits",
+        "normalized_entropy": "gap_normalized_entropy",
+        "n_unique_bins": "gap_n_unique_bins",
+    })
+
+
+def compute_gap_burstiness(
+    gaps_df: pl.DataFrame,
+    id_col: str = "id",
+) -> pl.DataFrame:
+    """
+    Compute the global burstiness coefficient over all gap lengths for one variable.
+
+    Delegates to burstiness_module.compute_global_burstiness() after renaming
+    'time_length' → 'interval_seconds'. Null gap lengths are dropped.
+
+    B = (std - mean) / (std + mean)  [Goh & Barabasi, 2008]
+    Range [-1, 1]: -1 = perfectly regular, 0 = Poisson, >0 = bursty.
+
+    Parameters:
+        gaps_df (pl.DataFrame): Rows for a single variable from gs_gaps_observation_runs,
+                                must contain 'time_length' and id_col columns.
+        id_col (str): Entity identifier column name.
+
+    Returns:
+        pl.DataFrame: Single-row summary with columns:
+            n_gaps, mean_gap_seconds, std_gap_seconds, gap_burstiness_coeff.
+        Returns None if the input is empty after filtering nulls.
+    """
+    valid = gaps_df.filter(pl.col("time_length").is_not_null()).rename(
+        {"time_length": "interval_seconds"}
+    )
+    if valid.is_empty():
+        return None
+
+    result = burstiness_module.compute_global_burstiness(valid, id_col=id_col)
+
+    return result.rename({
+        "n_intervals": "n_gaps",
+        "mean_interval": "mean_gap_seconds",
+        "std_interval": "std_gap_seconds",
+        "burstiness_coeff": "gap_burstiness_coeff",
+    })
+
+
 if __name__ == "__main__":
     pl.Config.set_tbl_cols(25)
     pl.Config.set_tbl_rows(20)
@@ -323,3 +418,6 @@ if __name__ == "__main__":
     print(result)
     kw_result, gap_return_boxplot, pval_heatmap_fig, es_heatmap_fig = gap_returns(result, col="dbp")
     print(kw_result)
+    
+    burstiness = compute_gap_burstiness(result.filter(pl.col("variable") == "dbp"))
+    print(burstiness)
