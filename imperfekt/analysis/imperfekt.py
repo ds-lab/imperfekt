@@ -5,6 +5,7 @@ import polars as pl
 from imperfekt.analysis.intervariable.intervariable import IntervariableImperfection
 from imperfekt.analysis.intravariable.intravariable import IntravariableImperfection
 from imperfekt.analysis.preliminary.preliminary import Preliminary
+from imperfekt.analysis.irregularity.irregularity import Irregularity
 from imperfekt.analysis.utils import masking, pretty_printing
 from imperfekt.analysis.utils.events import (
     calculate_event_percentage,
@@ -118,6 +119,15 @@ class Imperfekt:
             plot_library=self.plot_library,
             renderer=self.renderer,
         )
+        
+        self.irregularity = Irregularity(
+            df=self.df,
+            id_col=self.id_col,
+            clock_col=self.clock_col,
+            save_path=self.save_path / "irregularity" if self.save_path else None,
+            plot_library=self.plot_library,
+            renderer=self.renderer
+        )
 
         # Result Persistence
         self.group_results = {}
@@ -146,6 +156,7 @@ class Imperfekt:
             self.preliminary.describe_df(save_results=save_results).correlation(
                 save_results=save_results
             )
+            self.irregularity.interval_statistics(save_results=save_results)
             self.intravariable.column_statistics(save_results=save_results).gap_statistics(
                 save_results=save_results
             ).date_time_statistics(save_results=save_results)
@@ -157,6 +168,7 @@ class Imperfekt:
             pretty_printing.rich_info("Cheap mode analysis complete.")
         else:
             self.preliminary.run(save_results=save_results)
+            self.irregularity.run(save_results=save_results)
             self.intravariable.run(save_results=save_results)
             self.intervariable.run(save_results=save_results)
             pretty_printing.rich_info("Full analysis complete.")
