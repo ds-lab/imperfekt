@@ -1,7 +1,7 @@
 import traceback
 from pathlib import Path
 
-import matplotlib.pyplot as plt
+import numpy as np
 import polars as pl
 
 from imperfekt.analysis.intravariable import autocorrelation
@@ -21,16 +21,20 @@ class IrregularityPlots:
 class IrregularityResults:
     def __init__(self):
         # Interval statistics
-        self.ins_entity_statistics: pl.DataFrame = None
+        self.ins_case_statistics: pl.DataFrame = None
         self.ins_global_statistics: pl.DataFrame = None
         # Dominant frequency
         self.domf_frequency_summary: pl.DataFrame = None
         self.domf_bin_counts: pl.DataFrame = None
         # Burstiness
-        self.bu_entity_burstiness: pl.DataFrame = None
+        self.bu_case_burstiness: pl.DataFrame = None
         self.bu_global_burstiness: pl.DataFrame = None
         # Interval autocorrelation
         self.ia_autocorrelation: pl.DataFrame = None
+        # Case entropy and adherence
+        self.ea_case_entropy_adherence: pl.DataFrame = None
+        # Composite score
+        self.cs_case_scores: pl.DataFrame = None
         # Plots
         self.plots = IrregularityPlots()
 
@@ -92,14 +96,14 @@ class Irregularity:
 
     def _compute_intervals(self) -> pl.DataFrame:
         """
-        Compute and cache per-entity inter-observation intervals.
+        Compute and cache per-case inter-observation intervals.
 
         Handles both Datetime clock columns (intervals converted to seconds via
         .dt.total_seconds()) and numeric clock columns (intervals computed as
         a plain numeric difference, cast to Float64).
 
         The resulting "interval_seconds" column represents the gap between
-        consecutive observations. Null values (first observation per entity)
+        consecutive observations. Null values (first observation per case)
         and zero-length intervals (duplicate timestamps) are filtered out.
 
         Returns:
@@ -153,16 +157,16 @@ class Irregularity:
 
     def interval_statistics(self, save_results: bool = True) -> "Irregularity":
         """
-        Compute per-entity and global summary statistics of inter-observation intervals.
+        Compute per-case and global summary statistics of inter-observation intervals.
 
-        The coefficient of variation (CV = std / mean) per entity is the primary
+        The coefficient of variation (CV = std / mean) per case is the primary
         irregularity score: CV = 0 for a perfectly regular time grid, increasing
         values indicate increasing irregularity.
 
         Results stored in:
-            self.results.ins_entity_statistics  — one row per entity
+            self.results.ins_case_statistics  — one row per case
             self.results.ins_global_statistics  — describe()-style global summary
-            self.results.plots.ins_cv_violin    — violin plot of per-entity CV values
+            self.results.plots.ins_cv_violin    — violin plot of per-case CV values
 
         Parameters:
             save_results (bool): Whether to save CSVs and plots to save_path.
@@ -178,8 +182,8 @@ class Irregularity:
 
         delta_t_df = self._compute_intervals()
 
-        self.results.ins_entity_statistics = (
-            interval_statistics_module.compute_entity_interval_statistics(
+        self.results.ins_case_statistics = (
+            interval_statistics_module.compute_case_interval_statistics(
                 delta_t_df, id_col=self.id_col
             )
         )
@@ -189,27 +193,27 @@ class Irregularity:
 
         if self.renderer:
             pretty_printing.rich_info(
-                "Interval Statistics — Entity Level: "
-                "cv = std/mean per entity (0 = perfectly regular, higher = more irregular); "
+                "Interval Statistics — Case Level:"
+                "cv = std/mean per case (0 = perfectly regular, higher = more irregular); "
                 "iqr = spread of interval lengths."
             )
-            print(self.results.ins_entity_statistics.describe(interpolation="linear"))
+            print(self.results.ins_case_statistics.describe(interpolation="linear"))
             pretty_printing.rich_info(
                 "Interval Statistics — Global: pooled summary over all inter-observation intervals."
             )
             print(self.results.ins_global_statistics)
 
         if save_results and path:
-            self.results.ins_entity_statistics.write_csv(path / "entity_statistics.csv")
+            self.results.ins_case_statistics.write_csv(path / "case_statistics.csv")
             self.results.ins_global_statistics.write_csv(path / "global_statistics.csv")
 
         # Violin of CV values across entities (drop entities with NaN CV)
-        cv_df = self.results.ins_entity_statistics.filter(pl.col("cv").is_not_null())
+        cv_df = self.results.ins_case_statistics.filter(pl.col("cv").is_not_null())
         if cv_df.height > 0:
             cv_violin = visualization_utils.plot_violin(
                 cv_df,
                 y="cv",
-                title="Per-Entity Coefficient of Variation of Inter-Observation Intervals",
+                title="Per-Case Coefficient of Variation of Inter-Observation Intervals",
                 yaxis_title="CV (std / mean)",
                 library=self.plot_library,
                 renderer=self.renderer,
@@ -292,7 +296,7 @@ class Irregularity:
 
     def burstiness(self, save_results: bool = True) -> "Irregularity":
         """
-        Compute the burstiness coefficient B per entity and globally.
+        Compute the burstiness coefficient B per case and globally.
 
         B = (std - mean) / (std + mean)  [Goh & Barabasi, 2008]
         Range [-1, 1]: B = -1 perfectly regular, B = 0 Poisson, B > 0 bursty.
@@ -300,9 +304,9 @@ class Irregularity:
         Entities with fewer than 3 intervals receive NaN for burstiness_coeff.
 
         Results stored in:
-            self.results.bu_entity_burstiness    — one row per entity
+            self.results.bu_case_burstiness    — one row per case
             self.results.bu_global_burstiness    — single-row global summary
-            self.results.plots.bu_burstiness_violin — violin of entity B values
+            self.results.plots.bu_burstiness_violin — violin of case B values
 
         Parameters:
             save_results (bool): Whether to save CSVs and plots to save_path.
@@ -318,7 +322,7 @@ class Irregularity:
 
         delta_t_df = self._compute_intervals()
 
-        self.results.bu_entity_burstiness = burstiness_module.compute_burstiness_coefficient(
+        self.results.bu_case_burstiness = burstiness_module.compute_burstiness_coefficient(
             delta_t_df, id_col=self.id_col
         )
         self.results.bu_global_burstiness = burstiness_module.compute_global_burstiness(
@@ -326,23 +330,23 @@ class Irregularity:
         )
 
         if self.renderer:
-            pretty_printing.rich_info("Burstiness — Entity Level (B=1: bursty, B=-1: perfectly periodic):")
-            print(self.results.bu_entity_burstiness.describe(interpolation="linear"))
+            pretty_printing.rich_info("Burstiness — Case Level (B=1: bursty, B=-1: perfectly periodic):")
+            print(self.results.bu_case_burstiness.describe(interpolation="linear"))
             pretty_printing.rich_info("Burstiness — Global (B=1: bursty, B=-1: perfectly periodic):")
             print(self.results.bu_global_burstiness)
 
         if save_results and path:
-            self.results.bu_entity_burstiness.write_csv(path / "entity_burstiness.csv")
+            self.results.bu_case_burstiness.write_csv(path / "case_burstiness.csv")
             self.results.bu_global_burstiness.write_csv(path / "global_burstiness.csv")
 
-        b_df = self.results.bu_entity_burstiness.filter(
+        b_df = self.results.bu_case_burstiness.filter(
             pl.col("burstiness_coeff").is_not_null()
         )
         if b_df.height > 0:
             b_violin = visualization_utils.plot_violin(
                 b_df,
                 y="burstiness_coeff",
-                title="Per-Entity Burstiness Coefficient",
+                title="Per-Case Burstiness Coefficient",
                 yaxis_title="Burstiness Coefficient B",
                 library=self.plot_library,
                 renderer=self.renderer,
@@ -384,7 +388,7 @@ class Irregularity:
 
         delta_t_df = self._compute_intervals()
 
-        # Add a sequential integer index per entity to serve as clock_no_col for acf()
+        # Add a sequential integer index per case to serve as clock_no_col for acf()
         interval_no_col = "_interval_no"
         acf_input = delta_t_df.with_columns(
             pl.int_range(pl.len()).over(self.id_col).alias(interval_no_col)
@@ -425,6 +429,273 @@ class Irregularity:
 
         return self
 
+    def case_entropy_adherence(
+        self,
+        bin_resolution_seconds: float = 60.0,
+        adherence_tolerance: float = 0.5,
+        min_intervals: int = 2,
+        save_results: bool = True,
+    ) -> "Irregularity":
+        """
+        Compute per-case Shannon entropy and adherence rate of the interval distribution.
+
+        Entropy measures how spread out each case's own interval lengths are (0 = all
+        intervals in one bin = perfectly regular; 1 = maximally spread = maximally irregular).
+
+        Adherence measures how consistently each case follows *its own* dominant interval
+        rhythm — not the dataset-wide dominant. A patient with a unique but perfectly
+        consistent rhythm scores adherence = 1.0.
+
+        Results stored in:
+            self.results.ea_case_entropy_adherence  — one row per case
+
+        Parameters:
+            bin_resolution_seconds (float): Bin width in seconds for discretizing intervals.
+            adherence_tolerance (float): Fractional tolerance around each case's own dominant
+                                         interval. E.g. 0.5 means within [dominant*0.5, dominant*1.5].
+            min_intervals (int): Minimum intervals required to compute metrics. Entities below
+                                 this threshold receive NaN. Default 2.
+            save_results (bool): Whether to save CSV to save_path.
+
+        Returns:
+            self: Supports method chaining.
+        """
+        new_path_level_name = "case_entropy_adherence"
+        path = None
+        if self.save_path and save_results:
+            path = self.save_path / new_path_level_name
+            path.mkdir(parents=True, exist_ok=True)
+
+        delta_t_df = self._compute_intervals()
+
+        self.results.ea_case_entropy_adherence = (
+            interval_statistics_module.compute_case_interval_entropy_adherence(
+                delta_t_df,
+                id_col=self.id_col,
+                bin_resolution_seconds=bin_resolution_seconds,
+                adherence_tolerance=adherence_tolerance,
+                min_intervals=min_intervals,
+            )
+        )
+
+        if self.renderer:
+            pretty_printing.rich_info(
+                "Case Entropy & Adherence:"
+                "normalized_entropy = 0 (all intervals in one bin = regular) → 1 (maximally spread = irregular); "
+                "adherence_rate = fraction of intervals near each case's own dominant rhythm."
+            )
+            print(self.results.ea_case_entropy_adherence.describe(interpolation="linear"))
+
+        if save_results and path:
+            self.results.ea_case_entropy_adherence.write_csv(
+                path / "case_entropy_adherence.csv"
+            )
+
+        return self
+
+    def composite_score(
+        self,
+        bin_resolution_seconds: float = 60.0,
+        adherence_tolerance: float = 0.5,
+        min_intervals: int = 2,
+        weights: dict = None,
+        n_quantiles: int = 4,
+        save_results: bool = True,
+    ) -> "Irregularity":
+        """
+        Compute a composite irregularity score per case and assign quantile-based strata.
+
+        Combines three complementary per-case metrics:
+            - cv: magnitude of interval dispersion (from interval_statistics)
+            - burstiness_coeff: direction of dispersion — clustered vs. regular (from burstiness)
+            - normalized_entropy: distributional complexity (from case_entropy_adherence)
+
+        Each metric is Z-score standardized across entities (using only complete rows),
+        then averaged with optional weights to produce a composite_score. Entities are
+        assigned to Q1 (least irregular) … Qn (most irregular) quantile strata.
+
+        Requires interval_statistics() and burstiness() to have been run first.
+        If case_entropy_adherence() has already been run, reuses those results.
+
+        Results stored in:
+            self.results.cs_case_scores  — one row per case
+
+        Parameters:
+            bin_resolution_seconds (float): Bin width for entropy/adherence computation.
+            adherence_tolerance (float): Fractional tolerance for adherence_rate.
+            min_intervals (int): Minimum intervals for entropy/adherence computation.
+            weights (dict | None): Feature weights, e.g.
+                {"cv": 1.0, "burstiness_coeff": 1.0, "normalized_entropy": 1.0}.
+                None uses equal weights.
+            n_quantiles (int): Number of strata (default 4 → Q1…Q4).
+            save_results (bool): Whether to save case_scores.csv to save_path.
+
+        Returns:
+            self: Supports method chaining.
+        """
+        if self.results.ins_case_statistics is None:
+            raise ValueError(
+                "interval_statistics() must be run before composite_score(). "
+                "Call .interval_statistics() first or use .run()."
+            )
+        if self.results.bu_case_burstiness is None:
+            raise ValueError(
+                "burstiness() must be run before composite_score(). "
+                "Call .burstiness() first or use .run()."
+            )
+
+        new_path_level_name = "composite_score"
+        path = None
+        if self.save_path and save_results:
+            path = self.save_path / new_path_level_name
+            path.mkdir(parents=True, exist_ok=True)
+
+        # Reuse entropy/adherence if already computed, otherwise compute now
+        if self.results.ea_case_entropy_adherence is not None:
+            entropy_df = self.results.ea_case_entropy_adherence
+        else:
+            delta_t_df = self._compute_intervals()
+            entropy_df = interval_statistics_module.compute_case_interval_entropy_adherence(
+                delta_t_df,
+                id_col=self.id_col,
+                bin_resolution_seconds=bin_resolution_seconds,
+                adherence_tolerance=adherence_tolerance,
+                min_intervals=min_intervals,
+            )
+
+        id_col = self.id_col
+
+        # Join the three feature sources on id
+        scores = (
+            self.results.ins_case_statistics
+            .select([id_col, "cv"])
+            .join(
+                self.results.bu_case_burstiness.select([id_col, "burstiness_coeff"]),
+                on=id_col,
+                how="left",
+            )
+            .join(
+                entropy_df.select([id_col, "normalized_entropy", "adherence_rate"]),
+                on=id_col,
+                how="left",
+            )
+        )
+
+        # Z-score standardize each feature using only complete rows
+        feature_cols = ["cv", "burstiness_coeff", "normalized_entropy"]
+        complete_mask = (
+            pl.col("cv").is_not_null()
+            & pl.col("burstiness_coeff").is_not_null()
+            & pl.col("normalized_entropy").is_not_null()
+        )
+        complete_df = scores.filter(complete_mask)
+
+        feature_stats = {}
+        for col in feature_cols:
+            vals = complete_df[col].to_numpy()
+            feature_stats[col] = {
+                "mean": float(np.nanmean(vals)),
+                "std": float(np.nanstd(vals, ddof=1)),
+            }
+
+        z_exprs = []
+        for col in feature_cols:
+            mean_val = feature_stats[col]["mean"]
+            std_val = feature_stats[col]["std"]
+            z_col = f"_z_{col}"
+            if std_val == 0.0 or np.isnan(std_val):
+                # Cannot meaningfully standardize: all complete entities share the
+                # same value (std=0) or there is only one complete entity (std=NaN).
+                # Emit None so the composite score is also None rather than 0.
+                z_exprs.append(pl.lit(None).cast(pl.Float64).alias(z_col))
+            else:
+                z_exprs.append(
+                    pl.when(pl.col(col).is_not_null())
+                    .then((pl.col(col) - mean_val) / std_val)
+                    .otherwise(None)
+                    .alias(z_col)
+                )
+        scores = scores.with_columns(z_exprs)
+
+        # Weighted composite score (explicit accumulation to avoid sum() initial-value issue)
+        if weights is None:
+            weights = {"cv": 1.0, "burstiness_coeff": 1.0, "normalized_entropy": 1.0}
+        total_weight = sum(weights.values())
+
+        composite_expr = pl.lit(0.0)
+        for col, w in weights.items():
+            composite_expr = composite_expr + pl.col(f"_z_{col}") * (w / total_weight)
+
+        scores = scores.with_columns(
+            pl.when(
+                pl.col("_z_cv").is_not_null()
+                & pl.col("_z_burstiness_coeff").is_not_null()
+                & pl.col("_z_normalized_entropy").is_not_null()
+            )
+            .then(composite_expr)
+            .otherwise(None)
+            .alias("composite_score")
+        )
+
+        # Quantile stratification — clamp n_quantiles to available scored entities
+        non_null_scores = (
+            scores.filter(pl.col("composite_score").is_not_null())["composite_score"].to_numpy()
+        )
+
+        effective_quantiles = min(n_quantiles, len(non_null_scores))
+
+        if effective_quantiles >= 2:
+            quantile_bounds = np.quantile(
+                non_null_scores,
+                q=[i / effective_quantiles for i in range(1, effective_quantiles)],
+            )
+
+            def assign_stratum(score_val) -> str:
+                if score_val is None or (isinstance(score_val, float) and np.isnan(score_val)):
+                    return None
+                for q_idx, bound in enumerate(quantile_bounds):
+                    if score_val <= bound:
+                        return f"Q{q_idx + 1}"
+                return f"Q{effective_quantiles}"
+
+            stratum_values = [assign_stratum(v) for v in scores["composite_score"].to_list()]
+        else:
+            stratum_values = [
+                "Q1" if v is not None else None
+                for v in scores["composite_score"].to_list()
+            ]
+
+        scores = scores.with_columns(
+            pl.Series(name="irregularity_stratum", values=stratum_values, dtype=pl.Utf8)
+        )
+
+        # Drop internal z-score columns and finalize
+        drop_cols = [f"_z_{c}" for c in feature_cols]
+        scores = scores.drop(drop_cols).select([
+            id_col,
+            "cv",
+            "burstiness_coeff",
+            "normalized_entropy",
+            "adherence_rate",
+            "composite_score",
+            "irregularity_stratum",
+        ])
+
+        self.results.cs_case_scores = scores
+
+        if self.renderer:
+            pretty_printing.rich_info(
+                "Composite Irregularity Score: "
+                "composite_score = weighted Z-score average of cv, burstiness_coeff, normalized_entropy; "
+                f"irregularity_stratum = Q1 (least irregular) … Q{n_quantiles} (most irregular)."
+            )
+            print(self.results.cs_case_scores.describe(interpolation="linear"))
+
+        if save_results and path:
+            self.results.cs_case_scores.write_csv(path / "case_scores.csv")
+
+        return self
+
     # ------------------------------------------------------------------
     # Summary CSV
     # ------------------------------------------------------------------
@@ -437,7 +708,7 @@ class Irregularity:
         """
         Assemble a single-row summary DataFrame from all completed analyses.
 
-        Columns (all global / cross-entity):
+        Columns (all global / cross-case):
             Interval statistics (pooled):
                 mean_seconds, median_seconds, q25_seconds, q75_seconds,
                 min_seconds, max_seconds
@@ -491,6 +762,16 @@ class Irregularity:
         if self.results.bu_global_burstiness is not None:
             bu = self.results.bu_global_burstiness.row(0, named=True)
             row["burstiness_coeff_global"] = bu.get("burstiness_coeff")
+
+        # --- Composite score (global aggregates) ---
+        if self.results.cs_case_scores is not None:
+            cs = self.results.cs_case_scores
+            non_null_cs = cs.filter(pl.col("composite_score").is_not_null())["composite_score"]
+            row["mean_composite_score"] = float(non_null_cs.mean()) if non_null_cs.len() > 0 else None
+            row["std_composite_score"] = float(non_null_cs.std()) if non_null_cs.len() > 1 else None
+            row["n_quantiles"] = int(
+                cs.filter(pl.col("irregularity_stratum").is_not_null())["irregularity_stratum"].n_unique()
+            )
 
         # --- Metadata ---
         row["bin_resolution_seconds"] = bin_resolution_seconds
@@ -553,6 +834,26 @@ class Irregularity:
             print(traceback.format_exc())
             pretty_printing.rich_error(f"Error in interval_autocorrelation: {e}")
 
+        try:
+            self.case_entropy_adherence(
+                bin_resolution_seconds=bin_resolution_seconds,
+                adherence_tolerance=adherence_tolerance,
+                save_results=save_results,
+            )
+        except Exception as e:
+            print(traceback.format_exc())
+            pretty_printing.rich_error(f"Error in case_entropy_adherence: {e}")
+
+        try:
+            self.composite_score(
+                bin_resolution_seconds=bin_resolution_seconds,
+                adherence_tolerance=adherence_tolerance,
+                save_results=save_results,
+            )
+        except Exception as e:
+            print(traceback.format_exc())
+            pretty_printing.rich_error(f"Error in composite_score: {e}")
+
         # --- Final consolidated summary ---
         try:
             summary = self._build_summary(
@@ -578,18 +879,47 @@ class Irregularity:
 if __name__ == "__main__":
     df = pl.DataFrame(
         {
-            "id": ["a", "a", "a", "a", "a", "c", "c"],
+            "id": [
+                "a", "a", "a", "a", "a",
+                "b", "b", "b", "b", "b",
+                "c", "c", "c", "c", "c",
+                "d", "d",
+            ],
             "clock": [
+                # a — irregular gaps (bursty)
                 "2023-01-01 00:00:00",
                 "2023-01-01 00:02:00",
                 "2023-01-01 00:10:00",
                 "2023-01-01 00:15:00",
                 "2023-01-01 00:20:00",
+                # b — very regular, 5-minute cadence
+                "2023-01-01 00:00:00",
+                "2023-01-01 00:05:00",
+                "2023-01-01 00:10:00",
+                "2023-01-01 00:15:00",
+                "2023-01-01 00:20:00",
+                # c — moderately irregular (evenly spaced but not perfectly so)
+                "2023-01-01 00:00:00",
+                "2023-01-01 00:04:00",
+                "2023-01-01 00:07:00",
+                "2023-01-01 00:11:00",
+                "2023-01-01 00:16:00",
+                # d — only 2 observations, too few for burstiness → no composite score
                 "2023-02-02 00:25:00",
                 "2023-02-02 00:30:00",
             ],
-            "heartrate": [60, None, 70, 65, None, 80, None],
-            "blood_pressure": [120, 130, None, None, None, 135, None],
+            "heartrate": [
+                60, None, 70, 65, None,
+                72, 74, 71, 73, 70,
+                80, None, 85, 82, None,
+                90, None,
+            ],
+            "blood_pressure": [
+                120, 130, None, None, None,
+                118, 120, 119, 121, 117,
+                135, 140, None, None, None,
+                125, None,
+            ],
         }
     ).with_columns(
         [

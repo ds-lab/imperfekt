@@ -11,7 +11,7 @@ def compute_burstiness_coefficient(
     id_col: str = "id",
 ) -> pl.DataFrame:
     """
-    Compute the burstiness coefficient B per entity.
+    Compute the burstiness coefficient B per case.
 
     B = (std - mean) / (std + mean)  (Goh & Barabasi, 2006)
     Range: [-1, 1]
@@ -19,18 +19,18 @@ def compute_burstiness_coefficient(
         B =  0  Poisson process (random)
         B >  0  bursty (clusters of events separated by long gaps)
 
-    Entities with fewer than 3 intervals receive NaN for std and burstiness_coeff.
+    Cases with fewer than 3 intervals receive NaN for std and burstiness_coeff.
 
     Parameters:
         delta_t_df (pl.DataFrame): DataFrame with [id_col, ..., "interval_seconds"],
                                    one row per interval (not-null, > 0).
-        id_col (str): Entity identifier column.
+        id_col (str): Case identifier column.
 
     Returns:
-        pl.DataFrame: One row per entity with columns:
+        pl.DataFrame: One row per case with columns:
             id, n_intervals, mean_interval, std_interval, burstiness_coeff.
     """
-    entity_stats = (
+    case_stats = (
         delta_t_df
         .group_by(id_col)
         .agg(
@@ -54,11 +54,11 @@ def compute_burstiness_coefficient(
         .sort(id_col)
     )
 
-    # Preserve entities that have 0 intervals (single-observation entities)
-    all_entities = delta_t_df.select(pl.col(id_col).unique()).sort(id_col)
-    entity_stats = all_entities.join(entity_stats, on=id_col, how="left")
+    # Preserve cases that have 0 intervals (single-observation cases)
+    all_cases = delta_t_df.select(pl.col(id_col).unique()).sort(id_col)
+    case_stats = all_cases.join(case_stats, on=id_col, how="left")
 
-    return entity_stats
+    return case_stats
 
 
 def compute_global_burstiness(
@@ -67,8 +67,8 @@ def compute_global_burstiness(
 ) -> pl.DataFrame:
     """
     Compute the burstiness coefficient B over all pooled inter-observation intervals,
-    restricted to entities that have at least 3 intervals (the same threshold used at
-    the entity level). Entities with fewer than 3 intervals are excluded because their
+    restricted to cases that have at least 3 intervals (the same threshold used at
+    the case level). Cases with fewer than 3 intervals are excluded because their
     rhythm cannot be reliably characterised individually, and including their sparse
     intervals would distort the global estimate.
 
@@ -80,7 +80,7 @@ def compute_global_burstiness(
 
     Parameters:
         delta_t_df (pl.DataFrame): DataFrame with columns [id_col, ..., "interval_seconds"].
-        id_col (str): Entity identifier column.
+        id_col (str): Case identifier column.
 
     Returns:
         pl.DataFrame: Single-row DataFrame with columns:
