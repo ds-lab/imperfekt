@@ -177,7 +177,7 @@ def compute_irregularity_strata(ts_df: pl.DataFrame) -> pl.DataFrame:
         clock_col="charttime",
         save_path=strata_dir,
     )
-    ireg.run(save_results=True)
+    ireg.run(save_results=True, n_strata_quantiles=8)
     return ireg.results.cs_case_scores.select(
         ["stay_id", "irregularity_stratum", "composite_score"]
     )
@@ -192,8 +192,10 @@ def _compute_metrics(y_true: np.ndarray, y_proba: np.ndarray) -> dict | None:
     brier = brier_score_loss(y_true, y_proba)
     brier_ref = prevalence * (1 - prevalence)
     bss = 1.0 - brier / brier_ref if brier_ref > 0 else float("nan")
+    auprc = average_precision_score(y_true, y_proba)
     return {
-        "auprc": average_precision_score(y_true, y_proba),
+        "auprc": auprc,
+        "auprc_lift": auprc / prevalence,
         "auroc": roc_auc_score(y_true, y_proba),
         "brier": brier,
         "brier_skill_score": bss,
@@ -301,7 +303,7 @@ def summarise_cv(fold_metrics: dict[str, list], pipeline_name: str) -> dict[str,
 
     summary = {}
     for key, folds in fold_metrics.items():
-        for metric in ("auprc", "auroc", "brier_skill_score"):
+        for metric in ("auprc", "auprc_lift", "auroc", "brier_skill_score"):
             vals = np.array([f[metric] for f in folds if not np.isnan(f[metric])])
             if len(vals) == 0:
                 continue
@@ -326,9 +328,25 @@ def summarise_cv(fold_metrics: dict[str, list], pipeline_name: str) -> dict[str,
 
 # ── plotting ──────────────────────────────────────────────────────────────────
 
+def _stratum_prevalence_labels(strata: pl.DataFrame, stay_df: pl.DataFrame) -> dict[str, str]:
+    """Return {stratum: "Q1 (46%)"} using outcome prevalence per stratum."""
+    outcome = stay_df.select(["stay_id", OUTCOME_COL]).unique("stay_id", keep="first")
+    joined = strata.join(outcome, on="stay_id", how="left").drop_nulls("irregularity_stratum")
+    summary = (
+        joined.group_by("irregularity_stratum")
+        .agg(pl.col(OUTCOME_COL).mean().alias("prevalence"))
+        .sort("irregularity_stratum")
+    )
+    return {
+        row["irregularity_stratum"]: f"{row['irregularity_stratum']} ({row['prevalence']:.0%})"
+        for row in summary.iter_rows(named=True)
+    }
+
+
 def plot_auprc_by_stratum(
     pipeline_summaries: list[tuple[str, dict[str, dict]]],
     save_path: Path,
+    stratum_labels: dict[str, str] | None = None,
 ) -> None:
     """
     Line plot: mean AUPRC per irregularity stratum (Q1→Qn, sorted by
@@ -374,12 +392,70 @@ def plot_auprc_by_stratum(
             ax.axhline(overall["mean"], color=color, linestyle=":", linewidth=0.8, alpha=0.5)
 
     ax.set_xticks(x)
-    ax.set_xticklabels(strata_keys)
-    ax.set_xlabel("Irregularity stratum (Q1 = most regular)")
+    ax.set_xticklabels([stratum_labels.get(k, k) if stratum_labels else k for k in strata_keys])
+    ax.set_xlabel("Irregularity stratum — prevalence of outcome (Q1 = most regular)")
     ax.set_ylabel("AUPRC (mean ± 95% CI)")
     ax.set_ylim(0, 1)
     ax.legend()
     ax.set_title(f"AUPRC by irregularity stratum ({CV_N_SPLITS}×{CV_N_REPEATS} CV)")
+    fig.tight_layout()
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(save_path, format="svg")
+    plt.close(fig)
+    print(f"Plot saved to {save_path}")
+
+
+def plot_auprc_lift_by_stratum(
+    pipeline_summaries: list[tuple[str, dict[str, dict]]],
+    save_path: Path,
+    stratum_labels: dict[str, str] | None = None,
+) -> None:
+    """
+    Line plot: mean AUPRC lift (AUPRC / prevalence) per irregularity stratum.
+    Lift > 1 means the model beats the no-skill baseline within that stratum.
+    Reference line at lift = 1 (no-skill).
+    """
+    strata_keys = sorted({
+        k
+        for _, summary in pipeline_summaries
+        for k in summary
+        if k != "overall"
+    })
+
+    def _vals(summary):
+        means, lo, hi = [], [], []
+        for k in strata_keys:
+            v = summary.get(k, {}).get("auprc_lift")
+            if v:
+                means.append(v["mean"])
+                lo.append(v["mean"] - v["ci"])
+                hi.append(v["mean"] + v["ci"])
+            else:
+                means.append(float("nan"))
+                lo.append(float("nan"))
+                hi.append(float("nan"))
+        return np.array(means), np.array(lo), np.array(hi)
+
+    x = np.arange(len(strata_keys))
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    colors = ["#4C72B0", "#DD8452", "#55A868"]
+
+    ax.axhline(1.0, color="black", linestyle="--", linewidth=0.8, label="No-skill baseline")
+
+    for idx, (label, summary) in enumerate(pipeline_summaries):
+        color = colors[idx % len(colors)]
+        mean, lo, hi = _vals(summary)
+        ax.plot(x, mean, marker="o", color=color, label=label)
+        ax.plot(x, lo, linestyle="--", color=color, linewidth=0.8, alpha=0.6)
+        ax.plot(x, hi, linestyle="--", color=color, linewidth=0.8, alpha=0.6)
+        ax.fill_between(x, lo, hi, color=color, alpha=0.1)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels([stratum_labels.get(k, k) if stratum_labels else k for k in strata_keys])
+    ax.set_xlabel("Irregularity stratum — prevalence of outcome (Q1 = most regular)")
+    ax.set_ylabel("AUPRC lift = AUPRC / prevalence (mean ± 95% CI)")
+    ax.legend()
+    ax.set_title(f"AUPRC lift by irregularity stratum ({CV_N_SPLITS}×{CV_N_REPEATS} CV)")
     fig.tight_layout()
     save_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(save_path, format="svg")
@@ -408,6 +484,7 @@ def _plot_group_importance_by_stratum(
     strata: pl.DataFrame,
     save_path: Path,
     pipeline_name: str,
+    stratum_labels: dict[str, str] | None = None,
 ) -> None:
     joined = fractions_df.join(
         strata.select(["stay_id", "irregularity_stratum"]),
@@ -443,7 +520,7 @@ def _plot_group_importance_by_stratum(
     ax.set_ylabel("Relative feature importance (%)")
     ax.set_xlabel("Irregularity stratum")
     ax.set_xticks(x)
-    ax.set_xticklabels(labels)
+    ax.set_xticklabels([stratum_labels.get(l, l) if stratum_labels else l for l in labels])
     ax.set_title(f"{pipeline_name}: Absolute SHAP group importance by stratum")
     ax.legend(loc="upper right")
     fig.tight_layout()
@@ -523,6 +600,7 @@ def run_shap_group_analysis(
     feature_cols: list[str],
     pipeline_name: str,
     include_bonus_q1_q4: bool = True,
+    stratum_labels: dict[str, str] | None = None,
 ) -> None:
     if X_test.shape[0] == 0 or test_stay_df.height == 0:
         print(f"[{pipeline_name}] Skipping SHAP: empty final-fold test data.")
@@ -591,6 +669,7 @@ def run_shap_group_analysis(
         strata=strata,
         save_path=RESULTS_DIR / "figures" / f"shap_group_importance_{pipeline_name}.svg",
         pipeline_name=pipeline_name,
+        stratum_labels=stratum_labels,
     )
 
     if include_bonus_q1_q4:
@@ -616,7 +695,19 @@ def main() -> None:
 
     print("\nComputing irregularity strata on full dataset (fixed across all folds)…")
     strata = compute_irregularity_strata(ts_df)
-    print(strata.group_by("irregularity_stratum").len().sort("irregularity_stratum"))
+    stay_outcomes = ts_df.select(["stay_id", OUTCOME_COL]).unique("stay_id", keep="first")
+    prevalence_by_stratum = (
+        strata.join(stay_outcomes, on="stay_id", how="left")
+        .drop_nulls("irregularity_stratum")
+        .group_by("irregularity_stratum")
+        .agg(
+            pl.col(OUTCOME_COL).mean().alias("prevalence"),
+            pl.len().alias("count"),
+        )
+        .sort("irregularity_stratum")
+    )
+    print(prevalence_by_stratum)
+    stratum_labels = _stratum_prevalence_labels(strata, ts_df)
 
     print("\nBuilding stay-level feature frames…")
     stay_a = build_stay_level(ts_df, pipeline_a_features)
@@ -642,13 +733,20 @@ def main() -> None:
     summary_c = summarise_cv(folds_c, "PipelineC")
 
     print("\nPlotting AUPRC by stratum…")
+    pipeline_summaries = [
+        ("Pipeline A (resampled)", summary_a),
+        ("Pipeline B (imperfekt)", summary_b),
+        ("Pipeline C (raw->resampled imperfekt)", summary_c),
+    ]
     plot_auprc_by_stratum(
-        [
-            ("Pipeline A (resampled)", summary_a),
-            ("Pipeline B (imperfekt)", summary_b),
-            ("Pipeline C (raw->resampled imperfekt)", summary_c),
-        ],
+        pipeline_summaries,
         RESULTS_DIR / "figures" / "auprc_by_stratum.svg",
+        stratum_labels=stratum_labels,
+    )
+    plot_auprc_lift_by_stratum(
+        pipeline_summaries,
+        RESULTS_DIR / "figures" / "auprc_lift_by_stratum.svg",
+        stratum_labels=stratum_labels,
     )
 
     print("\nComputing SHAP group-importance analysis for Pipeline B (last CV fold)…")
@@ -661,6 +759,7 @@ def main() -> None:
             feature_cols=feat_cols_b,
             pipeline_name="PipelineB",
             include_bonus_q1_q4=True,
+            stratum_labels=stratum_labels,
         )
     else:
         print("Skipping SHAP for Pipeline B: no final-fold artifacts available.")
@@ -675,6 +774,7 @@ def main() -> None:
             feature_cols=feat_cols_c,
             pipeline_name="PipelineC",
             include_bonus_q1_q4=True,
+            stratum_labels=stratum_labels,
         )
     else:
         print("Skipping SHAP for Pipeline C: no final-fold artifacts available.")

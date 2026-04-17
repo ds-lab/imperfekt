@@ -3,6 +3,8 @@ from pathlib import Path
 
 import numpy as np
 import polars as pl
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
 
 from imperfekt.analysis.intravariable import autocorrelation
 from imperfekt.analysis.irregularity import burstiness as burstiness_module
@@ -498,21 +500,21 @@ class Irregularity:
         bin_resolution_seconds: float = 60.0,
         adherence_tolerance: float = 0.5,
         min_intervals: int = 2,
-        weights: dict = None,
         n_quantiles: int = 4,
         save_results: bool = True,
     ) -> "Irregularity":
         """
-        Compute a composite irregularity score per case and assign quantile-based strata.
+        Compute a PCA-based composite irregularity score per case and assign quantile strata.
 
         Combines three complementary per-case metrics:
             - cv: magnitude of interval dispersion (from interval_statistics)
             - burstiness_coeff: direction of dispersion — clustered vs. regular (from burstiness)
             - normalized_entropy: distributional complexity (from case_entropy_adherence)
 
-        Each metric is Z-score standardized across entities (using only complete rows),
-        then averaged with optional weights to produce a composite_score. Entities are
-        assigned to Q1 (least irregular) … Qn (most irregular) quantile strata.
+        Metrics are scaled with StandardScaler, then compressed to a single principal
+        component (PC1) via PCA. The PC1 axis is anchored so that high cv corresponds
+        to a high (more irregular) composite score. Entities are assigned to
+        Q1 (least irregular) … Qn (most irregular) quantile strata.
 
         Requires interval_statistics() and burstiness() to have been run first.
         If case_entropy_adherence() has already been run, reuses those results.
@@ -524,9 +526,6 @@ class Irregularity:
             bin_resolution_seconds (float): Bin width for entropy/adherence computation.
             adherence_tolerance (float): Fractional tolerance for adherence_rate.
             min_intervals (int): Minimum intervals for entropy/adherence computation.
-            weights (dict | None): Feature weights, e.g.
-                {"cv": 1.0, "burstiness_coeff": 1.0, "normalized_entropy": 1.0}.
-                None uses equal weights.
             n_quantiles (int): Number of strata (default 4 → Q1…Q4).
             save_results (bool): Whether to save case_scores.csv to save_path.
 
@@ -581,7 +580,7 @@ class Irregularity:
             )
         )
 
-        # Z-score standardize each feature using only complete rows
+        # PCA composite score using complete rows only
         feature_cols = ["cv", "burstiness_coeff", "normalized_entropy"]
         complete_mask = (
             pl.col("cv").is_not_null()
@@ -590,52 +589,41 @@ class Irregularity:
         )
         complete_df = scores.filter(complete_mask)
 
-        feature_stats = {}
-        for col in feature_cols:
-            vals = complete_df[col].to_numpy()
-            feature_stats[col] = {
-                "mean": float(np.nanmean(vals)),
-                "std": float(np.nanstd(vals, ddof=1)),
-            }
+        if len(complete_df) < 2:
+            scores = scores.with_columns(pl.lit(None).cast(pl.Float64).alias("composite_score"))
+        else:
+            X = complete_df.select(feature_cols).to_numpy()
 
-        z_exprs = []
-        for col in feature_cols:
-            mean_val = feature_stats[col]["mean"]
-            std_val = feature_stats[col]["std"]
-            z_col = f"_z_{col}"
-            if std_val == 0.0 or np.isnan(std_val):
-                # Cannot meaningfully standardize: all complete entities share the
-                # same value (std=0) or there is only one complete entity (std=NaN).
-                # Emit None so the composite score is also None rather than 0.
-                z_exprs.append(pl.lit(None).cast(pl.Float64).alias(z_col))
-            else:
-                z_exprs.append(
-                    pl.when(pl.col(col).is_not_null())
-                    .then((pl.col(col) - mean_val) / std_val)
-                    .otherwise(None)
-                    .alias(z_col)
+            scaler = StandardScaler()
+            X_scaled = scaler.fit_transform(X)
+
+            # Guard: if any feature has zero variance after scaling, PCA is meaningless
+            if np.any(scaler.scale_ == 0):
+                scores = scores.with_columns(
+                    pl.lit(None).cast(pl.Float64).alias("composite_score")
                 )
-        scores = scores.with_columns(z_exprs)
+            else:
+                pca = PCA(n_components=1)
+                pc1_scores = pca.fit_transform(X_scaled).ravel()
 
-        # Weighted composite score (explicit accumulation to avoid sum() initial-value issue)
-        if weights is None:
-            weights = {"cv": 1.0, "burstiness_coeff": 1.0, "normalized_entropy": 1.0}
-        total_weight = sum(weights.values())
+                # Directionality fix: anchor so that high cv → high score (more irregular)
+                cv_idx = feature_cols.index("cv")
+                if pca.components_[0, cv_idx] < 0:
+                    pc1_scores = -pc1_scores
 
-        composite_expr = pl.lit(0.0)
-        for col, w in weights.items():
-            composite_expr = composite_expr + pl.col(f"_z_{col}") * (w / total_weight)
+                explained = float(pca.explained_variance_ratio_[0])
+                if self.renderer:
+                    pretty_printing.rich_info(
+                        f"PCA composite score: PC1 explains {explained:.1%} of variance "
+                        "across cv, burstiness_coeff, normalized_entropy."
+                    )
 
-        scores = scores.with_columns(
-            pl.when(
-                pl.col("_z_cv").is_not_null()
-                & pl.col("_z_burstiness_coeff").is_not_null()
-                & pl.col("_z_normalized_entropy").is_not_null()
-            )
-            .then(composite_expr)
-            .otherwise(None)
-            .alias("composite_score")
-        )
+                # Map PC1 scores back to full row order (incomplete rows get None)
+                id_to_pc1 = dict(zip(complete_df[id_col].to_list(), pc1_scores.tolist()))
+                composite_values = [id_to_pc1.get(v) for v in scores[id_col].to_list()]
+                scores = scores.with_columns(
+                    pl.Series(name="composite_score", values=composite_values, dtype=pl.Float64)
+                )
 
         # Quantile stratification — clamp n_quantiles to available scored entities
         non_null_scores = (
@@ -669,9 +657,7 @@ class Irregularity:
             pl.Series(name="irregularity_stratum", values=stratum_values, dtype=pl.Utf8)
         )
 
-        # Drop internal z-score columns and finalize
-        drop_cols = [f"_z_{c}" for c in feature_cols]
-        scores = scores.drop(drop_cols).select([
+        scores = scores.select([
             id_col,
             "cv",
             "burstiness_coeff",
@@ -686,10 +672,18 @@ class Irregularity:
         if self.renderer:
             pretty_printing.rich_info(
                 "Composite Irregularity Score: "
-                "composite_score = weighted Z-score average of cv, burstiness_coeff, normalized_entropy; "
+                "composite_score = PC1 from PCA on StandardScaler-normalized cv, burstiness_coeff, normalized_entropy; "
                 f"irregularity_stratum = Q1 (least irregular) … Q{n_quantiles} (most irregular)."
             )
             print(self.results.cs_case_scores.describe(interpolation="linear"))
+            total = len(scores)
+            prevalence = (
+                scores.group_by("irregularity_stratum")
+                .agg(pl.len().alias("n"))
+                .with_columns((pl.col("n") / total * 100).round(1).alias("pct"))
+                .sort("irregularity_stratum")
+            )
+            print(prevalence)
 
         if save_results and path:
             self.results.cs_case_scores.write_csv(path / "case_scores.csv")
@@ -790,6 +784,8 @@ class Irregularity:
         save_results: bool = True,
         bin_resolution_seconds: float = 60.0,
         adherence_tolerance: float = 0.5,
+        min_intervals: int = 2,
+        n_strata_quantiles: int = 4,
         autocorrelation_lags: int = 20,
     ) -> "Irregularity":
         """
@@ -848,6 +844,8 @@ class Irregularity:
             self.composite_score(
                 bin_resolution_seconds=bin_resolution_seconds,
                 adherence_tolerance=adherence_tolerance,
+                min_intervals=min_intervals,
+                n_quantiles=n_strata_quantiles,
                 save_results=save_results,
             )
         except Exception as e:
