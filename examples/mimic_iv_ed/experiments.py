@@ -97,6 +97,15 @@ def _ireg_agg_exprs() -> list:
     )
 
 
+def pipeline_0_features(df: pl.DataFrame) -> pl.DataFrame:
+    """
+    Raw irregular timestamps, statistical aggregates of vital signs only.
+    No resampling, no imputation, no imperfekt features.
+    Baseline that isolates the contribution of temporal structure.
+    """
+    return df.sort(["stay_id", "charttime"]).group_by("stay_id").agg(_vital_agg_exprs())
+
+
 def pipeline_a_features(df: pl.DataFrame) -> pl.DataFrame:
     """
     Resample to a regular 30-min grid per stay (forward-fill then backward-fill
@@ -150,25 +159,28 @@ def pipeline_c_features(df: pl.DataFrame) -> pl.DataFrame:
 def build_stay_level(ts_df: pl.DataFrame, feature_fn) -> pl.DataFrame:
     """Build stay-level feature frame with outcome label attached."""
     features = feature_fn(ts_df)
-    labels = (
-        ts_df.select(["stay_id", OUTCOME_COL])
+    stay_meta = (
+        ts_df.select(["stay_id", OUTCOME_COL, "age_at_visit", "sex"])
         .unique("stay_id", keep="first")
+        .with_columns(sex_female=pl.col("sex").eq("F").cast(pl.Int8))
+        .drop("sex")
     )
     return (
         features
-        .join(labels, on="stay_id", how="left")
+        .join(stay_meta, on="stay_id", how="left")
         .drop_nulls(OUTCOME_COL)
     )
 
 
 # ── irregularity stratification ───────────────────────────────────────────────
 
-def compute_irregularity_strata(ts_df: pl.DataFrame) -> pl.DataFrame:
+def compute_irregularity_strata(ts_df: pl.DataFrame) -> tuple[pl.DataFrame, "Irregularity"]:
     """
     Compute per-stay composite irregularity score and stratum on the full
-    dataset.  Strata are derived once so boundaries are consistent across
+    dataset. Strata are derived once so boundaries are consistent across
     all CV folds — they describe data heterogeneity, not the outcome.
-    Returns stay_id, irregularity_stratum, composite_score.
+    Returns (strata DataFrame with stay_id/irregularity_stratum/composite_score,
+             the fitted Irregularity object).
     """
     strata_dir = RESULTS_DIR / "irregularity_strata"
     ireg = Irregularity(
@@ -178,9 +190,10 @@ def compute_irregularity_strata(ts_df: pl.DataFrame) -> pl.DataFrame:
         save_path=strata_dir,
     )
     ireg.run(save_results=True, n_strata_quantiles=8)
-    return ireg.results.cs_case_scores.select(
+    strata = ireg.results.cs_case_scores.select(
         ["stay_id", "irregularity_stratum", "composite_score"]
     )
+    return strata, ireg
 
 
 # ── metrics ───────────────────────────────────────────────────────────────────
@@ -377,7 +390,7 @@ def plot_auprc_by_stratum(
 
     x = np.arange(len(strata_keys))
     fig, ax = plt.subplots(figsize=(8, 4.5))
-    colors = ["#4C72B0", "#DD8452", "#55A868"]
+    colors = ["#4C72B0", "#DD8452", "#55A868", "#C44E52"]
 
     for idx, (label, summary) in enumerate(pipeline_summaries):
         color = colors[idx % len(colors)]
@@ -438,7 +451,7 @@ def plot_auprc_lift_by_stratum(
 
     x = np.arange(len(strata_keys))
     fig, ax = plt.subplots(figsize=(8, 4.5))
-    colors = ["#4C72B0", "#DD8452", "#55A868"]
+    colors = ["#4C72B0", "#DD8452", "#55A868", "#C44E52"]
 
     ax.axhline(1.0, color="black", linestyle="--", linewidth=0.8, label="No-skill baseline")
 
@@ -479,117 +492,227 @@ def _split_feature_groups(feature_cols: list[str]) -> tuple[list[str], list[str]
     return phys_cols, struct_cols
 
 
-def _plot_group_importance_by_stratum(
-    fractions_df: pl.DataFrame,
+def _compute_rfi_by_stratum(
+    abs_shap: np.ndarray,
+    stay_ids: np.ndarray,
     strata: pl.DataFrame,
+    phys_idx: np.ndarray,
+    struct_idx: np.ndarray,
+) -> pl.DataFrame:
+    """
+    Relative Feature Importance (RFI) per stratum using summed absolute SHAP.
+
+    For each stratum s:
+      phys_sum  = sum over cases and physiology features of |SHAP|
+      struct_sum = sum over cases and metadata features of |SHAP|
+      phys_rfi  = phys_sum  / (phys_sum + struct_sum) * 100
+      struct_rfi = struct_sum / (phys_sum + struct_sum) * 100
+
+    Using the sum preserves the total attribution mass so that
+    a metadata group with 5 features holding 30% of the sum is directly
+    comparable to 50 physiology features — each metadata feature carries on
+    average 10x the weight of a physiology feature.
+
+    Also records per-feature-average importance for each group so callers can
+    compute the per-feature multiplier (struct_per_feat / phys_per_feat).
+
+    Returns DataFrame with columns:
+      irregularity_stratum, phys_rfi, struct_rfi,
+      phys_sum, struct_sum, n_phys, n_struct, per_feat_ratio
+    """
+    strata_map = {sid: s for sid, s in zip(
+        strata["stay_id"].to_list(), strata["irregularity_stratum"].to_list()
+    )}
+    n_phys = len(phys_idx)
+    n_struct = len(struct_idx)
+    rows = []
+    for stratum in sorted(set(strata["irregularity_stratum"].to_list())):
+        mask = np.array([strata_map.get(sid) == stratum for sid in stay_ids])
+        if mask.sum() == 0:
+            continue
+        # sum over all cases AND all features in each group
+        phys_sum = float(abs_shap[mask][:, phys_idx].sum())
+        struct_sum = float(abs_shap[mask][:, struct_idx].sum())
+        total = phys_sum + struct_sum
+        if total == 0:
+            continue
+        phys_rfi = phys_sum / total * 100.0
+        struct_rfi = struct_sum / total * 100.0
+        # average importance per individual feature — reveals per-feature multiplier
+        phys_per_feat = phys_sum / n_phys if n_phys > 0 else 0.0
+        struct_per_feat = struct_sum / n_struct if n_struct > 0 else 0.0
+        per_feat_ratio = struct_per_feat / phys_per_feat if phys_per_feat > 0 else float("nan")
+        rows.append({
+            "irregularity_stratum": stratum,
+            "phys_rfi": phys_rfi,
+            "struct_rfi": struct_rfi,
+            "phys_sum": phys_sum,
+            "struct_sum": struct_sum,
+            "n_phys": n_phys,
+            "n_struct": n_struct,
+            "per_feat_ratio": per_feat_ratio,
+        })
+    return pl.DataFrame(rows)
+
+
+def _plot_group_importance_by_stratum(
+    abs_shap: np.ndarray,
+    stay_ids: np.ndarray,
+    strata: pl.DataFrame,
+    phys_idx: np.ndarray,
+    struct_idx: np.ndarray,
     save_path: Path,
     pipeline_name: str,
     stratum_labels: dict[str, str] | None = None,
 ) -> None:
-    joined = fractions_df.join(
-        strata.select(["stay_id", "irregularity_stratum"]),
-        on="stay_id",
-        how="inner",
-    )
-    if joined.height == 0:
+    rfi_df = _compute_rfi_by_stratum(abs_shap, stay_ids, strata, phys_idx, struct_idx)
+    if rfi_df.height == 0:
         print(f"[{pipeline_name}] Skipping SHAP group plot: no overlapping stay_id rows.")
         return
 
-    summary = (
-        joined.group_by("irregularity_stratum")
-        .agg(
-            [
-                pl.col("phys_fraction").mean().alias("phys_fraction"),
-                pl.col("struct_fraction").mean().alias("struct_fraction"),
-                pl.len().alias("n_cases"),
-            ]
-        )
-        .sort("irregularity_stratum")
-    )
-
-    labels = summary["irregularity_stratum"].to_list()
-    phys_pct = summary["phys_fraction"].to_numpy() * 100.0
-    struct_pct = summary["struct_fraction"].to_numpy() * 100.0
+    labels = rfi_df["irregularity_stratum"].to_list()
+    tick_labels = [stratum_labels.get(l, l) if stratum_labels else l for l in labels]
+    phys_pct = rfi_df["phys_rfi"].to_numpy()
+    struct_pct = rfi_df["struct_rfi"].to_numpy()
+    per_feat_ratio = rfi_df["per_feat_ratio"].to_numpy()
+    n_phys = int(rfi_df["n_phys"][0])
+    n_struct = int(rfi_df["n_struct"][0])
 
     x = np.arange(len(labels))
-    fig, ax = plt.subplots(figsize=(7.5, 4.5))
-    ax.bar(x, phys_pct, color="#4C72B0", label="Physiological features")
-    ax.bar(x, struct_pct, bottom=phys_pct, color="#DD8452", label="imperfekt metadata")
-    ax.set_ylim(0, 100)
-    ax.set_yticks(np.arange(0, 101, 20))
-    ax.set_ylabel("Relative feature importance (%)")
-    ax.set_xlabel("Irregularity stratum")
-    ax.set_xticks(x)
-    ax.set_xticklabels([stratum_labels.get(l, l) if stratum_labels else l for l in labels])
-    ax.set_title(f"{pipeline_name}: Absolute SHAP group importance by stratum")
-    ax.legend(loc="upper right")
+    fig, (ax_stack, ax_ratio) = plt.subplots(1, 2, figsize=(13, 4.5))
+
+    # left: stacked bar — summed SHAP mass share
+    ax_stack.bar(x, phys_pct, color="#4C72B0", label=f"Physiological ({n_phys} features)")
+    ax_stack.bar(x, struct_pct, bottom=phys_pct, color="#DD8452", label=f"imperfekt metadata ({n_struct} features)")
+    for i, (p, s) in enumerate(zip(phys_pct, struct_pct)):
+        ax_stack.text(i, p + s / 2, f"{s:.1f}%", ha="center", va="center", fontsize=7, color="white", fontweight="bold")
+    ax_stack.set_ylim(0, 100)
+    ax_stack.set_yticks(np.arange(0, 101, 20))
+    ax_stack.set_ylabel("Share of total |SHAP| mass (%)")
+    ax_stack.set_xlabel("Irregularity stratum")
+    ax_stack.set_xticks(x)
+    ax_stack.set_xticklabels(tick_labels)
+    ax_stack.set_title("Attention shift (summed |SHAP| by group)")
+    ax_stack.legend(loc="upper right", fontsize=8)
+
+    # right: per-feature multiplier — how many times more influential is one metadata
+    # feature vs one physiology feature within that stratum
+    bar_colors = ["#c84b31" if r > 1 else "#4C72B0" for r in per_feat_ratio]
+    ax_ratio.bar(x, per_feat_ratio, color=bar_colors)
+    ax_ratio.axhline(1.0, color="black", linestyle="--", linewidth=0.8, label="Equal influence (×1)")
+    for i, r in enumerate(per_feat_ratio):
+        if not np.isnan(r):
+            ax_ratio.text(i, r + 0.05, f"×{r:.1f}", ha="center", va="bottom", fontsize=8)
+    ax_ratio.set_ylabel("Per-feature influence multiplier\n(avg metadata SHAP / avg physiology SHAP)")
+    ax_ratio.set_xlabel("Irregularity stratum")
+    ax_ratio.set_xticks(x)
+    ax_ratio.set_xticklabels(tick_labels)
+    ax_ratio.set_title("Per-feature influence ratio (metadata vs physiology)")
+    ax_ratio.legend(fontsize=8)
+
+    fig.suptitle(f"{pipeline_name}: Structural floor analysis", fontweight="bold")
     fig.tight_layout()
     save_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(save_path, format="svg")
     plt.close(fig)
-    print(f"[{pipeline_name}] SHAP group-importance plot saved to {save_path}")
+    print(f"[{pipeline_name}] SHAP structural-floor plot saved to {save_path}")
 
 
-def _plot_top10_q1_vs_q4(
+def _spearman_structural_floor(
     abs_shap: np.ndarray,
     feature_cols: list[str],
-    stay_ids: np.ndarray,
-    strata: pl.DataFrame,
-    save_path: Path,
+    phys_cols: list[str],
+    struct_cols: list[str],
     pipeline_name: str,
-) -> None:
-    strata_map = strata.select(["stay_id", "irregularity_stratum"])
-    sample_with_strata = (
-        pl.DataFrame({"stay_id": stay_ids})
-        .join(strata_map, on="stay_id", how="left")
-        .drop_nulls("irregularity_stratum")
+) -> pl.DataFrame | None:
+    """
+    Pairwise Spearman rho between several top metadata and physiology features.
+
+    Feature importance is defined by mean |SHAP| over samples.
+    We select the top-k features from each group and compute all
+    pairwise Spearman correlations between their absolute SHAP vectors.
+
+    Returns:
+        A Polars DataFrame sorted by absolute rho (descending), or None if
+        one of the groups is empty.
+    """
+    from scipy.stats import spearmanr
+
+    if len(phys_cols) == 0 or len(struct_cols) == 0:
+        print(
+            f"[{pipeline_name}] Skipping Spearman structural-floor test: "
+            f"phys={len(phys_cols)}, struct={len(struct_cols)}."
+        )
+        return None
+
+    mean_abs = abs_shap.mean(axis=0)
+
+    phys_idx_map = {c: feature_cols.index(c) for c in phys_cols}
+    struct_idx_map = {c: feature_cols.index(c) for c in struct_cols}
+
+    top_k_phys = min(SPEARMAN_TOP_K_PHYS, len(phys_idx_map))
+    top_k_struct = min(SPEARMAN_TOP_K_STRUCT, len(struct_idx_map))
+
+    top_phys = sorted(phys_idx_map, key=lambda c: mean_abs[phys_idx_map[c]], reverse=True)[:top_k_phys]
+    top_struct = sorted(struct_idx_map, key=lambda c: mean_abs[struct_idx_map[c]], reverse=True)[:top_k_struct]
+
+    rows: list[dict] = []
+    for struct_feat in top_struct:
+        struct_vals = abs_shap[:, struct_idx_map[struct_feat]]
+        for phys_feat in top_phys:
+            phys_vals = abs_shap[:, phys_idx_map[phys_feat]]
+            rho, pval = spearmanr(phys_vals, struct_vals)
+            if np.isnan(pval):
+                significance = "undefined"
+            elif pval < 0.001:
+                significance = "*** (p<0.001)"
+            elif pval < 0.01:
+                significance = "** (p<0.01)"
+            elif pval < 0.05:
+                significance = "* (p<0.05)"
+            else:
+                significance = "ns"
+
+            rows.append(
+                {
+                    "metadata_feature": struct_feat,
+                    "physiology_feature": phys_feat,
+                    "metadata_mean_abs_shap": float(mean_abs[struct_idx_map[struct_feat]]),
+                    "physiology_mean_abs_shap": float(mean_abs[phys_idx_map[phys_feat]]),
+                    "rho": float(rho),
+                    "abs_rho": float(abs(rho)) if not np.isnan(rho) else float("nan"),
+                    "p_value": float(pval),
+                    "significance": significance,
+                }
+            )
+
+    if len(rows) == 0:
+        return None
+
+    spearman_df = pl.DataFrame(rows).sort(["abs_rho", "p_value"], descending=[True, False])
+
+    abs_rhos = np.array(spearman_df["abs_rho"].to_list(), dtype=float)
+    pvals = np.array(spearman_df["p_value"].to_list(), dtype=float)
+    mean_abs_rho = float(np.nanmean(abs_rhos)) if len(abs_rhos) > 0 else float("nan")
+    sig_pairs = int(np.sum((~np.isnan(pvals)) & (pvals < 0.05)))
+
+    top_phys_desc = ", ".join(
+        f"{feat} ({mean_abs[phys_idx_map[feat]]:.4f})" for feat in top_phys
+    )
+    top_struct_desc = ", ".join(
+        f"{feat} ({mean_abs[struct_idx_map[feat]]:.4f})" for feat in top_struct
     )
 
-    if sample_with_strata.height == 0:
-        print(f"[{pipeline_name}] Skipping Q1/Q4 SHAP top10 plot: no strata labels.")
-        return
+    print(
+        f"[{pipeline_name}] Spearman pairwise structural-floor test: "
+        f"{top_k_struct} metadata × {top_k_phys} physiology = {spearman_df.height} pairs\n"
+        f"  top physiology features (mean |SHAP|): {top_phys_desc}\n"
+        f"  top metadata features (mean |SHAP|): {top_struct_desc}\n"
+        f"  mean |rho| across pairs = {mean_abs_rho:.3f}; significant pairs (p<0.05) = {sig_pairs}/{spearman_df.height}"
+    )
+    print(spearman_df)
 
-    idx_map = {sid: i for i, sid in enumerate(stay_ids.tolist())}
-    valid_idx = [idx_map[sid] for sid in sample_with_strata["stay_id"].to_list()]
-    abs_used = abs_shap[np.array(valid_idx)]
-    sample_strata = np.array(sample_with_strata["irregularity_stratum"].to_list())
-
-    labels_sorted = sorted(set(sample_strata.tolist()))
-    q1_label = next((s for s in labels_sorted if str(s).startswith("Q1")), labels_sorted[0])
-    q4_label = next((s for s in labels_sorted if str(s).startswith("Q4")), labels_sorted[-1])
-
-    def _top10_for_label(label: str):
-        mask = sample_strata == label
-        if mask.sum() == 0:
-            return None, None
-        mean_abs = abs_used[mask].mean(axis=0)
-        top_idx = np.argsort(mean_abs)[::-1][:10]
-        names = [feature_cols[i] for i in top_idx][::-1]
-        vals = mean_abs[top_idx][::-1]
-        return names, vals
-
-    q1_names, q1_vals = _top10_for_label(q1_label)
-    q4_names, q4_vals = _top10_for_label(q4_label)
-    if q1_names is None or q4_names is None:
-        print(f"[{pipeline_name}] Skipping Q1/Q4 SHAP top10 plot: missing Q1 or Q4 samples.")
-        return
-
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-
-    axes[0].barh(q1_names, q1_vals, color="#4C72B0")
-    axes[0].set_title(f"{pipeline_name} – {q1_label} (Top 10)")
-    axes[0].set_xlabel("Mean |SHAP|")
-
-    axes[1].barh(q4_names, q4_vals, color="#DD8452")
-    axes[1].set_title(f"{pipeline_name} – {q4_label} (Top 10)")
-    axes[1].set_xlabel("Mean |SHAP|")
-
-    fig.suptitle(f"{pipeline_name}: Feature ranking shift ({q1_label} vs {q4_label})")
-    fig.tight_layout()
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(save_path, format="svg")
-    plt.close(fig)
-    print(f"[{pipeline_name}] SHAP Q1-vs-Q4 top10 plot saved to {save_path}")
+    return spearman_df
 
 
 def run_shap_group_analysis(
@@ -599,7 +722,6 @@ def run_shap_group_analysis(
     strata: pl.DataFrame,
     feature_cols: list[str],
     pipeline_name: str,
-    include_bonus_q1_q4: bool = True,
     stratum_labels: dict[str, str] | None = None,
 ) -> None:
     if X_test.shape[0] == 0 or test_stay_df.height == 0:
@@ -651,36 +773,30 @@ def run_shap_group_analysis(
     phys_idx = np.array([feature_cols.index(c) for c in phys_cols], dtype=int)
     struct_idx = np.array([feature_cols.index(c) for c in struct_cols], dtype=int)
 
-    total_importance = abs_shap.sum(axis=1)
-    safe_total = np.where(total_importance > 0, total_importance, 1.0)
-    phys_fraction = abs_shap[:, phys_idx].sum(axis=1) / safe_total
-    struct_fraction = abs_shap[:, struct_idx].sum(axis=1) / safe_total
-
-    fractions_df = pl.DataFrame(
-        {
-            "stay_id": stay_ids,
-            "phys_fraction": phys_fraction,
-            "struct_fraction": struct_fraction,
-        }
-    )
-
     _plot_group_importance_by_stratum(
-        fractions_df=fractions_df,
+        abs_shap=abs_shap,
+        stay_ids=stay_ids,
         strata=strata,
+        phys_idx=phys_idx,
+        struct_idx=struct_idx,
         save_path=RESULTS_DIR / "figures" / f"shap_group_importance_{pipeline_name}.svg",
         pipeline_name=pipeline_name,
         stratum_labels=stratum_labels,
     )
 
-    if include_bonus_q1_q4:
-        _plot_top10_q1_vs_q4(
-            abs_shap=abs_shap,
-            feature_cols=feature_cols,
-            stay_ids=stay_ids,
-            strata=strata,
-            save_path=RESULTS_DIR / "figures" / f"shap_top10_q1_vs_q4_{pipeline_name}.svg",
-            pipeline_name=pipeline_name,
-        )
+    spearman_df = _spearman_structural_floor(
+        abs_shap=abs_shap,
+        feature_cols=feature_cols,
+        phys_cols=phys_cols,
+        struct_cols=struct_cols,
+        pipeline_name=pipeline_name,
+    )
+
+    if spearman_df is not None and spearman_df.height > 0:
+        spearman_path = RESULTS_DIR / "figures" / f"spearman_pairwise_{pipeline_name}.csv"
+        spearman_path.parent.mkdir(parents=True, exist_ok=True)
+        spearman_df.write_csv(spearman_path)
+        print(f"[{pipeline_name}] Spearman pairwise table saved to {spearman_path}")
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
@@ -694,15 +810,21 @@ def main() -> None:
     print(f"Outcome prevalence: {ts_df[OUTCOME_COL].mean():.3f} ({ts_df[OUTCOME_COL].sum()}/{len(ts_df)})")
 
     print("\nComputing irregularity strata on full dataset (fixed across all folds)…")
-    strata = compute_irregularity_strata(ts_df)
+    strata, ireg = compute_irregularity_strata(ts_df)
     stay_outcomes = ts_df.select(["stay_id", OUTCOME_COL]).unique("stay_id", keep="first")
+    ireg_scores = ireg.results.cs_case_scores.select(
+        ["stay_id", "irregularity_stratum", "cv", "burstiness_coeff", "normalized_entropy"]
+    )
     prevalence_by_stratum = (
-        strata.join(stay_outcomes, on="stay_id", how="left")
+        ireg_scores.join(stay_outcomes, on="stay_id", how="left")
         .drop_nulls("irregularity_stratum")
         .group_by("irregularity_stratum")
         .agg(
             pl.col(OUTCOME_COL).mean().alias("prevalence"),
             pl.len().alias("count"),
+            pl.col("cv").mean().alias("mean_cv"),
+            pl.col("burstiness_coeff").mean().alias("mean_burstiness"),
+            pl.col("normalized_entropy").mean().alias("mean_entropy"),
         )
         .sort("irregularity_stratum")
     )
@@ -710,15 +832,21 @@ def main() -> None:
     stratum_labels = _stratum_prevalence_labels(strata, ts_df)
 
     print("\nBuilding stay-level feature frames…")
+    stay_0 = build_stay_level(ts_df, pipeline_0_features)
     stay_a = build_stay_level(ts_df, pipeline_a_features)
     stay_b = build_stay_level(ts_df, pipeline_b_features)
     stay_c = build_stay_level(ts_df, pipeline_c_features)
 
     # subject_id is needed inside run_cv for group-level splitting; carry it over
     subj_map = ts_df.select(["stay_id", "subject_id"]).unique("stay_id", keep="first")
+    stay_0 = stay_0.join(subj_map, on="stay_id", how="left")
     stay_a = stay_a.join(subj_map, on="stay_id", how="left")
     stay_b = stay_b.join(subj_map, on="stay_id", how="left")
     stay_c = stay_c.join(subj_map, on="stay_id", how="left")
+
+    print(f"\nRunning {CV_N_SPLITS}×{CV_N_REPEATS} repeated stratified k-fold CV — Pipeline 0…")
+    folds_0, _, _, _, _ = run_cv(stay_0, strata, "Pipeline0")
+    summary_0 = summarise_cv(folds_0, "Pipeline0")
 
     print(f"\nRunning {CV_N_SPLITS}×{CV_N_REPEATS} repeated stratified k-fold CV — Pipeline A…")
     folds_a, _, _, _, _ = run_cv(stay_a, strata, "PipelineA")
@@ -734,6 +862,7 @@ def main() -> None:
 
     print("\nPlotting AUPRC by stratum…")
     pipeline_summaries = [
+        ("Pipeline 0 (raw stats, no imperfekt)", summary_0),
         ("Pipeline A (resampled)", summary_a),
         ("Pipeline B (imperfekt)", summary_b),
         ("Pipeline C (raw->resampled imperfekt)", summary_c),
@@ -758,26 +887,10 @@ def main() -> None:
             strata=strata,
             feature_cols=feat_cols_b,
             pipeline_name="PipelineB",
-            include_bonus_q1_q4=True,
             stratum_labels=stratum_labels,
         )
     else:
         print("Skipping SHAP for Pipeline B: no final-fold artifacts available.")
-
-    print("\nComputing SHAP group-importance analysis for Pipeline C (last CV fold)…")
-    if last_model_c is not None and last_X_test_c is not None and last_test_df_c is not None:
-        run_shap_group_analysis(
-            model=last_model_c,
-            X_test=last_X_test_c,
-            test_stay_df=last_test_df_c,
-            strata=strata,
-            feature_cols=feat_cols_c,
-            pipeline_name="PipelineC",
-            include_bonus_q1_q4=True,
-            stratum_labels=stratum_labels,
-        )
-    else:
-        print("Skipping SHAP for Pipeline C: no final-fold artifacts available.")
 
     print("\nDone.")
 
