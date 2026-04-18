@@ -11,6 +11,7 @@ VITALSIGN_PATH  = f"{ED_BASE}/vitalsign.csv"
 DIAGNOSIS_PATH  = f"{ED_BASE}/diagnosis.csv"
 EDSTAYS_PATH    = f"{ED_BASE}/edstays.csv"
 ADMISSIONS_PATH = f"{HOSP_BASE}/admissions.csv.gz"
+PATIENTS_PATH   = f"{HOSP_BASE}/patients.csv.gz"
 ICUSTAYS_PATH   = f"{ICU_BASE}/icustays.csv.gz"
 
 # ── ICD code definitions ──────────────────────────────────────────────────────
@@ -59,6 +60,11 @@ def _load_edstays() -> pl.DataFrame:
 @cache
 def _load_admissions() -> pl.DataFrame:
     return pl.read_csv(ADMISSIONS_PATH)
+
+
+@cache
+def _load_patients() -> pl.DataFrame:
+    return pl.read_csv(PATIENTS_PATH).select("subject_id", "gender", "anchor_age", "anchor_year")
 
 
 @cache
@@ -243,6 +249,28 @@ def extract_critical_outcome() -> pl.DataFrame:
     )
 
 
+# ── demographics ─────────────────────────────────────────────────────────────
+
+def extract_demographics() -> pl.DataFrame:
+    """
+    One row per stay_id with age_at_visit (int) and sex (str, 'M'/'F').
+
+    Age is computed as anchor_age + (ED intime year - anchor_year), which
+    corrects for the MIMIC time-shift applied per patient.
+    """
+    stays = _load_edstays().select("stay_id", "subject_id", "intime")
+    patients = _load_patients()
+    return (
+        stays
+        .join(patients, on="subject_id", how="left")
+        .with_columns(
+            age_at_visit=(pl.col("anchor_age") + pl.col("intime").dt.year() - pl.col("anchor_year")).cast(pl.Int32),
+            sex=pl.col("gender"),
+        )
+        .select("stay_id", "age_at_visit", "sex")
+    )
+
+
 # ── registry ──────────────────────────────────────────────────────────────────
 
 MORTALITY_WINDOW_HOURS = 48
@@ -358,6 +386,9 @@ def build_cohort(
             on="stay_id",
             how="left",
         )
+
+    demographics = extract_demographics().select("stay_id", "age_at_visit", "sex")
+    cohort = cohort.join(demographics, on="stay_id", how="left")
 
     return cohort
 
