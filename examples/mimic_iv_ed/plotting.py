@@ -37,8 +37,7 @@ def _stratum_tick_labels(strata_keys: list[str], pipeline_summaries: list[tuple[
                 prev_vals.append(v["mean"])
         if prev_vals:
             mean_prev = float(np.mean(prev_vals))
-            ci_prev = float(np.std(prev_vals, ddof=1) / np.sqrt(len(prev_vals))) if len(prev_vals) > 1 else 0.0
-            labels.append(f"{k}\n{mean_prev:.0%}±{ci_prev:.0%}")
+            labels.append(f"{k}\n{mean_prev:.0%}")
         else:
             labels.append(k)
     return labels
@@ -93,10 +92,10 @@ def plot_auprc_by_stratum(
 
     ax.set_xticks(x)
     ax.set_xticklabels(_stratum_tick_labels(strata_keys, pipeline_summaries))
-    ax.set_xlabel("Irregularity stratum (mean ± CI outcome prevalence from CV test folds)")
+    ax.set_xlabel("Irregularity stratum (mean outcome prevalence from CV test folds)")
     ax.set_ylabel("AUPRC (mean ± 95% CI)")
     ax.set_ylim(0, 1)
-    ax.legend()
+    ax.legend(loc="lower left")
     ax.set_title(f"AUPRC by irregularity stratum ({CV_N_SPLITS}×{CV_N_REPEATS} CV)")
     fig.tight_layout()
     save_path.parent.mkdir(parents=True, exist_ok=True)
@@ -152,9 +151,9 @@ def plot_auprc_lift_by_stratum(
 
     ax.set_xticks(x)
     ax.set_xticklabels(_stratum_tick_labels(strata_keys, pipeline_summaries))
-    ax.set_xlabel("Irregularity stratum (mean ± CI outcome prevalence from CV test folds)")
+    ax.set_xlabel("Irregularity stratum (mean outcome prevalence from CV test folds)")
     ax.set_ylabel("AUPRC lift = AUPRC / prevalence (mean ± 95% CI)")
-    ax.legend()
+    ax.legend(loc="lower left")
     ax.set_title(f"AUPRC lift by irregularity stratum ({CV_N_SPLITS}×{CV_N_REPEATS} CV)")
     fig.tight_layout()
     save_path.parent.mkdir(parents=True, exist_ok=True)
