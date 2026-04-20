@@ -400,11 +400,14 @@ def build_cohort(
 # ── main ─────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    cohort = build_cohort(["in_hospital_mortality", "ed_stay_length"], min_observations=10)
-    print(cohort.columns)
-    print(cohort.shape)
-    print(cohort.head())
+    obs_option = [None, 5,6,7,8,9,10]
+    hours_option = [3,4,5,6,7,8,9,10]
     
-    # group by mortality to get the prevalence
-    print(cohort.group_by("in_hospital_mortality").len())
-    print(cohort.describe())
+    for obs in obs_option:
+        for hours in hours_option:
+            print(f"\nBuilding cohort with min_observations={obs} and window_hours={hours}…")
+    
+            cohort = build_cohort(["critical_outcome"], min_observations=obs, window_hours=hours)
+            #print(cohort.shape)
+            print(cohort["stay_id"].n_unique())
+
