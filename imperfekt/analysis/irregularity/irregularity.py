@@ -3,8 +3,6 @@ from pathlib import Path
 
 import numpy as np
 import polars as pl
-from sklearn.decomposition import PCA
-from sklearn.preprocessing import StandardScaler
 
 from imperfekt.analysis.intravariable import autocorrelation
 from imperfekt.analysis.irregularity import burstiness as burstiness_module
@@ -35,8 +33,10 @@ class IrregularityResults:
         self.ia_autocorrelation: pl.DataFrame = None
         # Case entropy and adherence
         self.ea_case_entropy_adherence: pl.DataFrame = None
-        # Composite score
+        # Composite score (median-bisection on selected least-correlated axis pair)
         self.cs_case_scores: pl.DataFrame = None
+        # Pairwise metric correlation table used for axis selection
+        self.cs_pairwise_correlations: pl.DataFrame = None
         # Plots
         self.plots = IrregularityPlots()
 
@@ -504,30 +504,37 @@ class Irregularity:
         save_results: bool = True,
     ) -> "Irregularity":
         """
-        Compute a PCA-based composite irregularity score per case and assign quantile strata.
+        Assign each case to one of four irregularity regimes via Orthogonal Axis Stratification.
 
-        Combines three complementary per-case metrics:
-            - cv: magnitude of interval dispersion (from interval_statistics)
-            - burstiness_coeff: direction of dispersion — clustered vs. regular (from burstiness)
-            - normalized_entropy: distributional complexity (from case_entropy_adherence)
+        Candidate axes are:
+            - cv
+            - burstiness_coeff
+            - adherence_rate
 
-        Metrics are scaled with StandardScaler, then compressed to a single principal
-        component (PC1) via PCA. The PC1 axis is anchored so that high cv corresponds
-        to a high (more irregular) composite score. Entities are assigned to
-        Q1 (least irregular) … Qn (most irregular) quantile strata.
+        All pairwise metric correlations are computed first, then the axis pair with
+        the smallest absolute correlation (most independent) is selected for quadrant
+        assignment.
+
+        Selected axes are median-bisected into LL/HL/LH/HH quadrants.
+        For adherence_rate, the irregularity direction is inverted:
+            low adherence = high irregularity.
+
+        Descriptors normalized_entropy and burstiness_coeff are retained per case for
+        within-quadrant characterisation (not used for axis selection).
 
         Requires interval_statistics() and burstiness() to have been run first.
         If case_entropy_adherence() has already been run, reuses those results.
 
         Results stored in:
-            self.results.cs_case_scores  — one row per case
+            self.results.cs_case_scores                  — Option A, one row per case
+            self.results.cs_pairwise_correlations         — correlation table used to select axes
 
         Parameters:
             bin_resolution_seconds (float): Bin width for entropy/adherence computation.
             adherence_tolerance (float): Fractional tolerance for adherence_rate.
             min_intervals (int): Minimum intervals for entropy/adherence computation.
-            n_quantiles (int): Number of strata (default 4 → Q1…Q4).
-            save_results (bool): Whether to save case_scores.csv to save_path.
+            n_quantiles (int): Unused — kept for API compatibility. Quadrants are always 4.
+            save_results (bool): Whether to save CSVs to save_path.
 
         Returns:
             self: Supports method chaining.
@@ -549,7 +556,6 @@ class Irregularity:
             path = self.save_path / new_path_level_name
             path.mkdir(parents=True, exist_ok=True)
 
-        # Reuse entropy/adherence if already computed, otherwise compute now
         if self.results.ea_case_entropy_adherence is not None:
             entropy_df = self.results.ea_case_entropy_adherence
         else:
@@ -564,8 +570,7 @@ class Irregularity:
 
         id_col = self.id_col
 
-        # Join the three feature sources on id
-        scores = (
+        base = (
             self.results.ins_case_statistics
             .select([id_col, "cv"])
             .join(
@@ -580,106 +585,149 @@ class Irregularity:
             )
         )
 
-        # PCA composite score using complete rows only
-        feature_cols = ["cv", "burstiness_coeff", "normalized_entropy"]
-        complete_mask = (
-            pl.col("cv").is_not_null()
-            & pl.col("burstiness_coeff").is_not_null()
-            & pl.col("normalized_entropy").is_not_null()
-        )
-        complete_df = scores.filter(complete_mask)
+        irregularity_high = {
+            "cv": True,
+            "burstiness_coeff": True,
+            "adherence_rate": False,
+        }
 
-        if len(complete_df) < 2:
-            scores = scores.with_columns(pl.lit(None).cast(pl.Float64).alias("composite_score"))
+        # normalized_entropy is intentionally excluded from axis selection.
+        metric_cols = ["cv", "burstiness_coeff", "adherence_rate"]
+
+        def _pair_corr(df: pl.DataFrame, col_x: str, col_y: str) -> tuple[float, int]:
+            pair_df = df.select([col_x, col_y]).drop_nulls([col_x, col_y])
+            n_complete = pair_df.height
+            if n_complete < 3:
+                return float("nan"), n_complete
+
+            x = pair_df[col_x].to_numpy()
+            y = pair_df[col_y].to_numpy()
+            if np.nanstd(x) == 0 or np.nanstd(y) == 0:
+                return float("nan"), n_complete
+            return float(np.corrcoef(x, y)[0, 1]), n_complete
+
+        corr_rows = []
+        for i, col_x in enumerate(metric_cols):
+            for col_y in metric_cols[i + 1:]:
+                corr, n_complete = _pair_corr(base, col_x, col_y)
+                corr_rows.append(
+                    {
+                        "axis_1": col_x,
+                        "axis_2": col_y,
+                        "corr": corr,
+                        "abs_corr": float(abs(corr)) if not np.isnan(corr) else float("nan"),
+                        "n_complete_cases": n_complete,
+                    }
+                )
+
+        self.results.cs_pairwise_correlations = pl.DataFrame(corr_rows).sort(
+            ["abs_corr", "n_complete_cases"], descending=[False, True], nulls_last=True
+        )
+
+        valid_pairs = self.results.cs_pairwise_correlations.filter(pl.col("corr").is_not_null())
+        if valid_pairs.height > 0:
+            selected = valid_pairs.row(0, named=True)
+            axis_x = selected["axis_1"]
+            axis_y = selected["axis_2"]
+            selected_corr = float(selected["corr"])
         else:
-            X = complete_df.select(feature_cols).to_numpy()
+            # Fallback to the original default if pairwise correlations are undefined
+            axis_x = "cv"
+            axis_y = "adherence_rate"
+            selected_corr = float("nan")
 
-            scaler = StandardScaler()
-            X_scaled = scaler.fit_transform(X)
+        complete_mask = pl.col(axis_x).is_not_null() & pl.col(axis_y).is_not_null()
+        complete_df = base.filter(complete_mask)
 
-            # Guard: if any feature has zero variance after scaling, PCA is meaningless
-            if np.any(scaler.scale_ == 0):
-                scores = scores.with_columns(
-                    pl.lit(None).cast(pl.Float64).alias("composite_score")
-                )
-            else:
-                pca = PCA(n_components=1)
-                pc1_scores = pca.fit_transform(X_scaled).ravel()
+        # ----------------------------------------------------------------
+        # Option A — median-bisection on selected least-correlated axis pair
+        # ----------------------------------------------------------------
+        scores_a = base.clone()
+        if len(complete_df) < 2:
+            scores_a = scores_a.with_columns(
+                pl.lit(axis_x).alias("axis_x"),
+                pl.lit(axis_y).alias("axis_y"),
+                pl.lit(None).cast(pl.Float64).alias("axis_pair_corr"),
+                pl.lit(None).cast(pl.Utf8).alias("irregularity_stratum"),
+                pl.lit(None).cast(pl.Float64).alias("axis_x_median_threshold"),
+                pl.lit(None).cast(pl.Float64).alias("axis_y_median_threshold"),
+            )
+        else:
+            x_median = float(complete_df[axis_x].median())
+            y_median = float(complete_df[axis_y].median())
 
-                # Directionality fix: anchor so that high cv → high score (more irregular)
-                cv_idx = feature_cols.index("cv")
-                if pca.components_[0, cv_idx] < 0:
-                    pc1_scores = -pc1_scores
-
-                explained = float(pca.explained_variance_ratio_[0])
-                if self.renderer:
-                    pretty_printing.rich_info(
-                        f"PCA composite score: PC1 explains {explained:.1%} of variance "
-                        "across cv, burstiness_coeff, normalized_entropy."
-                    )
-
-                # Map PC1 scores back to full row order (incomplete rows get None)
-                id_to_pc1 = dict(zip(complete_df[id_col].to_list(), pc1_scores.tolist()))
-                composite_values = [id_to_pc1.get(v) for v in scores[id_col].to_list()]
-                scores = scores.with_columns(
-                    pl.Series(name="composite_score", values=composite_values, dtype=pl.Float64)
-                )
-
-        # Quantile stratification — clamp n_quantiles to available scored entities
-        non_null_scores = (
-            scores.filter(pl.col("composite_score").is_not_null())["composite_score"].to_numpy()
-        )
-
-        effective_quantiles = min(n_quantiles, len(non_null_scores))
-
-        if effective_quantiles >= 2:
-            quantile_bounds = np.quantile(
-                non_null_scores,
-                q=[i / effective_quantiles for i in range(1, effective_quantiles)],
+            x_high_irregular = (
+                pl.col(axis_x) > x_median
+                if irregularity_high[axis_x]
+                else pl.col(axis_x) <= x_median
+            )
+            y_high_irregular = (
+                pl.col(axis_y) > y_median
+                if irregularity_high[axis_y]
+                else pl.col(axis_y) <= y_median
             )
 
-            def assign_stratum(score_val) -> str:
-                if score_val is None or (isinstance(score_val, float) and np.isnan(score_val)):
-                    return None
-                for q_idx, bound in enumerate(quantile_bounds):
-                    if score_val <= bound:
-                        return f"Q{q_idx + 1}"
-                return f"Q{effective_quantiles}"
+            scores_a = scores_a.with_columns(
+                pl.when(~x_high_irregular & ~y_high_irregular).then(pl.lit("LL"))
+                .when(x_high_irregular & ~y_high_irregular).then(pl.lit("HL"))
+                .when(~x_high_irregular & y_high_irregular).then(pl.lit("LH"))
+                .when(x_high_irregular & y_high_irregular).then(pl.lit("HH"))
+                .otherwise(pl.lit(None))
+                .alias("irregularity_stratum"),
+                pl.lit(axis_x).alias("axis_x"),
+                pl.lit(axis_y).alias("axis_y"),
+                pl.lit(selected_corr).alias("axis_pair_corr"),
+                pl.lit(x_median).alias("axis_x_median_threshold"),
+                pl.lit(y_median).alias("axis_y_median_threshold"),
+            )
 
-            stratum_values = [assign_stratum(v) for v in scores["composite_score"].to_list()]
-        else:
-            stratum_values = [
-                "Q1" if v is not None else None
-                for v in scores["composite_score"].to_list()
-            ]
-
-        scores = scores.with_columns(
-            pl.Series(name="irregularity_stratum", values=stratum_values, dtype=pl.Utf8)
-        )
-
-        scores = scores.select([
-            id_col,
-            "cv",
-            "burstiness_coeff",
-            "normalized_entropy",
-            "adherence_rate",
-            "composite_score",
+        scores_a = scores_a.select([
+            id_col, "cv", "burstiness_coeff", "normalized_entropy", "adherence_rate",
+            "axis_x", "axis_y", "axis_pair_corr",
+            "axis_x_median_threshold", "axis_y_median_threshold",
             "irregularity_stratum",
         ])
+        self.results.cs_case_scores = scores_a
 
-        self.results.cs_case_scores = scores
-
+        # ----------------------------------------------------------------
+        # Console output
+        # ----------------------------------------------------------------
         if self.renderer:
+            if self.results.cs_pairwise_correlations is not None:
+                pretty_printing.rich_info(
+                    "Composite score axis selection — pairwise metric correlations:"
+                )
+                print(self.results.cs_pairwise_correlations)
+
+            axis_direction = {
+                "cv": "higher = more irregular",
+                "burstiness_coeff": "higher = more irregular",
+                "adherence_rate": "lower = more irregular (inverse axis)",
+            }
+
             pretty_printing.rich_info(
-                "Composite Irregularity Score: "
-                "composite_score = PC1 from PCA on StandardScaler-normalized cv, burstiness_coeff, normalized_entropy; "
-                f"irregularity_stratum = Q1 (least irregular) … Q{n_quantiles} (most irregular)."
+                "Composite Score — Orthogonal Regime Map (least-correlated axis pair, median-bisected):\n"
+                f"  selected axes: {axis_x} × {axis_y}\n"
+                f"  pair correlation: {selected_corr:.3f} (lower absolute value = more independent)\n"
+                f"  {axis_x}: {axis_direction[axis_x]}\n"
+                f"  {axis_y}: {axis_direction[axis_y]}\n"
+                "  LL: low irregularity on both selected axes\n"
+                "  HL: high irregularity on axis_x, low on axis_y\n"
+                "  LH: low irregularity on axis_x, high on axis_y\n"
+                "  HH: high irregularity on both selected axes"
             )
-            print(self.results.cs_case_scores.describe(interpolation="linear"))
-            total = len(scores)
+
+            total = len(scores_a)
             prevalence = (
-                scores.group_by("irregularity_stratum")
-                .agg(pl.len().alias("n"))
+                scores_a.filter(pl.col("irregularity_stratum").is_not_null())
+                .group_by("irregularity_stratum")
+                .agg(
+                    pl.len().alias("n"),
+                    pl.col("cv").mean().round(4).alias("mean_cv"),
+                    pl.col("adherence_rate").mean().round(4).alias("mean_adherence"),
+                    pl.col("burstiness_coeff").mean().round(4).alias("mean_burstiness"),
+                    pl.col("normalized_entropy").mean().round(4).alias("mean_entropy"),
+                )
                 .with_columns((pl.col("n") / total * 100).round(1).alias("pct"))
                 .sort("irregularity_stratum")
             )
@@ -687,6 +735,10 @@ class Irregularity:
 
         if save_results and path:
             self.results.cs_case_scores.write_csv(path / "case_scores.csv")
+            if self.results.cs_pairwise_correlations is not None:
+                self.results.cs_pairwise_correlations.write_csv(
+                    path / "pairwise_axis_correlations.csv"
+                )
 
         return self
 
@@ -757,15 +809,37 @@ class Irregularity:
             bu = self.results.bu_global_burstiness.row(0, named=True)
             row["burstiness_coeff_global"] = bu.get("burstiness_coeff")
 
-        # --- Composite score (global aggregates) ---
+        # --- Option A: Orthogonal Axis Stratification (selected least-correlated axis pair) ---
         if self.results.cs_case_scores is not None:
             cs = self.results.cs_case_scores
-            non_null_cs = cs.filter(pl.col("composite_score").is_not_null())["composite_score"]
-            row["mean_composite_score"] = float(non_null_cs.mean()) if non_null_cs.len() > 0 else None
-            row["std_composite_score"] = float(non_null_cs.std()) if non_null_cs.len() > 1 else None
-            row["n_quantiles"] = int(
-                cs.filter(pl.col("irregularity_stratum").is_not_null())["irregularity_stratum"].n_unique()
+            axis_row = cs.filter(pl.col("axis_x").is_not_null())
+            if axis_row.height > 0:
+                row["selected_axis_x"] = axis_row["axis_x"][0]
+                row["selected_axis_y"] = axis_row["axis_y"][0]
+                row["selected_axis_pair_corr"] = float(axis_row["axis_pair_corr"][0]) if axis_row["axis_pair_corr"][0] is not None else None
+
+            threshold_row = cs.filter(pl.col("axis_x_median_threshold").is_not_null())
+            if threshold_row.height > 0:
+                row["axis_x_median_threshold"] = float(threshold_row["axis_x_median_threshold"][0])
+                row["axis_y_median_threshold"] = float(threshold_row["axis_y_median_threshold"][0])
+            quadrant_counts = (
+                cs.filter(pl.col("irregularity_stratum").is_not_null())
+                .group_by("irregularity_stratum")
+                .agg(pl.len().alias("n"))
             )
+            for quad in ["LL", "HL", "LH", "HH"]:
+                match = quadrant_counts.filter(pl.col("irregularity_stratum") == quad)
+                row[f"n_{quad}"] = int(match["n"][0]) if match.height > 0 else 0
+
+        # --- Pairwise axis correlations used for axis selection ---
+        if self.results.cs_pairwise_correlations is not None:
+            corr_df = self.results.cs_pairwise_correlations.filter(pl.col("corr").is_not_null())
+            if corr_df.height > 0:
+                top = corr_df.sort(["abs_corr", "n_complete_cases"], descending=[False, True]).row(0, named=True)
+                row["least_correlated_axis_1"] = top["axis_1"]
+                row["least_correlated_axis_2"] = top["axis_2"]
+                row["least_correlated_pair_corr"] = float(top["corr"])
+                row["least_correlated_pair_n"] = int(top["n_complete_cases"])
 
         # --- Metadata ---
         row["bin_resolution_seconds"] = bin_resolution_seconds
@@ -845,7 +919,6 @@ class Irregularity:
                 bin_resolution_seconds=bin_resolution_seconds,
                 adherence_tolerance=adherence_tolerance,
                 min_intervals=min_intervals,
-                n_quantiles=n_strata_quantiles,
                 save_results=save_results,
             )
         except Exception as e:
