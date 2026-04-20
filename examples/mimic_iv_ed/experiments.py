@@ -1,12 +1,13 @@
 """
 MIMIC-IV-ED irregularity experiment
 ====================================
-Compares three XGBoost pipelines for different prediction tasks (e.g. 30-day readmission, in-hospital mortality):
+Compares XGBoost pipelines for different prediction tasks (e.g. 30-day readmission, in-hospital mortality):
 
   Pipeline A – regular 30-min resampled grid, statistical aggregates only
   Pipeline B – raw irregular intervals, statistical + imperfekt irregularity aggregates
     Pipeline C – raw imperfekt irregularity features, then 30-min resample + fill,
                              then statistical + imperfekt irregularity aggregates
+    Pipeline D – Pipeline 0 + observation-count feature (timestamps per stay)
 
 Performance is estimated with repeated stratified k-fold cross-validation
 (5 folds × 10 repeats = 50 fits per pipeline).  The test set is stratified
@@ -41,7 +42,7 @@ from imperfekt.analysis.irregularity.irregularity import Irregularity  # noqa: E
 
 RESULTS_DIR = Path(__file__).parent / "mimic_iv_ed_results"
 RANDOM_STATE = 42
-WINDOW_HOURS = 4
+WINDOW_HOURS = 5
 MIN_OBS = 5
 MAX_MISSINGNESS = 0.5
 OUTCOME_COL = "critical_outcome"
@@ -60,6 +61,10 @@ IREG_FEATURE_COLS = [
     "rolling_abs_acceleration_5",
     "rolling_std_acceleration_5",
 ]
+
+SPEARMAN_TOP_K_PHYS = 5
+SPEARMAN_TOP_K_STRUCT = 5
+
 
 
 # ── data loading ──────────────────────────────────────────────────────────────
@@ -104,6 +109,19 @@ def pipeline_0_features(df: pl.DataFrame) -> pl.DataFrame:
     Baseline that isolates the contribution of temporal structure.
     """
     return df.sort(["stay_id", "charttime"]).group_by("stay_id").agg(_vital_agg_exprs())
+
+
+def pipeline_d_features(df: pl.DataFrame) -> pl.DataFrame:
+    """
+    Pipeline 0 plus observation-count feature: raw irregular timestamps,
+    vital-sign statistical aggregates, and number of timestamped
+    observations (rows) per stay.
+    """
+    return (
+        df.sort(["stay_id", "charttime"])
+        .group_by("stay_id")
+        .agg(_vital_agg_exprs() + [pl.col("charttime").count().alias("n_observations")])
+    )
 
 
 def pipeline_a_features(df: pl.DataFrame) -> pl.DataFrame:
@@ -179,7 +197,7 @@ def compute_irregularity_strata(ts_df: pl.DataFrame) -> tuple[pl.DataFrame, "Irr
     Compute per-stay composite irregularity score and stratum on the full
     dataset. Strata are derived once so boundaries are consistent across
     all CV folds — they describe data heterogeneity, not the outcome.
-    Returns (strata DataFrame with stay_id/irregularity_stratum/composite_score,
+    Returns (strata DataFrame with stay_id/irregularity_stratum,
              the fitted Irregularity object).
     """
     strata_dir = RESULTS_DIR / "irregularity_strata"
@@ -191,7 +209,7 @@ def compute_irregularity_strata(ts_df: pl.DataFrame) -> tuple[pl.DataFrame, "Irr
     )
     ireg.run(save_results=True, n_strata_quantiles=8)
     strata = ireg.results.cs_case_scores.select(
-        ["stay_id", "irregularity_stratum", "composite_score"]
+        ["stay_id", "irregularity_stratum"]
     )
     return strata, ireg
 
@@ -390,7 +408,7 @@ def plot_auprc_by_stratum(
 
     x = np.arange(len(strata_keys))
     fig, ax = plt.subplots(figsize=(8, 4.5))
-    colors = ["#4C72B0", "#DD8452", "#55A868", "#C44E52"]
+    colors = ["#4C72B0", "#DD8452", "#55A868", "#C44E52", "#8172B3"]
 
     for idx, (label, summary) in enumerate(pipeline_summaries):
         color = colors[idx % len(colors)]
@@ -451,7 +469,7 @@ def plot_auprc_lift_by_stratum(
 
     x = np.arange(len(strata_keys))
     fig, ax = plt.subplots(figsize=(8, 4.5))
-    colors = ["#4C72B0", "#DD8452", "#55A868", "#C44E52"]
+    colors = ["#4C72B0", "#DD8452", "#55A868", "#C44E52", "#8172B3"]
 
     ax.axhline(1.0, color="black", linestyle="--", linewidth=0.8, label="No-skill baseline")
 
@@ -620,17 +638,18 @@ def _plot_group_importance_by_stratum(
 
 def _spearman_structural_floor(
     abs_shap: np.ndarray,
+    raw_features: np.ndarray,
     feature_cols: list[str],
     phys_cols: list[str],
     struct_cols: list[str],
     pipeline_name: str,
 ) -> pl.DataFrame | None:
     """
-    Pairwise Spearman rho between several top metadata and physiology features.
+    Pairwise Spearman rho between top metadata and physiology raw features.
 
-    Feature importance is defined by mean |SHAP| over samples.
-    We select the top-k features from each group and compute all
-    pairwise Spearman correlations between their absolute SHAP vectors.
+    Feature ranking is defined by mean |SHAP| over samples.
+    We select the top-k features from each group by this ranking and compute
+    pairwise Spearman correlations on aligned raw feature values only.
 
     Returns:
         A Polars DataFrame sorted by absolute rho (descending), or None if
@@ -645,7 +664,14 @@ def _spearman_structural_floor(
         )
         return None
 
+    if raw_features.shape[0] != abs_shap.shape[0]:
+        raise ValueError(
+            f"[{pipeline_name}] Spearman alignment error: raw_features rows "
+            f"({raw_features.shape[0]}) != abs_shap rows ({abs_shap.shape[0]})."
+        )
+
     mean_abs = abs_shap.mean(axis=0)
+    mean_raw = np.nanmean(np.where(np.isfinite(raw_features), raw_features, np.nan), axis=0)
 
     phys_idx_map = {c: feature_cols.index(c) for c in phys_cols}
     struct_idx_map = {c: feature_cols.index(c) for c in struct_cols}
@@ -658,11 +684,23 @@ def _spearman_structural_floor(
 
     rows: list[dict] = []
     for struct_feat in top_struct:
-        struct_vals = abs_shap[:, struct_idx_map[struct_feat]]
+        struct_vals = raw_features[:, struct_idx_map[struct_feat]]
         for phys_feat in top_phys:
-            phys_vals = abs_shap[:, phys_idx_map[phys_feat]]
-            rho, pval = spearmanr(phys_vals, struct_vals)
-            if np.isnan(pval):
+            phys_vals = raw_features[:, phys_idx_map[phys_feat]]
+
+            valid_mask = np.isfinite(phys_vals) & np.isfinite(struct_vals)
+            valid_n = int(valid_mask.sum())
+            if valid_n < 3:
+                rho, pval = float("nan"), float("nan")
+            else:
+                phys_valid = phys_vals[valid_mask]
+                struct_valid = struct_vals[valid_mask]
+                if np.nanstd(phys_valid) == 0 or np.nanstd(struct_valid) == 0:
+                    rho, pval = float("nan"), float("nan")
+                else:
+                    rho, pval = spearmanr(phys_valid, struct_valid)
+
+            if np.isnan(rho) or np.isnan(pval):
                 significance = "undefined"
             elif pval < 0.001:
                 significance = "*** (p<0.001)"
@@ -679,10 +717,13 @@ def _spearman_structural_floor(
                     "physiology_feature": phys_feat,
                     "metadata_mean_abs_shap": float(mean_abs[struct_idx_map[struct_feat]]),
                     "physiology_mean_abs_shap": float(mean_abs[phys_idx_map[phys_feat]]),
+                    "metadata_mean_raw": float(mean_raw[struct_idx_map[struct_feat]]),
+                    "physiology_mean_raw": float(mean_raw[phys_idx_map[phys_feat]]),
                     "rho": float(rho),
                     "abs_rho": float(abs(rho)) if not np.isnan(rho) else float("nan"),
                     "p_value": float(pval),
                     "significance": significance,
+                    "valid_n": valid_n,
                 }
             )
 
@@ -706,13 +747,91 @@ def _spearman_structural_floor(
     print(
         f"[{pipeline_name}] Spearman pairwise structural-floor test: "
         f"{top_k_struct} metadata × {top_k_phys} physiology = {spearman_df.height} pairs\n"
-        f"  top physiology features (mean |SHAP|): {top_phys_desc}\n"
-        f"  top metadata features (mean |SHAP|): {top_struct_desc}\n"
-        f"  mean |rho| across pairs = {mean_abs_rho:.3f}; significant pairs (p<0.05) = {sig_pairs}/{spearman_df.height}"
+        f"  top physiology features (mean |SHAP| for ordering): {top_phys_desc}\n"
+        f"  top metadata features (mean |SHAP| for ordering): {top_struct_desc}\n"
+        f"  mean |rho| across raw-feature pairs = {mean_abs_rho:.3f}; "
+        f"significant pairs (p<0.05) = {sig_pairs}/{spearman_df.height}"
     )
     print(spearman_df)
 
     return spearman_df
+
+
+def _plot_spearman_heatmap(
+    spearman_df: pl.DataFrame,
+    pipeline_name: str,
+    save_path: Path,
+) -> None:
+    """Plot rho heatmap for metadata vs physiology feature pairs."""
+    if spearman_df.height == 0:
+        print(f"[{pipeline_name}] Skipping Spearman heatmap: empty pair table.")
+        return
+
+    meta_order = (
+        spearman_df
+        .select(["metadata_feature", "metadata_mean_abs_shap"])
+        .unique(subset=["metadata_feature"], keep="first")
+        .sort("metadata_mean_abs_shap", descending=True)["metadata_feature"]
+        .to_list()
+    )
+    phys_order = (
+        spearman_df
+        .select(["physiology_feature", "physiology_mean_abs_shap"])
+        .unique(subset=["physiology_feature"], keep="first")
+        .sort("physiology_mean_abs_shap", descending=True)["physiology_feature"]
+        .to_list()
+    )
+
+    rho_lookup = {
+        (row["metadata_feature"], row["physiology_feature"]): row["rho"]
+        for row in spearman_df.iter_rows(named=True)
+    }
+    sig_lookup = {
+        (row["metadata_feature"], row["physiology_feature"]): row["significance"]
+        for row in spearman_df.iter_rows(named=True)
+    }
+
+    rho_mat = np.full((len(meta_order), len(phys_order)), np.nan, dtype=float)
+    for i, meta in enumerate(meta_order):
+        for j, phys in enumerate(phys_order):
+            rho = rho_lookup.get((meta, phys), float("nan"))
+            rho_mat[i, j] = rho
+
+    fig_w = max(8.0, 1.2 * len(phys_order) + 3.0)
+    fig_h = max(5.0, 0.8 * len(meta_order) + 2.5)
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+
+    cmap = plt.get_cmap("coolwarm").copy()
+    cmap.set_bad(color="#f2f2f2")
+    im = ax.imshow(rho_mat, aspect="auto", cmap=cmap, vmin=-1.0, vmax=1.0)
+
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label("Spearman rho")
+
+    ax.set_xticks(np.arange(len(phys_order)))
+    ax.set_xticklabels(phys_order, rotation=40, ha="right")
+    ax.set_yticks(np.arange(len(meta_order)))
+    ax.set_yticklabels(meta_order)
+    ax.set_xlabel("Physiology features (SHAP-ranked)")
+    ax.set_ylabel("Metadata features (SHAP-ranked)")
+    ax.set_title(f"{pipeline_name}: Spearman heatmap (raw-feature pairs)")
+
+    for i, meta in enumerate(meta_order):
+        for j, phys in enumerate(phys_order):
+            rho = rho_mat[i, j]
+            sig = sig_lookup.get((meta, phys), "")
+            if np.isnan(rho):
+                text = "NA"
+            else:
+                star = "" if sig in ("", "ns", "undefined") else "*"
+                text = f"{rho:.2f}{star}"
+            ax.text(j, i, text, ha="center", va="center", fontsize=8, color="black")
+
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.tight_layout()
+    fig.savefig(save_path, format="svg")
+    plt.close(fig)
+    print(f"[{pipeline_name}] Spearman heatmap saved to {save_path}")
 
 
 def run_shap_group_analysis(
@@ -786,6 +905,7 @@ def run_shap_group_analysis(
 
     spearman_df = _spearman_structural_floor(
         abs_shap=abs_shap,
+        raw_features=X_aligned[:n_aligned],
         feature_cols=feature_cols,
         phys_cols=phys_cols,
         struct_cols=struct_cols,
@@ -793,6 +913,12 @@ def run_shap_group_analysis(
     )
 
     if spearman_df is not None and spearman_df.height > 0:
+        _plot_spearman_heatmap(
+            spearman_df=spearman_df,
+            pipeline_name=pipeline_name,
+            save_path=RESULTS_DIR / "figures" / f"spearman_heatmap_{pipeline_name}.svg",
+        )
+
         spearman_path = RESULTS_DIR / "figures" / f"spearman_pairwise_{pipeline_name}.csv"
         spearman_path.parent.mkdir(parents=True, exist_ok=True)
         spearman_df.write_csv(spearman_path)
@@ -833,6 +959,7 @@ def main() -> None:
 
     print("\nBuilding stay-level feature frames…")
     stay_0 = build_stay_level(ts_df, pipeline_0_features)
+    stay_d = build_stay_level(ts_df, pipeline_d_features)
     stay_a = build_stay_level(ts_df, pipeline_a_features)
     stay_b = build_stay_level(ts_df, pipeline_b_features)
     stay_c = build_stay_level(ts_df, pipeline_c_features)
@@ -840,6 +967,7 @@ def main() -> None:
     # subject_id is needed inside run_cv for group-level splitting; carry it over
     subj_map = ts_df.select(["stay_id", "subject_id"]).unique("stay_id", keep="first")
     stay_0 = stay_0.join(subj_map, on="stay_id", how="left")
+    stay_d = stay_d.join(subj_map, on="stay_id", how="left")
     stay_a = stay_a.join(subj_map, on="stay_id", how="left")
     stay_b = stay_b.join(subj_map, on="stay_id", how="left")
     stay_c = stay_c.join(subj_map, on="stay_id", how="left")
@@ -847,6 +975,10 @@ def main() -> None:
     print(f"\nRunning {CV_N_SPLITS}×{CV_N_REPEATS} repeated stratified k-fold CV — Pipeline 0…")
     folds_0, _, _, _, _ = run_cv(stay_0, strata, "Pipeline0")
     summary_0 = summarise_cv(folds_0, "Pipeline0")
+
+    print(f"\nRunning {CV_N_SPLITS}×{CV_N_REPEATS} repeated stratified k-fold CV — Pipeline D…")
+    folds_d, _, _, _, _ = run_cv(stay_d, strata, "PipelineD")
+    summary_d = summarise_cv(folds_d, "PipelineD")
 
     print(f"\nRunning {CV_N_SPLITS}×{CV_N_REPEATS} repeated stratified k-fold CV — Pipeline A…")
     folds_a, _, _, _, _ = run_cv(stay_a, strata, "PipelineA")
@@ -863,6 +995,7 @@ def main() -> None:
     print("\nPlotting AUPRC by stratum…")
     pipeline_summaries = [
         ("Pipeline 0 (raw stats, no imperfekt)", summary_0),
+        ("Pipeline D (raw stats + observation count)", summary_d),
         ("Pipeline A (resampled)", summary_a),
         ("Pipeline B (imperfekt)", summary_b),
         ("Pipeline C (raw->resampled imperfekt)", summary_c),

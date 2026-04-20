@@ -292,7 +292,7 @@ VITAL_COLS = ["temperature", "heartrate", "resprate", "o2sat", "sbp", "dbp"]
 
 def build_cohort(
     outcomes: list[Outcome],
-    min_observations: int = 10,
+    min_observations: int | None = None,
     window_hours: int | None = None,
     max_missingness: float = 0.5,
 ) -> pl.DataFrame:
@@ -314,7 +314,7 @@ def build_cohort(
         Any subset of "sepsis", "in_hospital_mortality", "readmission_30d", "ed_stay_length".
     min_observations:
         Minimum number of vitalsign rows a stay must have to be included.
-        Defaults to 10.
+        Defaults to None.
     window_hours:
         If set, truncate each stay to the first window_hours hours after ED
         arrival (intime). Observations with charttime > intime + window_hours
@@ -367,9 +367,13 @@ def build_cohort(
             .filter(pl.col("charttime") <= pl.col("intime") + pl.duration(hours=window_hours))
             .drop("intime")
         )
-    sufficient = vitalsigns.filter(
-        pl.col("stay_id").count().over("stay_id") >= min_observations
-    )
+        
+    if min_observations is not None:
+        sufficient = vitalsigns.filter(
+            pl.col("stay_id").count().over("stay_id") >= min_observations
+        )
+    else:
+        sufficient = vitalsigns
 
     # Row is missing if any of the core vital sign columns is null.
     # Stays where more than max_missingness fraction of rows are missing are dropped.
