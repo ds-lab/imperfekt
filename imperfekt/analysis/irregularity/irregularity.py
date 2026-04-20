@@ -199,7 +199,7 @@ class Irregularity:
                 "cv = std/mean per case (0 = perfectly regular, higher = more irregular); "
                 "iqr = spread of interval lengths."
             )
-            print(self.results.ins_case_statistics.describe(interpolation="linear"))
+            print(self.results.ins_case_statistics.describe(interpolation="linear", percentiles=[0.05, 0.25, 0.5, 0.75, 0.95]))
             pretty_printing.rich_info(
                 "Interval Statistics — Global: pooled summary over all inter-observation intervals."
             )
@@ -333,7 +333,7 @@ class Irregularity:
 
         if self.renderer:
             pretty_printing.rich_info("Burstiness — Case Level (B=1: bursty, B=-1: perfectly periodic):")
-            print(self.results.bu_case_burstiness.describe(interpolation="linear"))
+            print(self.results.bu_case_burstiness.describe(interpolation="linear", percentiles=[0.05, 0.25, 0.5, 0.75, 0.95]))
             pretty_printing.rich_info("Burstiness — Global (B=1: bursty, B=-1: perfectly periodic):")
             print(self.results.bu_global_burstiness)
 
