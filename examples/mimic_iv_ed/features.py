@@ -83,7 +83,7 @@ def pipeline_b_features(df: pl.DataFrame) -> pl.DataFrame:
     df_ireg = (
         df.sort(["stay_id", "charttime"])
         .pipe(add_interval_features, id_col="stay_id", clock_col="charttime")
-        .pipe(add_windowed_acceleration, id_col="stay_id", clock_col="charttime")
+        .pipe(add_windowed_acceleration, window_size=5, id_col="stay_id", clock_col="charttime")
     )
     return df_ireg.group_by("stay_id").agg(_vital_agg_exprs() + _ireg_agg_exprs())
 
@@ -97,7 +97,7 @@ def pipeline_c_features(df: pl.DataFrame) -> pl.DataFrame:
     df_ireg = (
         df.sort(["stay_id", "charttime"])
         .pipe(add_interval_features, id_col="stay_id", clock_col="charttime")
-        .pipe(add_windowed_acceleration, id_col="stay_id", clock_col="charttime")
+        .pipe(add_windowed_acceleration, window_size=5, id_col="stay_id", clock_col="charttime")
     )
     fill_cols = VITAL_COLS + IREG_FEATURE_COLS
     filled = (
@@ -113,7 +113,7 @@ def build_stay_level(ts_df: pl.DataFrame, feature_fn) -> pl.DataFrame:
     """Build stay-level feature frame with outcome label attached."""
     features = feature_fn(ts_df)
     stay_meta = (
-        ts_df.select(["stay_id", OUTCOME_COL, "age_at_visit", "sex"])
+        ts_df.select(["stay_id", "subject_id", OUTCOME_COL, "age_at_visit", "sex"])
         .unique("stay_id", keep="first")
         .with_columns(sex_female=pl.col("sex").eq("F").cast(pl.Int8))
         .drop("sex")

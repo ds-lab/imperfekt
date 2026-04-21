@@ -83,14 +83,6 @@ def main() -> None:
     stay_b = build_stay_level(ts_df, pipeline_b_features)
     stay_c = build_stay_level(ts_df, pipeline_c_features)
 
-    # subject_id is needed inside run_cv for group-level splitting; carry it over
-    subj_map = ts_df.select(["stay_id", "subject_id"]).unique("stay_id", keep="first")
-    stay_0 = stay_0.join(subj_map, on="stay_id", how="left")
-    stay_d = stay_d.join(subj_map, on="stay_id", how="left")
-    stay_a = stay_a.join(subj_map, on="stay_id", how="left")
-    stay_b = stay_b.join(subj_map, on="stay_id", how="left")
-    stay_c = stay_c.join(subj_map, on="stay_id", how="left")
-
     print(f"\nRunning {CV_N_SPLITS}×{CV_N_REPEATS} repeated stratified k-fold CV — Pipeline 0…")
     folds_0, _, _, _, _, _ = run_cv(stay_0, case_metrics, axes, "Pipeline0")
     summary_0 = summarise_cv(folds_0, "Pipeline0")
@@ -126,10 +118,12 @@ def main() -> None:
     plot_auprc_by_stratum(
         pipeline_summaries,
         RESULTS_DIR / "figures" / "auprc_by_stratum.svg",
+        show_legend=False,
     )
     plot_auprc_lift_by_stratum(
         pipeline_summaries,
         RESULTS_DIR / "figures" / "auprc_lift_by_stratum.svg",
+        show_legend=False,
     )
 
     print("\nComputing SHAP group-importance analysis for Pipeline B (last CV fold)…")

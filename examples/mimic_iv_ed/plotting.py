@@ -46,6 +46,7 @@ def _stratum_tick_labels(strata_keys: list[str], pipeline_summaries: list[tuple[
 def plot_auprc_by_stratum(
     pipeline_summaries: list[tuple[str, dict[str, dict]]],
     save_path: Path,
+    show_legend: bool = True,
 ) -> None:
     """
     Line plot: mean AUPRC per irregularity stratum for all provided pipelines.
@@ -76,7 +77,7 @@ def plot_auprc_by_stratum(
 
     x = np.arange(len(strata_keys))
     fig, ax = plt.subplots(figsize=(8, 4.5))
-    colors = ["#4C72B0", "#DD8452", "#55A868", "#C44E52", "#8172B3"]
+    colors = ["#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7"]
 
     for idx, (label, summary) in enumerate(pipeline_summaries):
         color = colors[idx % len(colors)]
@@ -95,9 +96,10 @@ def plot_auprc_by_stratum(
     ax.set_xlabel("Irregularity stratum (mean outcome prevalence from CV test folds)")
     ax.set_ylabel("AUPRC (mean ± 95% CI)")
     ax.set_ylim(0, 1)
-    ax.legend(loc="lower left")
+    if show_legend:
+        ax.legend(loc="upper left", bbox_to_anchor=(1, 1), borderaxespad=0)
     ax.set_title(f"AUPRC by irregularity stratum ({CV_N_SPLITS}×{CV_N_REPEATS} CV)")
-    fig.tight_layout()
+    fig.tight_layout(rect=[0, 0, 0.78 if show_legend else 1, 1])
     save_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(save_path, format="svg")
     plt.close(fig)
@@ -107,6 +109,7 @@ def plot_auprc_by_stratum(
 def plot_auprc_lift_by_stratum(
     pipeline_summaries: list[tuple[str, dict[str, dict]]],
     save_path: Path,
+    show_legend: bool = True,
 ) -> None:
     """
     Line plot: mean AUPRC lift (AUPRC / prevalence) per irregularity stratum.
@@ -137,7 +140,7 @@ def plot_auprc_lift_by_stratum(
 
     x = np.arange(len(strata_keys))
     fig, ax = plt.subplots(figsize=(8, 4.5))
-    colors = ["#4C72B0", "#DD8452", "#55A868", "#C44E52", "#8172B3"]
+    colors = ["#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7"]
 
     ax.axhline(1.0, color="black", linestyle="--", linewidth=0.8, label="No-skill baseline")
 
@@ -153,9 +156,10 @@ def plot_auprc_lift_by_stratum(
     ax.set_xticklabels(_stratum_tick_labels(strata_keys, pipeline_summaries))
     ax.set_xlabel("Irregularity stratum (mean outcome prevalence from CV test folds)")
     ax.set_ylabel("AUPRC lift = AUPRC / prevalence (mean ± 95% CI)")
-    ax.legend(loc="lower left")
+    if show_legend:
+        ax.legend(loc="upper left", bbox_to_anchor=(1, 1), borderaxespad=0)
     ax.set_title(f"AUPRC lift by irregularity stratum ({CV_N_SPLITS}×{CV_N_REPEATS} CV)")
-    fig.tight_layout()
+    fig.tight_layout(rect=[0, 0, 0.78 if show_legend else 1, 1])
     save_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(save_path, format="svg")
     plt.close(fig)

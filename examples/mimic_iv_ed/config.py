@@ -19,9 +19,9 @@ IREG_FEATURE_COLS = [
     "interval_z_score",
     "interval_cv_local",
     "interval_acceleration",
-    "rolling_mean_acceleration_5",
-    "rolling_abs_acceleration_5",
-    "rolling_std_acceleration_5",
+    "rolling_mean_acceleration",
+    "rolling_abs_acceleration",
+    "rolling_std_acceleration",
 ]
 
 SPEARMAN_TOP_K_PHYS = 10
