@@ -144,7 +144,7 @@ def compute_dominant_frequency(
         .with_columns(
             (pl.col("interval_bin") * bin_resolution_seconds).alias("interval_seconds_bin_center"),
         )
-        .sort("count", descending=True)
+        .sort(["count", "interval_bin"], descending=[True, False])
     )
 
     n_total = bin_counts["count"].sum()

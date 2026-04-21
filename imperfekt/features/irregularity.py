@@ -149,9 +149,9 @@ def add_windowed_acceleration(
         The DataFrame with four new columns added.
     """
     accel_col = "interval_acceleration"
-    mean_col = f"rolling_mean_acceleration_{window_size}"
-    abs_col = f"rolling_abs_acceleration_{window_size}"
-    std_col = f"rolling_std_acceleration_{window_size}"
+    mean_col = f"rolling_mean_acceleration"
+    abs_col = f"rolling_abs_acceleration"
+    std_col = f"rolling_std_acceleration"
     new_cols = [accel_col, mean_col, abs_col, std_col]
 
     interval_df = _compute_intervals(df, id_col, clock_col)
