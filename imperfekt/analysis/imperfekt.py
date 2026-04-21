@@ -295,6 +295,7 @@ class Imperfekt:
                 ).mcar_test(save_results=save_results).mar_mnar_test(
                     save_results=save_results
                 ).symmetric_correlation(save_results=save_results)
+                self.group_results[group].irregularity.composite_score(save_results=save_results)
             if group_save_path:
                 self.group_results[group].generate_html_reports(
                     addition_to_title=addition_to_title + f" - Group: {group}"

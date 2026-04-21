@@ -3,6 +3,7 @@ from pathlib import Path
 
 import numpy as np
 import polars as pl
+from scipy.stats import spearmanr
 
 from imperfekt.analysis.intravariable import autocorrelation
 from imperfekt.analysis.irregularity import burstiness as burstiness_module
@@ -101,7 +102,7 @@ class Irregularity:
         Compute and cache per-case inter-observation intervals.
 
         Handles both Datetime clock columns (intervals converted to seconds via
-        .dt.total_seconds()) and numeric clock columns (intervals computed as
+        .dt.total_seconds()) and numeric clock columns (intervals, assumed as seconds, and computed as
         a plain numeric difference, cast to Float64).
 
         The resulting "interval_seconds" column represents the gap between
@@ -500,7 +501,6 @@ class Irregularity:
         bin_resolution_seconds: float = 60.0,
         adherence_tolerance: float = 0.5,
         min_intervals: int = 2,
-        n_quantiles: int = 4,
         save_results: bool = True,
     ) -> "Irregularity":
         """
@@ -511,9 +511,9 @@ class Irregularity:
             - burstiness_coeff
             - adherence_rate
 
-        All pairwise metric correlations are computed first, then the axis pair with
-        the smallest absolute correlation (most independent) is selected for quadrant
-        assignment.
+        All pairwise Spearman rank correlations are computed first, then the axis pair
+        with the smallest absolute correlation (most independent) is selected for
+        quadrant assignment.
 
         Selected axes are median-bisected into LL/HL/LH/HH quadrants.
         For adherence_rate, the irregularity direction is inverted:
@@ -522,7 +522,7 @@ class Irregularity:
         Descriptors normalized_entropy and burstiness_coeff are retained per case for
         within-quadrant characterisation (not used for axis selection).
 
-        Requires interval_statistics() and burstiness() to have been run first.
+        Runs interval_statistics() and burstiness() automatically if not already done.
         If case_entropy_adherence() has already been run, reuses those results.
 
         Results stored in:
@@ -539,23 +539,19 @@ class Irregularity:
         Returns:
             self: Supports method chaining.
         """
-        if self.results.ins_case_statistics is None:
-            raise ValueError(
-                "interval_statistics() must be run before composite_score(). "
-                "Call .interval_statistics() first or use .run()."
-            )
-        if self.results.bu_case_burstiness is None:
-            raise ValueError(
-                "burstiness() must be run before composite_score(). "
-                "Call .burstiness() first or use .run()."
-            )
-
         new_path_level_name = "composite_score"
         path = None
         if self.save_path and save_results:
             path = self.save_path / new_path_level_name
             path.mkdir(parents=True, exist_ok=True)
-
+        
+        # Get or compute all necessary metrics for axis selection
+        if self.results.ins_case_statistics is None:
+            self.interval_statistics(save_results=save_results)
+            
+        if self.results.bu_case_burstiness is None:
+            self.burstiness(save_results=save_results)
+            
         if self.results.ea_case_entropy_adherence is not None:
             entropy_df = self.results.ea_case_entropy_adherence
         else:
@@ -568,19 +564,17 @@ class Irregularity:
                 min_intervals=min_intervals,
             )
 
-        id_col = self.id_col
-
         base = (
             self.results.ins_case_statistics
-            .select([id_col, "cv"])
+            .select([self.id_col, "cv", "qcod"])
             .join(
-                self.results.bu_case_burstiness.select([id_col, "burstiness_coeff"]),
-                on=id_col,
+                self.results.bu_case_burstiness.select([self.id_col, "burstiness_coeff"]),
+                on=self.id_col,
                 how="left",
             )
             .join(
-                entropy_df.select([id_col, "normalized_entropy", "adherence_rate"]),
-                on=id_col,
+                entropy_df.select([self.id_col, "normalized_entropy", "adherence_rate"]),
+                on=self.id_col,
                 how="left",
             )
         )
@@ -589,10 +583,9 @@ class Irregularity:
             "cv": True,
             "burstiness_coeff": True,
             "adherence_rate": False,
+            "qcod": True,
         }
-
-        # normalized_entropy is intentionally excluded from axis selection.
-        metric_cols = ["cv", "burstiness_coeff", "adherence_rate"]
+        metric_cols = list(irregularity_high.keys())
 
         def _pair_corr(df: pl.DataFrame, col_x: str, col_y: str) -> tuple[float, int]:
             pair_df = df.select([col_x, col_y]).drop_nulls([col_x, col_y])
@@ -604,7 +597,7 @@ class Irregularity:
             y = pair_df[col_y].to_numpy()
             if np.nanstd(x) == 0 or np.nanstd(y) == 0:
                 return float("nan"), n_complete
-            return float(np.corrcoef(x, y)[0, 1]), n_complete
+            return float(spearmanr(x, y).statistic), n_complete
 
         corr_rows = []
         for i, col_x in enumerate(metric_cols):
@@ -631,17 +624,19 @@ class Irregularity:
             axis_y = selected["axis_2"]
             selected_corr = float(selected["corr"])
         else:
-            # Fallback to the original default if pairwise correlations are undefined
             axis_x = "cv"
             axis_y = "adherence_rate"
             selected_corr = float("nan")
+            pretty_printing.rich_warning(
+                "Could not compute pairwise Spearman correlations for axis selection "
+                "(too few complete cases or zero-variance metrics). "
+                f"Falling back to default axes: {axis_x} × {axis_y}."
+            )
 
         complete_mask = pl.col(axis_x).is_not_null() & pl.col(axis_y).is_not_null()
         complete_df = base.filter(complete_mask)
 
-        # ----------------------------------------------------------------
-        # Option A — median-bisection on selected least-correlated axis pair
-        # ----------------------------------------------------------------
+        # median-bisection on selected least-correlated axis pair
         scores_a = base.clone()
         if len(complete_df) < 2:
             scores_a = scores_a.with_columns(
@@ -682,16 +677,13 @@ class Irregularity:
             )
 
         scores_a = scores_a.select([
-            id_col, "cv", "burstiness_coeff", "normalized_entropy", "adherence_rate",
+            self.id_col, "cv", "qcod", "burstiness_coeff", "normalized_entropy", "adherence_rate",
             "axis_x", "axis_y", "axis_pair_corr",
             "axis_x_median_threshold", "axis_y_median_threshold",
             "irregularity_stratum",
         ])
         self.results.cs_case_scores = scores_a
 
-        # ----------------------------------------------------------------
-        # Console output
-        # ----------------------------------------------------------------
         if self.renderer:
             if self.results.cs_pairwise_correlations is not None:
                 pretty_printing.rich_info(
@@ -701,20 +693,21 @@ class Irregularity:
 
             axis_direction = {
                 "cv": "higher = more irregular",
+                "qcod": "higher = more irregular",
                 "burstiness_coeff": "higher = more irregular",
                 "adherence_rate": "lower = more irregular (inverse axis)",
             }
 
             pretty_printing.rich_info(
-                "Composite Score — Orthogonal Regime Map (least-correlated axis pair, median-bisected):\n"
+                "Composite Score — Orthogonal Map (least-correlated axis pair, median-bisected):\n"
                 f"  selected axes: {axis_x} × {axis_y}\n"
                 f"  pair correlation: {selected_corr:.3f} (lower absolute value = more independent)\n"
                 f"  {axis_x}: {axis_direction[axis_x]}\n"
                 f"  {axis_y}: {axis_direction[axis_y]}\n"
-                "  LL: low irregularity on both selected axes\n"
-                "  HL: high irregularity on axis_x, low on axis_y\n"
-                "  LH: low irregularity on axis_x, high on axis_y\n"
-                "  HH: high irregularity on both selected axes"
+                f"  LL: low irregularity on both selected axes\n"
+                f"  HL: high irregularity on {axis_x}, low on {axis_y}\n"
+                f"  LH: low irregularity on {axis_x}, high on {axis_y}\n"
+                f"  HH: high irregularity on both selected axes"
             )
 
             total = len(scores_a)
@@ -724,6 +717,7 @@ class Irregularity:
                 .agg(
                     pl.len().alias("n"),
                     pl.col("cv").mean().round(4).alias("mean_cv"),
+                    pl.col("qcod").mean().round(4).alias("mean_qcod"),
                     pl.col("adherence_rate").mean().round(4).alias("mean_adherence"),
                     pl.col("burstiness_coeff").mean().round(4).alias("mean_burstiness"),
                     pl.col("normalized_entropy").mean().round(4).alias("mean_entropy"),
@@ -859,7 +853,6 @@ class Irregularity:
         bin_resolution_seconds: float = 60.0,
         adherence_tolerance: float = 0.5,
         min_intervals: int = 2,
-        n_strata_quantiles: int = 4,
         autocorrelation_lags: int = 20,
     ) -> "Irregularity":
         """

@@ -43,6 +43,7 @@ def compute_case_interval_statistics(
         )
         .with_columns(
             (pl.col("q75_seconds") - pl.col("q25_seconds")).alias("iqr_seconds"),
+            ((pl.col("q75_seconds") - pl.col("q25_seconds")) / (pl.col("q75_seconds") + pl.col("q25_seconds"))).alias("qcod"),
             pl.when(pl.col("mean_seconds") != 0)
             .then(pl.col("std_seconds") / pl.col("mean_seconds"))
             .otherwise(None)
@@ -57,6 +58,7 @@ def compute_case_interval_statistics(
             "std_seconds",
             "cv",
             "iqr_seconds",
+            "qcod",
             "min_seconds",
             "max_seconds",
         ])

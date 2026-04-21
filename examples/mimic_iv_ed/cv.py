@@ -45,7 +45,7 @@ def compute_irregularity_strata(
         clock_col="charttime",
         save_path=strata_dir,
     )
-    ireg.run(save_results=True, n_strata_quantiles=8)
+    ireg.run(save_results=True)
     case_metrics = ireg.results.cs_case_scores
     axis_x = case_metrics["axis_x"][0]
     axis_y = case_metrics["axis_y"][0]
