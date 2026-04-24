@@ -187,19 +187,49 @@ def run_cv(
 
         # Join test strata onto test rows to get a per-row stratum label aligned
         # with y_test/y_proba, then group by stratum without repeated is_in scans.
+        # Also join cv/qcod/adherence_rate for irregularity characterisation per stratum.
+        ireg_cols = ["stay_id", "cv", "qcod", "adherence_rate"]
+        available_ireg = [c for c in ireg_cols if c in case_metrics.columns]
+        test_strata_ireg = (
+            test_strata
+            .join(
+                case_metrics.select(available_ireg),
+                on="stay_id",
+                how="left",
+            )
+        )
+
         strata_arr = (
             test.select("stay_id")
-            .join(test_strata, on="stay_id", how="left")
+            .join(test_strata_ireg.select(["stay_id", "irregularity_stratum"]), on="stay_id", how="left")
             ["irregularity_stratum"]
             .fill_null("")
             .to_numpy()
         )
+
+        ireg_lookup: dict[str, dict[str, float]] = {}
+        for row in test_strata_ireg.iter_rows(named=True):
+            sid = row["stay_id"]
+            ireg_lookup[sid] = {
+                c: row[c] for c in ("cv", "qcod", "adherence_rate") if c in row
+            }
+
+        stay_ids_arr = test["stay_id"].to_numpy()
+
         for stratum_label in np.unique(strata_arr):
             if stratum_label == "":
                 continue
             mask = strata_arr == stratum_label
             m_s = _compute_metrics(y_test[mask], y_proba[mask])
             if m_s:
+                for ireg_metric in ("cv", "qcod", "adherence_rate"):
+                    vals = [
+                        ireg_lookup[sid][ireg_metric]
+                        for sid in stay_ids_arr[mask]
+                        if sid in ireg_lookup and ireg_metric in ireg_lookup[sid]
+                        and ireg_lookup[sid][ireg_metric] is not None
+                    ]
+                    m_s[ireg_metric] = float(np.mean(vals)) if vals else float("nan")
                 fold_metrics[stratum_label].append(m_s)
 
         last_model = model
@@ -220,8 +250,8 @@ def summarise_cv(fold_metrics: dict[str, list], pipeline_name: str) -> dict[str,
 
     summary = {}
     for key, folds in fold_metrics.items():
-        for metric in ("auprc", "auprc_lift", "auroc", "brier_skill_score", "n_pos_pct"):
-            vals = np.array([f[metric] for f in folds if not np.isnan(f[metric])])
+        for metric in ("auprc", "auprc_lift", "auroc", "brier_skill_score", "n_pos_pct", "cv", "qcod", "adherence_rate"):
+            vals = np.array([f[metric] for f in folds if metric in f and not np.isnan(f[metric])])
             if len(vals) == 0:
                 continue
             mean = vals.mean()
@@ -241,6 +271,38 @@ def summarise_cv(fold_metrics: dict[str, list], pipeline_name: str) -> dict[str,
             for m, v in vals.items()
         ))
     return summary
+
+
+def save_cv_results(
+    pipeline_summaries: list[tuple[str, dict[str, dict]]],
+    save_path: Path,
+) -> None:
+    """
+    Write a tidy CSV with one row per pipeline × stratum, columns:
+      pipeline, stratum, auprc_mean, auprc_ci, auprc_lift_mean, auprc_lift_ci,
+      auroc_mean, auroc_ci, brier_skill_score_mean, brier_skill_score_ci,
+      n_pos_pct_mean, n_pos_pct_ci
+    """
+    _STRATUM_ORDER = ["overall", "Q_alpha", "Q_beta", "Q_gamma", "Q_delta"]
+    metrics = ("auprc", "auprc_lift", "auroc", "brier_skill_score", "n_pos_pct", "cv", "qcod", "adherence_rate")
+
+    rows = []
+    for pipeline_name, summary in pipeline_summaries:
+        strata = [s for s in _STRATUM_ORDER if s in summary] + sorted(
+            s for s in summary if s not in _STRATUM_ORDER
+        )
+        for stratum in strata:
+            row: dict = {"pipeline": pipeline_name, "stratum": stratum}
+            for m in metrics:
+                v = summary.get(stratum, {}).get(m)
+                row[f"{m}_mean"] = v["mean"] if v else float("nan")
+                row[f"{m}_ci"] = v["ci"] if v else float("nan")
+            rows.append(row)
+
+    df = pl.DataFrame(rows)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    df.write_csv(save_path)
+    print(f"CV results saved to {save_path}")
 
 
 def print_information_gain_ratio(

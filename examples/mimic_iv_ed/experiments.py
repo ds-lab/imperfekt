@@ -46,6 +46,7 @@ from examples.mimic_iv_ed.cv import (  # noqa: E402
     compute_irregularity_strata,
     run_cv,
     summarise_cv,
+    save_cv_results,
     print_information_gain_ratio,
 )
 from examples.mimic_iv_ed.plotting import (  # noqa: E402
@@ -109,7 +110,7 @@ def main() -> None:
     print_information_gain_ratio(summary_0, summary_b, "Pipeline0", "PipelineB", metric="auprc_lift", test_set_name="overall")
     print_information_gain_ratio(summary_0, summary_c, "Pipeline0", "PipelineA", metric="auprc_lift", test_set_name="overall")
 
-    print("\nPlotting AUPRC by stratum…")
+    print("\nSaving CV results…")
     pipeline_summaries = [
         ("Pipeline 0 (raw stats)", summary_0),
         ("Pipeline D (raw stats + observation count)", summary_d),
@@ -117,6 +118,9 @@ def main() -> None:
         ("Pipeline B (imperfekt)", summary_b),
         ("Pipeline C (resampled, imperfekt)", summary_c),
     ]
+    save_cv_results(pipeline_summaries, RESULTS_DIR / "cv_results.csv")
+
+    print("\nPlotting AUPRC by stratum…")
     plot_auprc_by_stratum(
         pipeline_summaries,
         RESULTS_DIR / "figures" / "auprc_by_stratum.svg",
