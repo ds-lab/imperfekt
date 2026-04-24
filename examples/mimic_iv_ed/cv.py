@@ -96,7 +96,7 @@ def run_cv(
     Repeated stratified k-fold CV (CV_N_SPLITS x CV_N_REPEATS).
     Splits are on subject_id to prevent patient-level leakage across folds.
 
-    Irregularity quadrant thresholds (LL/HL/LH/HH) are derived strictly from
+    Irregularity quadrant thresholds (Q_alpha/Q_beta/Q_gamma/Q_delta) are derived strictly from
     the *train* fold on each iteration, then applied to test stays, so no
     test-set information leaks into the stratum evaluation boundaries.
 
@@ -165,6 +165,8 @@ def run_cv(
         train_metrics = case_metrics.filter(pl.col("stay_id").is_in(train["stay_id"].to_list()))
         med_x = train_metrics[axis_x].median()
         med_y = train_metrics[axis_y].median()
+        x_high = _hi(axis_x, med_x)
+        y_high = _hi(axis_y, med_y)
 
         test_stay_ids = test["stay_id"]
         test_strata = (
@@ -173,10 +175,12 @@ def run_cv(
             .select(["stay_id", axis_x, axis_y])
             .drop_nulls([axis_x, axis_y])
             .with_columns(
-                pl.concat_str(
-                    pl.when(_hi(axis_x, med_x)).then(pl.lit("H")).otherwise(pl.lit("L")),
-                    pl.when(_hi(axis_y, med_y)).then(pl.lit("H")).otherwise(pl.lit("L")),
-                ).alias("irregularity_stratum")
+                pl.when(~x_high & ~y_high).then(pl.lit("Q_alpha"))
+                .when(x_high & ~y_high).then(pl.lit("Q_beta"))
+                .when(~x_high & y_high).then(pl.lit("Q_gamma"))
+                .when(x_high & y_high).then(pl.lit("Q_delta"))
+                .otherwise(pl.lit(None))
+                .alias("irregularity_stratum")
             )
             .select(["stay_id", "irregularity_stratum"])
         )

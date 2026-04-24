@@ -515,7 +515,7 @@ class Irregularity:
         with the smallest absolute correlation (most independent) is selected for
         quadrant assignment.
 
-        Selected axes are median-bisected into LL/HL/LH/HH quadrants.
+        Selected axes are median-bisected into quadrants.
         For adherence_rate, the irregularity direction is inverted:
             low adherence = high irregularity.
 
@@ -663,10 +663,10 @@ class Irregularity:
             )
 
             scores_a = scores_a.with_columns(
-                pl.when(~x_high_irregular & ~y_high_irregular).then(pl.lit("LL"))
-                .when(x_high_irregular & ~y_high_irregular).then(pl.lit("HL"))
-                .when(~x_high_irregular & y_high_irregular).then(pl.lit("LH"))
-                .when(x_high_irregular & y_high_irregular).then(pl.lit("HH"))
+                pl.when(~x_high_irregular & ~y_high_irregular).then(pl.lit("Q_alpha"))
+                .when(x_high_irregular & ~y_high_irregular).then(pl.lit("Q_beta"))
+                .when(~x_high_irregular & y_high_irregular).then(pl.lit("Q_gamma"))
+                .when(x_high_irregular & y_high_irregular).then(pl.lit("Q_delta"))
                 .otherwise(pl.lit(None))
                 .alias("irregularity_stratum"),
                 pl.lit(axis_x).alias("axis_x"),
@@ -697,6 +697,12 @@ class Irregularity:
                 "burstiness_coeff": "higher = more irregular",
                 "adherence_rate": "lower = more irregular (inverse axis)",
             }
+            stratum_display = {
+                "Q_alpha": r"$Q_{\alpha}$",
+                "Q_beta": r"$Q_{\beta}$",
+                "Q_gamma": r"$Q_{\gamma}$",
+                "Q_delta": r"$Q_{\delta}$",
+            }
 
             pretty_printing.rich_info(
                 "Composite Score — Orthogonal Map (least-correlated axis pair, median-bisected):\n"
@@ -704,10 +710,10 @@ class Irregularity:
                 f"  pair correlation: {selected_corr:.3f} (lower absolute value = more independent)\n"
                 f"  {axis_x}: {axis_direction[axis_x]}\n"
                 f"  {axis_y}: {axis_direction[axis_y]}\n"
-                f"  LL: low irregularity on both selected axes\n"
-                f"  HL: high irregularity on {axis_x}, low on {axis_y}\n"
-                f"  LH: low irregularity on {axis_x}, high on {axis_y}\n"
-                f"  HH: high irregularity on both selected axes"
+                f"  Q_alpha ({stratum_display['Q_alpha']}): low irregularity on both selected axes\n"
+                f"  Q_beta ({stratum_display['Q_beta']}): high irregularity on {axis_x}, low on {axis_y}\n"
+                f"  Q_gamma ({stratum_display['Q_gamma']}): low irregularity on {axis_x}, high on {axis_y}\n"
+                f"  Q_delta ({stratum_display['Q_delta']}): high irregularity on both selected axes"
             )
 
             total = len(scores_a)
@@ -821,7 +827,7 @@ class Irregularity:
                 .group_by("irregularity_stratum")
                 .agg(pl.len().alias("n"))
             )
-            for quad in ["LL", "HL", "LH", "HH"]:
+            for quad in ["Q_alpha", "Q_beta", "Q_gamma", "Q_delta"]:
                 match = quadrant_counts.filter(pl.col("irregularity_stratum") == quad)
                 row[f"n_{quad}"] = int(match["n"][0]) if match.height > 0 else 0
 

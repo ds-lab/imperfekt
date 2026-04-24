@@ -11,8 +11,7 @@ Compares XGBoost pipelines for different prediction tasks (e.g. 30-day readmissi
   Pipeline D – Pipeline 0 + observation-count feature (timestamps per stay)
 
 Performance is estimated with repeated stratified k-fold cross-validation
-(5 folds × 10 repeats = 50 fits per pipeline).  Irregularity quadrant thresholds
-(LL/HL/LH/HH) are derived from each fold's train set — no test leakage.
+(5 folds × 10 repeats = 50 fits per pipeline).  Irregularity quadrant thresholds are derived from each fold's train set — no test leakage.
 """
 
 from __future__ import annotations
@@ -52,6 +51,7 @@ from examples.mimic_iv_ed.cv import (  # noqa: E402
 from examples.mimic_iv_ed.plotting import (  # noqa: E402
     plot_auprc_by_stratum,
     plot_auprc_lift_by_stratum,
+    plot_auroc_by_stratum,
     run_shap_group_analysis,
 )
 
@@ -71,7 +71,9 @@ def main() -> None:
     print(f"Loading cohort (first {WINDOW_HOURS} h of ED stay, ≥{MIN_OBS} observations)…")
     ts_df = load_cohort()
     print(f"Cohort: {ts_df['stay_id'].n_unique()} stays, {len(ts_df)} observations")
-    print(f"Outcome prevalence: {ts_df[OUTCOME_COL].mean():.3f} ({ts_df[OUTCOME_COL].sum()}/{len(ts_df)})")
+    # prevalence on a stay_id level
+    outcome = ts_df.group_by("stay_id").agg(pl.col(OUTCOME_COL).max()).select(OUTCOME_COL)
+    print(f"Outcome prevalence (stay-level): {outcome.mean()[0]} ({outcome.sum()[0]}/{len(outcome)})")
 
     print("\nComputing irregularity strata on full dataset (axes + raw metrics only)…")
     case_metrics, axes = compute_irregularity_strata(ts_df)
@@ -123,6 +125,11 @@ def main() -> None:
     plot_auprc_lift_by_stratum(
         pipeline_summaries,
         RESULTS_DIR / "figures" / "auprc_lift_by_stratum.svg",
+        show_legend=False,
+    )
+    plot_auroc_by_stratum(
+        pipeline_summaries,
+        RESULTS_DIR / "figures" / "auroc_by_stratum.svg",
         show_legend=False,
     )
 

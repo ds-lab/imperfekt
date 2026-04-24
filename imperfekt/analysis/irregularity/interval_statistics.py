@@ -279,7 +279,7 @@ def compute_case_interval_entropy_adherence(
             pl.col("interval_bin").count().cast(pl.Int64).alias("n_unique_bins"),
             # dominant bin = the bin_count argmax (sort descending, take first)
             pl.col("interval_bin")
-              .sort_by("bin_count", descending=True)
+              .sort_by(["bin_count", "interval_bin"], descending=True)
               .first()
               .alias("dominant_bin"),
         )
