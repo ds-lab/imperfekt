@@ -384,6 +384,264 @@ def compute_gap_burstiness(
     })
 
 
+############################################################
+#        Per-Case Gap Metrics for Stratification           #
+############################################################
+
+
+def compute_case_gap_metrics(
+    gaps_df: pl.DataFrame,
+    mask_df: pl.DataFrame,
+    id_col: str = "id",
+    clock_col: str = "clock",
+    bin_resolution_seconds: float = 60.0,
+    adherence_tolerance: float = 0.5,
+    min_gaps: int = 2,
+    min_gaps_onset: int = 3,
+    min_gaps_qcod: int = 4,
+) -> pl.DataFrame:
+    """
+    Compute per-case, per-variable imperfection metrics for stratification.
+
+    Mirrors the irregularity module's per-case interval metrics, applied to
+    gap lengths rather than inter-observation intervals.
+
+    Metrics computed per (id, variable):
+        gap_cv              : CV of gap lengths (std / mean); requires min_gaps
+        gap_qcod            : Quartile CoD (Q75-Q25)/(Q75+Q25); requires min_gaps_qcod
+        gap_burstiness_coeff: Goh & Barabási B = (std-mean)/(std+mean); requires min_gaps >= 3
+        gap_adherence_rate  : Fraction of gaps near the case's own dominant gap length
+        gap_normalized_entropy: Normalised Shannon entropy of gap length distribution
+        max_gap_fraction    : max_gap / total_observation_window; requires >= 1 gap
+        gap_onset_cv        : CV of inter-onset intervals (spacing between gap start times);
+                              requires min_gaps_onset gaps
+
+    Parameters:
+        gaps_df (pl.DataFrame): Output of analyze_gap_lengths(), with columns
+                                [id_col, "variable", "count_clock_no", "time_length",
+                                 "run_start_clock", "run_end_clock"].
+        mask_df (pl.DataFrame): Original mask DataFrame with [id_col, clock_col, ...].
+                                Used to compute the total observation window per case.
+        id_col (str): Case identifier column.
+        clock_col (str): Timestamp column in mask_df (used for window computation).
+        bin_resolution_seconds (float): Bin width for entropy/adherence computation.
+        adherence_tolerance (float): Fractional tolerance around the dominant gap length.
+        min_gaps (int): Minimum number of gaps required for gap_cv and gap_burstiness_coeff.
+        min_gaps_onset (int): Minimum gaps required for gap_onset_cv.
+        min_gaps_qcod (int): Minimum gaps required for gap_qcod.
+
+    Returns:
+        pl.DataFrame: One row per (id_col, variable) with all computed metrics.
+                      Missing metrics receive null.
+    """
+    # Only true gaps (count_clock_no > 0) and non-null time_length
+    true_gaps = gaps_df.filter(
+        (pl.col("count_clock_no") > 0) & pl.col("time_length").is_not_null()
+    )
+
+    all_pairs = (
+        true_gaps.select([id_col, "variable"]).unique()
+        .sort([id_col, "variable"])
+    )
+
+    # --- Base stats: n_gaps, mean, std, q25, q75, max ---
+    base = (
+        true_gaps
+        .group_by([id_col, "variable"])
+        .agg(
+            pl.len().alias("n_gaps"),
+            pl.col("time_length").mean().alias("_mean"),
+            pl.col("time_length").std().alias("_std"),
+            pl.col("time_length").quantile(0.25, interpolation="linear").alias("_q25"),
+            pl.col("time_length").quantile(0.75, interpolation="linear").alias("_q75"),
+            pl.col("time_length").max().alias("_max"),
+        )
+    )
+
+    base = base.with_columns(
+        pl.when(
+            (pl.col("n_gaps") >= min_gaps) & (pl.col("_mean") > 0)
+        )
+        .then(pl.col("_std") / pl.col("_mean"))
+        .otherwise(None)
+        .alias("gap_cv"),
+
+        pl.when(
+            (pl.col("n_gaps") >= min_gaps_qcod)
+            & ((pl.col("_q75") + pl.col("_q25")) > 0)
+        )
+        .then((pl.col("_q75") - pl.col("_q25")) / (pl.col("_q75") + pl.col("_q25")))
+        .otherwise(None)
+        .alias("gap_qcod"),
+
+        pl.when(
+            (pl.col("n_gaps") >= 3)
+            & ((pl.col("_std") + pl.col("_mean")) > 0)
+        )
+        .then((pl.col("_std") - pl.col("_mean")) / (pl.col("_std") + pl.col("_mean")))
+        .otherwise(None)
+        .alias("gap_burstiness_coeff"),
+    )
+
+    # --- max_gap_fraction: max_gap / total observation window per case ---
+    window_df = (
+        mask_df
+        .group_by(id_col)
+        .agg(
+            (
+                pl.col(clock_col).max() - pl.col(clock_col).min()
+            ).dt.total_seconds().alias("_window_seconds")
+        )
+    )
+
+    base = (
+        base
+        .join(window_df, on=id_col, how="left")
+        .with_columns(
+            pl.when(
+                pl.col("n_gaps").ge(1) & pl.col("_window_seconds").gt(0)
+            )
+            .then(pl.col("_max") / pl.col("_window_seconds"))
+            .otherwise(None)
+            .alias("max_gap_fraction")
+        )
+        .drop("_mean", "_std", "_q25", "_q75", "_max", "_window_seconds")
+    )
+
+    # --- Entropy and adherence per (case, variable) ---
+    binned = true_gaps.with_columns(
+        (pl.col("time_length") / bin_resolution_seconds)
+        .round(0)
+        .cast(pl.Int64)
+        .alias("_gap_bin")
+    )
+
+    case_var_totals = (
+        binned.group_by([id_col, "variable"]).agg(pl.len().alias("_n_total"))
+    )
+
+    case_bin_counts = (
+        binned
+        .group_by([id_col, "variable", "_gap_bin"])
+        .agg(pl.len().alias("_bin_count"))
+        .join(case_var_totals, on=[id_col, "variable"], how="left")
+        .with_columns(
+            (pl.col("_bin_count").cast(pl.Float64) / pl.col("_n_total")).alias("_fraction")
+        )
+        .with_columns(
+            (-pl.col("_fraction") * pl.col("_fraction").log(base=2.0)).alias("_entropy_contrib")
+        )
+    )
+
+    case_entropy = (
+        case_bin_counts
+        .group_by([id_col, "variable"])
+        .agg(
+            pl.col("_entropy_contrib").sum().alias("_entropy_bits"),
+            pl.col("_gap_bin").count().cast(pl.Int64).alias("_n_unique_bins"),
+            pl.col("_gap_bin")
+              .sort_by(["_bin_count", "_gap_bin"], descending=True)
+              .first()
+              .alias("_dominant_bin"),
+        )
+        .with_columns(
+            pl.when(pl.col("_n_unique_bins") > 1)
+            .then(
+                pl.col("_entropy_bits")
+                / pl.col("_n_unique_bins").cast(pl.Float64).log(base=2.0)
+            )
+            .otherwise(0.0)
+            .alias("gap_normalized_entropy"),
+            (pl.col("_dominant_bin") * bin_resolution_seconds).alias("_dominant_gap_seconds"),
+        )
+    )
+
+    binned_with_dom = binned.join(
+        case_entropy.select([id_col, "variable", "_dominant_gap_seconds"]),
+        on=[id_col, "variable"],
+        how="left",
+    )
+
+    adherence = (
+        binned_with_dom
+        .with_columns(
+            pl.col("time_length")
+            .is_between(
+                pl.col("_dominant_gap_seconds") * (1.0 - adherence_tolerance),
+                pl.col("_dominant_gap_seconds") * (1.0 + adherence_tolerance),
+            )
+            .cast(pl.Int32)
+            .alias("_adheres")
+        )
+        .group_by([id_col, "variable"])
+        .agg(
+            pl.col("_adheres").sum().alias("_n_adhering"),
+            pl.len().alias("_n_total_adh"),
+        )
+        .with_columns(
+            (pl.col("_n_adhering").cast(pl.Float64) / pl.col("_n_total_adh"))
+            .alias("gap_adherence_rate")
+        )
+        .select([id_col, "variable", "gap_adherence_rate"])
+    )
+
+    entropy_result = case_entropy.select(
+        [id_col, "variable", "gap_normalized_entropy"]
+    )
+
+    # --- gap_onset_cv: CV of inter-onset intervals (gap start times) ---
+    onset_cv = (
+        true_gaps
+        .sort([id_col, "variable", "run_start_clock"])
+        .with_columns(
+            pl.col("run_start_clock")
+            .diff()
+            .over([id_col, "variable"])
+            .dt.total_seconds()
+            .alias("_onset_interval")
+        )
+        .filter(pl.col("_onset_interval").is_not_null() & pl.col("_onset_interval").gt(0))
+        .group_by([id_col, "variable"])
+        .agg(
+            pl.len().alias("_n_onsets"),
+            pl.col("_onset_interval").mean().alias("_onset_mean"),
+            pl.col("_onset_interval").std().alias("_onset_std"),
+        )
+        .with_columns(
+            pl.when(
+                (pl.col("_n_onsets") >= (min_gaps_onset - 1))
+                & (pl.col("_onset_mean") > 0)
+            )
+            .then(pl.col("_onset_std") / pl.col("_onset_mean"))
+            .otherwise(None)
+            .alias("gap_onset_cv")
+        )
+        .select([id_col, "variable", "gap_onset_cv"])
+    )
+
+    # --- Assemble ---
+    result = (
+        all_pairs
+        .join(base, on=[id_col, "variable"], how="left")
+        .join(entropy_result, on=[id_col, "variable"], how="left")
+        .join(adherence, on=[id_col, "variable"], how="left")
+        .join(onset_cv, on=[id_col, "variable"], how="left")
+        .select([
+            id_col, "variable",
+            "n_gaps",
+            "gap_cv", "gap_qcod",
+            "gap_burstiness_coeff",
+            "gap_normalized_entropy",
+            "gap_adherence_rate",
+            "max_gap_fraction",
+            "gap_onset_cv",
+        ])
+        .sort([id_col, "variable"])
+    )
+
+    return result
+
+
 if __name__ == "__main__":
     pl.Config.set_tbl_cols(25)
     pl.Config.set_tbl_rows(20)

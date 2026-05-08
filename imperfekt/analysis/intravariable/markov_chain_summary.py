@@ -2,6 +2,8 @@ import numpy as np
 import plotly.graph_objects as go
 import polars as pl
 
+from imperfekt.analysis.utils import pretty_printing
+
 
 def markov_chain_summary(
     mask_df: pl.DataFrame,
@@ -106,6 +108,104 @@ def markov_chain_summary(
         "steady_state": steady_state,
         "labels": labels,
     }
+
+
+def compute_case_markov_p11(
+    mask_df: pl.DataFrame,
+    cols: list,
+    id_col: str = "id",
+    clock_no_col: str = "clock_no",
+    min_observations: int = 10,
+) -> pl.DataFrame:
+    """
+    Compute per-case, per-variable Markov persistence probability P(1→1).
+
+    P(1→1) is the probability that imperfection at time t is followed by
+    imperfection at t+1. High values indicate clustered / persistent imperfection;
+    low values indicate isolated, scattered imperfect observations.
+
+    Cases with fewer than min_observations observations receive null.
+
+    Parameters:
+        mask_df (pl.DataFrame): Binary mask (1=imperfect, 0=observed) with columns
+                                [id_col, clock_no_col, ...variable cols...].
+        cols (list): Variable columns to compute P(1→1) for.
+        id_col (str): Case identifier column.
+        clock_no_col (str): Integer time-ordering column.
+        min_observations (int): Minimum observations per case for a valid estimate.
+
+    Returns:
+        pl.DataFrame: One row per (id_col, variable) with columns:
+            id_col, variable, mc_p11 (float in [0, 1] or null).
+    """
+    long = (
+        mask_df
+        .sort([id_col, clock_no_col])
+        .unpivot(
+            index=[id_col, clock_no_col],
+            on=cols,
+            variable_name="variable",
+            value_name="state",
+        )
+        .with_columns(
+            pl.col("state").shift(-1).over([id_col, "variable"]).alias("next_state") # get next state for case x variable
+        )
+        .filter(pl.col("next_state").is_not_null())
+    )
+
+    obs_counts = (
+        mask_df
+        .group_by(id_col)
+        .agg(pl.len().alias("_n_obs")) # necessary to later check if we have enough observations to compute a valid P(1→1)
+    )
+    
+    # obs_count should be greater min_observations for all cases, otherwise abort here
+    if obs_counts.select(pl.col("_n_obs").min()).item() < min_observations:
+        pretty_printing.rich_warning(
+             f"⚠️ All cases have fewer than {min_observations} observations. Cannot compute valid P(1→1) estimates. Returning empty DataFrame."
+        )
+        return pl.DataFrame({id_col: [], "variable": [], "mc_p11": []})
+        
+    transitions_11 = (
+        long
+        .filter((pl.col("state") == 1) & (pl.col("next_state") == 1)) # both indicated
+        .group_by([id_col, "variable"])
+        .agg(pl.len().alias("_n11")) # rows where we have an indicated value at time t followed by an indicated value at t+1
+    )
+
+    transitions_1x = (
+        long
+        .filter(pl.col("state") == 1)
+        .group_by([id_col, "variable"])
+        .agg(pl.len().alias("_n1x")) # rows where we have an indicated value at time t, regardless of next state
+    )
+
+    all_pairs = (
+        mask_df.select(id_col).unique()
+        .join(pl.DataFrame({"variable": cols}), how="cross")
+        .sort([id_col, "variable"]) # ensure all (id, variable) pairs are present, even those with no transitions
+    )
+
+    result = (
+        all_pairs
+        .join(obs_counts, on=id_col, how="left")
+        .join(transitions_1x, on=[id_col, "variable"], how="left")
+        .join(transitions_11, on=[id_col, "variable"], how="left")
+        .with_columns(
+            pl.when(
+                pl.col("_n_obs").ge(min_observations) & pl.col("_n1x").gt(0)
+            )
+            .then(
+                pl.col("_n11").fill_null(0).cast(pl.Float64) / pl.col("_n1x").cast(pl.Float64)
+            )
+            .otherwise(None) # 
+            .alias("mc_p11")
+        )
+        .select([id_col, "variable", "mc_p11"])
+        .sort([id_col, "variable"])
+    )
+
+    return result
 
 
 def plot_markov_heatmap(
