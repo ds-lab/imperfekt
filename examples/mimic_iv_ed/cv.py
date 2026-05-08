@@ -20,6 +20,8 @@ from examples.mimic_iv_ed.config import (  # noqa: E402
     CV_N_SPLITS,
     CV_N_REPEATS,
     RANDOM_STATE,
+    VITAL_COLS,
+    IREG_FEATURE_COLS,
 )
 
 
@@ -73,10 +75,29 @@ def _compute_metrics(y_true: np.ndarray, y_proba: np.ndarray) -> dict | None:
 
 
 _INVERTED_AXES = {"adherence_rate"}
+_STRATUM_ORDER = ["overall", "Q_alpha", "Q_beta", "Q_gamma", "Q_delta"]
 
 
 def _hi(col: str, med: float) -> pl.Expr:
     return (pl.col(col) <= med) if col in _INVERTED_AXES else (pl.col(col) > med)
+
+
+def _is_structural_feature(col: str) -> bool:
+    return any(col == base or col.startswith(f"{base}_") for base in IREG_FEATURE_COLS)
+
+
+def _feature_group(col: str) -> str:
+    if _is_structural_feature(col):
+        return "structural"
+    if any(col.startswith(f"{vital}_") for vital in VITAL_COLS):
+        return "physiology"
+    return "metadata"
+
+
+def _select_feature_columns(stay_df: pl.DataFrame) -> list[str]:
+    return [
+        c for c in stay_df.columns if c not in ("stay_id", OUTCOME_COL, "subject_id")
+    ]
 
 
 def run_cv(
@@ -283,7 +304,6 @@ def save_cv_results(
       auroc_mean, auroc_ci, brier_skill_score_mean, brier_skill_score_ci,
       n_pos_pct_mean, n_pos_pct_ci
     """
-    _STRATUM_ORDER = ["overall", "Q_alpha", "Q_beta", "Q_gamma", "Q_delta"]
     metrics = ("auprc", "auprc_lift", "auroc", "brier_skill_score", "n_pos_pct", "cv", "qcod", "adherence_rate")
 
     rows = []
@@ -303,6 +323,285 @@ def save_cv_results(
     save_path.parent.mkdir(parents=True, exist_ok=True)
     df.write_csv(save_path)
     print(f"CV results saved to {save_path}")
+
+
+def save_feature_distribution_by_outcome(
+    stay_df: pl.DataFrame,
+    save_path: Path,
+) -> None:
+    """
+    Write feature-distribution table split by binary outcome.
+
+    Includes all stay-level model features (physiology, metadata, and
+    structural irregularity), with mean ± 95% CI and quantile summaries.
+    """
+    from scipy import stats
+
+    feature_cols = _select_feature_columns(stay_df)
+    if not feature_cols:
+        print("Skipping feature-by-outcome table: no feature columns found.")
+        return
+
+    long_df = (
+        stay_df
+        .select([OUTCOME_COL] + feature_cols)
+        .unpivot(
+            index=[OUTCOME_COL],
+            on=feature_cols,
+            variable_name="feature",
+            value_name="value",
+        )
+        .drop_nulls("value")
+    )
+    if long_df.height == 0:
+        print("Skipping feature-by-outcome table: all selected feature values are null.")
+        return
+
+    grouped = long_df.group_by([OUTCOME_COL, "feature"]).agg(
+        [
+            pl.col("value").count().alias("n_non_null"),
+            pl.col("value").mean().alias("mean"),
+            pl.col("value").std().alias("std"),
+            pl.col("value").median().alias("median"),
+            pl.col("value").quantile(0.25).alias("q25"),
+            pl.col("value").quantile(0.75).alias("q75"),
+            pl.col("value").min().alias("min"),
+            pl.col("value").max().alias("max"),
+        ]
+    )
+
+    rows: list[dict] = []
+    for row in grouped.iter_rows(named=True):
+        n = int(row["n_non_null"])
+        std = row["std"]
+        if n > 1 and std is not None and not np.isnan(std):
+            se = float(std) / np.sqrt(n)
+            ci = float(stats.t.ppf(0.975, df=n - 1) * se)
+        else:
+            ci = float("nan")
+
+        outcome_val = row[OUTCOME_COL]
+        outcome_int = int(outcome_val) if outcome_val is not None else None
+
+        rows.append(
+            {
+                "feature": row["feature"],
+                "feature_group": _feature_group(row["feature"]),
+                "outcome": outcome_int,
+                "n_non_null": n,
+                "mean": row["mean"],
+                "ci": ci,
+                "std": std,
+                "median": row["median"],
+                "q25": row["q25"],
+                "q75": row["q75"],
+                "min": row["min"],
+                "max": row["max"],
+            }
+        )
+
+    out_df = pl.DataFrame(rows).sort(["feature", "outcome"])
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    out_df.write_csv(save_path)
+    print(f"Feature-by-outcome table saved to {save_path}")
+
+
+def save_feature_distribution_by_quadrant_cv(
+    stay_df: pl.DataFrame,
+    case_metrics: pl.DataFrame,
+    axes: tuple[str, str],
+    save_path: Path,
+) -> None:
+    """
+    Write per-feature mean ± 95% CI split by irregularity quadrant.
+
+    Quadrants are assigned per fold using train-only medians (same leakage-safe
+    protocol as model CV). CIs are over fold-level feature means.
+    Also appends fold-aggregated outcome prevalence (mean ± 95% CI) for each
+    stratum and overall.
+    """
+    from scipy import stats
+
+    feature_cols = _select_feature_columns(stay_df)
+    if not feature_cols:
+        print("Skipping feature-by-quadrant table: no feature columns found.")
+        return
+
+    subject_labels = (
+        stay_df.select(["subject_id", OUTCOME_COL])
+        .group_by("subject_id")
+        .agg(pl.col(OUTCOME_COL).any().alias("any_outcome"))
+        .sort("subject_id")
+    )
+
+    subjects = subject_labels["subject_id"].to_numpy()
+    subject_outcomes = subject_labels["any_outcome"].cast(pl.Int8).to_numpy()
+
+    rskf = RepeatedStratifiedKFold(
+        n_splits=CV_N_SPLITS,
+        n_repeats=CV_N_REPEATS,
+        random_state=RANDOM_STATE,
+    )
+
+    axis_x, axis_y = axes
+    fold_feature_means: dict[tuple[str, str], list[float]] = defaultdict(list)
+    fold_outcome_prevalence: dict[str, list[float]] = defaultdict(list)
+
+    total_folds = CV_N_SPLITS * CV_N_REPEATS
+    for fold_idx, (train_idx, test_idx) in enumerate(rskf.split(subjects, subject_outcomes)):
+        print(f"  [feature-distribution] fold {fold_idx + 1}/{total_folds}", end="\r")
+
+        train_subjects = set(subjects[train_idx].tolist())
+        test_subjects = set(subjects[test_idx].tolist())
+
+        train = stay_df.filter(pl.col("subject_id").is_in(train_subjects))
+        test = stay_df.filter(pl.col("subject_id").is_in(test_subjects))
+
+        train_metrics = case_metrics.filter(pl.col("stay_id").is_in(train["stay_id"].to_list()))
+        med_x = train_metrics[axis_x].median()
+        med_y = train_metrics[axis_y].median()
+        if med_x is None or med_y is None:
+            continue
+
+        x_high = _hi(axis_x, med_x)
+        y_high = _hi(axis_y, med_y)
+
+        test_strata = (
+            case_metrics
+            .filter(pl.col("stay_id").is_in(test["stay_id"].to_list()))
+            .select(["stay_id", axis_x, axis_y])
+            .drop_nulls([axis_x, axis_y])
+            .with_columns(
+                pl.when(~x_high & ~y_high).then(pl.lit("Q_alpha"))
+                .when(x_high & ~y_high).then(pl.lit("Q_beta"))
+                .when(~x_high & y_high).then(pl.lit("Q_gamma"))
+                .when(x_high & y_high).then(pl.lit("Q_delta"))
+                .otherwise(pl.lit(None))
+                .alias("irregularity_stratum")
+            )
+            .select(["stay_id", "irregularity_stratum"])
+        )
+
+        overall_prevalence = test[OUTCOME_COL].mean()
+        if overall_prevalence is not None and not np.isnan(overall_prevalence):
+            fold_outcome_prevalence["overall"].append(float(overall_prevalence))
+
+        overall_means = (
+            test
+            .select(feature_cols)
+            .melt(
+                value_vars=feature_cols,
+                variable_name="feature",
+                value_name="value",
+            )
+            .drop_nulls("value")
+            .group_by("feature")
+            .agg(pl.col("value").mean().alias("fold_mean"))
+        )
+        for row in overall_means.iter_rows(named=True):
+            fold_feature_means[("overall", row["feature"])].append(float(row["fold_mean"]))
+
+        test_with_strata = (
+            test.select(["stay_id", OUTCOME_COL] + feature_cols)
+            .join(test_strata, on="stay_id", how="left")
+            .drop_nulls("irregularity_stratum")
+        )
+        if test_with_strata.height == 0:
+            continue
+
+        stratum_prevalence = (
+            test_with_strata
+            .group_by("irregularity_stratum")
+            .agg(pl.col(OUTCOME_COL).mean().alias("fold_prevalence"))
+        )
+        for row in stratum_prevalence.iter_rows(named=True):
+            prev = row["fold_prevalence"]
+            if prev is None or np.isnan(prev):
+                continue
+            fold_outcome_prevalence[row["irregularity_stratum"]].append(float(prev))
+
+        stratum_means = (
+            test_with_strata
+            .melt(
+                id_vars=["irregularity_stratum"],
+                value_vars=feature_cols,
+                variable_name="feature",
+                value_name="value",
+            )
+            .drop_nulls("value")
+            .group_by(["irregularity_stratum", "feature"])
+            .agg(pl.col("value").mean().alias("fold_mean"))
+        )
+        for row in stratum_means.iter_rows(named=True):
+            fold_feature_means[(row["irregularity_stratum"], row["feature"])].append(
+                float(row["fold_mean"])
+            )
+
+    print()
+
+    prevalence_summary: dict[str, dict[str, float]] = {}
+    for stratum, vals in fold_outcome_prevalence.items():
+        arr = np.asarray(vals, dtype=float)
+        if arr.size == 0:
+            continue
+        prev_mean = float(arr.mean())
+        if arr.size > 1:
+            prev_se = float(arr.std(ddof=1) / np.sqrt(arr.size))
+            prev_ci = float(stats.t.ppf(0.975, df=arr.size - 1) * prev_se)
+        else:
+            prev_ci = float("nan")
+        prevalence_summary[stratum] = {
+            "mean": prev_mean,
+            "ci": prev_ci,
+            "n_folds": int(arr.size),
+        }
+
+    rows: list[dict] = []
+    for (stratum, feature), vals in fold_feature_means.items():
+        arr = np.asarray(vals, dtype=float)
+        if arr.size == 0:
+            continue
+
+        mean = float(arr.mean())
+        if arr.size > 1:
+            se = float(arr.std(ddof=1) / np.sqrt(arr.size))
+            ci = float(stats.t.ppf(0.975, df=arr.size - 1) * se)
+        else:
+            ci = float("nan")
+
+        prev = prevalence_summary.get(stratum)
+
+        rows.append(
+            {
+                "feature": feature,
+                "feature_group": _feature_group(feature),
+                "stratum": stratum,
+                "n_folds": int(arr.size),
+                "mean": mean,
+                "ci": ci,
+                "outcome_prevalence_mean": prev["mean"] if prev else float("nan"),
+                "outcome_prevalence_ci": prev["ci"] if prev else float("nan"),
+                "outcome_prevalence_n_folds": prev["n_folds"] if prev else 0,
+            }
+        )
+
+    if not rows:
+        print("Skipping feature-by-quadrant table: no fold summaries were produced.")
+        return
+
+    stratum_rank = {s: i for i, s in enumerate(_STRATUM_ORDER)}
+    rows.sort(
+        key=lambda r: (
+            r["feature"],
+            stratum_rank.get(r["stratum"], len(stratum_rank)),
+            r["stratum"],
+        )
+    )
+
+    out_df = pl.DataFrame(rows)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    out_df.write_csv(save_path)
+    print(f"Feature-by-quadrant table saved to {save_path}")
 
 
 def print_information_gain_ratio(

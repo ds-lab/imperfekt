@@ -749,7 +749,12 @@ class XGBoostModel(BaseModel):
                 "No data provided for SHAP computation and no stored test set is available."
             )
 
-        explainer = shap.TreeExplainer(model_for_shap)
+        shap_target = (
+            model_for_shap.get_booster()
+            if hasattr(model_for_shap, "get_booster")
+            else model_for_shap
+        )
+        explainer = shap.TreeExplainer(shap_target)
         explanation = explainer(X)
 
         if save_dir is not None:

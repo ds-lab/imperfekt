@@ -47,6 +47,8 @@ from examples.mimic_iv_ed.cv import (  # noqa: E402
     run_cv,
     summarise_cv,
     save_cv_results,
+    save_feature_distribution_by_outcome,
+    save_feature_distribution_by_quadrant_cv,
     print_information_gain_ratio,
 )
 from examples.mimic_iv_ed.plotting import (  # noqa: E402
@@ -119,6 +121,20 @@ def main() -> None:
         ("Pipeline C (resampled, imperfekt)", summary_c),
     ]
     save_cv_results(pipeline_summaries, RESULTS_DIR / "cv_results.csv")
+
+    print("\nSaving feature distribution table split by outcome (Pipeline B feature space)…")
+    save_feature_distribution_by_outcome(
+        stay_b,
+        RESULTS_DIR / "feature_distribution_by_outcome.csv",
+    )
+
+    print("\nSaving feature distribution table split by irregularity quadrant (Pipeline B feature space)…")
+    save_feature_distribution_by_quadrant_cv(
+        stay_b,
+        case_metrics,
+        axes,
+        RESULTS_DIR / "feature_distribution_by_quadrant_cv.csv",
+    )
 
     print("\nPlotting AUPRC by stratum…")
     plot_auprc_by_stratum(

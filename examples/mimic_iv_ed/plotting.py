@@ -341,7 +341,7 @@ def _plot_group_importance_by_stratum(
     fig, ax_stack = plt.subplots(figsize=(7, 4.5))
 
     ax_stack.bar(x, phys_pct, color="#4C72B0", label=f"Physiological ({n_phys} features)")
-    ax_stack.bar(x, struct_pct, bottom=phys_pct, color="#DD8452", label=f"imperfekt metadata ({n_struct} features)")
+    ax_stack.bar(x, struct_pct, bottom=phys_pct, color="#DD8452", label=f"Structural metadata ({n_struct} features)")
     for i, (p, s) in enumerate(zip(phys_pct, struct_pct)):
         ax_stack.text(i, p + s / 2, f"{s:.1f}%", ha="center", va="center", fontsize=7, color="white", fontweight="bold")
     ax_stack.set_ylim(0, 100)
