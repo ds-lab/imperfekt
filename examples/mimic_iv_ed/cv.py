@@ -74,12 +74,7 @@ def _compute_metrics(y_true: np.ndarray, y_proba: np.ndarray) -> dict | None:
     }
 
 
-_INVERTED_AXES = {"adherence_rate"}
 _STRATUM_ORDER = ["overall", "Q_alpha", "Q_beta", "Q_gamma", "Q_delta"]
-
-
-def _hi(col: str, med: float) -> pl.Expr:
-    return (pl.col(col) <= med) if col in _INVERTED_AXES else (pl.col(col) > med)
 
 
 def _is_structural_feature(col: str) -> bool:
@@ -186,22 +181,15 @@ def run_cv(
         train_metrics = case_metrics.filter(pl.col("stay_id").is_in(train["stay_id"].to_list()))
         med_x = train_metrics[axis_x].median()
         med_y = train_metrics[axis_y].median()
-        x_high = _hi(axis_x, med_x)
-        y_high = _hi(axis_y, med_y)
 
         test_stay_ids = test["stay_id"]
         test_strata = (
-            case_metrics
-            .filter(pl.col("stay_id").is_in(test_stay_ids.to_list()))
-            .select(["stay_id", axis_x, axis_y])
-            .drop_nulls([axis_x, axis_y])
-            .with_columns(
-                pl.when(~x_high & ~y_high).then(pl.lit("Q_alpha"))
-                .when(x_high & ~y_high).then(pl.lit("Q_beta"))
-                .when(~x_high & y_high).then(pl.lit("Q_gamma"))
-                .when(x_high & y_high).then(pl.lit("Q_delta"))
-                .otherwise(pl.lit(None))
-                .alias("irregularity_stratum")
+            Irregularity.assign_strata(
+                case_metrics
+                .filter(pl.col("stay_id").is_in(test_stay_ids.to_list()))
+                .select(["stay_id", axis_x, axis_y])
+                .drop_nulls([axis_x, axis_y]),
+                axis_x, axis_y, med_x, med_y,
             )
             .select(["stay_id", "irregularity_stratum"])
         )
@@ -463,21 +451,13 @@ def save_feature_distribution_by_quadrant_cv(
         if med_x is None or med_y is None:
             continue
 
-        x_high = _hi(axis_x, med_x)
-        y_high = _hi(axis_y, med_y)
-
         test_strata = (
-            case_metrics
-            .filter(pl.col("stay_id").is_in(test["stay_id"].to_list()))
-            .select(["stay_id", axis_x, axis_y])
-            .drop_nulls([axis_x, axis_y])
-            .with_columns(
-                pl.when(~x_high & ~y_high).then(pl.lit("Q_alpha"))
-                .when(x_high & ~y_high).then(pl.lit("Q_beta"))
-                .when(~x_high & y_high).then(pl.lit("Q_gamma"))
-                .when(x_high & y_high).then(pl.lit("Q_delta"))
-                .otherwise(pl.lit(None))
-                .alias("irregularity_stratum")
+            Irregularity.assign_strata(
+                case_metrics
+                .filter(pl.col("stay_id").is_in(test["stay_id"].to_list()))
+                .select(["stay_id", axis_x, axis_y])
+                .drop_nulls([axis_x, axis_y]),
+                axis_x, axis_y, med_x, med_y,
             )
             .select(["stay_id", "irregularity_stratum"])
         )

@@ -53,8 +53,9 @@ Irregularity
 │   ├── burstiness()                  # Burstiness coefficient per case and globally
 │   ├── interval_autocorrelation()    # Autocorrelation of the interval sequence
 │   ├── case_entropy_adherence()    # Per-case Shannon entropy and adherence rate
-│   ├── composite_score()             # Composite irregularity score and Q1–Qn strata
-│   └── run()                         # Execute all analyses
+│   ├── composite_score()             # Orthogonal axis stratification into Q_alpha–Q_delta quadrants
+│   ├── run()                         # Execute all analyses
+│   └── assign_strata() [static]      # Apply pre-computed median thresholds to assign quadrants
 │
 └── results: IrregularityResults
     ├── ins_case_statistics: pl.DataFrame
@@ -66,6 +67,7 @@ Irregularity
     ├── ia_autocorrelation: pl.DataFrame
     ├── ea_case_entropy_adherence: pl.DataFrame
     ├── cs_case_scores: pl.DataFrame
+    ├── cs_pairwise_correlations: pl.DataFrame
     └── plots: IrregularityPlots
         ├── ins_cv_violin
         ├── domf_interval_frequency_bar
@@ -261,17 +263,20 @@ where $\delta_i^* = b_i^* \cdot r$ is the center of case $i$'s own dominant bin 
 
 ### 6. Composite Irregularity Score (`composite_score`)
 
-Combines three complementary per-case irregularity metrics into a single **composite score**, then assigns each case to a quantile-based irregularity stratum (Q1 = least irregular, Qn = most irregular).
+Assigns each case to one of four irregularity regimes using **Orthogonal Axis Stratification**: the axis pair with the lowest absolute Spearman correlation is selected, then both axes are median-bisected to form four quadrants.
 
-Requires `interval_statistics()` and `burstiness()` to have been run first. Reuses `case_entropy_adherence()` results if already computed.
+Runs `interval_statistics()` and `burstiness()` automatically if not already done. Reuses `case_entropy_adherence()` results if already computed.
 
-#### The three features
+#### Candidate axes
 
-| Feature | Symbol | Range | Captures |
-|---------|--------|-------|----------|
-| Coefficient of Variation | $\text{CV}_i = \sigma_{\Delta t} / \mu_{\Delta t}$ | $[0, \infty)$ | Magnitude of interval dispersion |
-| Burstiness Coefficient | $B_i = (\sigma - \mu)/(\sigma + \mu)$ | $[-1, 1]$ | Shape — clustered vs. regular |
-| Normalized Entropy | $\tilde{H}_i$ | $[0, 1]$ | Distributional complexity and multimodality |
+| Axis | High irregularity direction | Description |
+|------|-----------------------------|-------------|
+| `cv` | higher | Coefficient of variation of interval lengths |
+| `burstiness_coeff` | higher | Burstiness coefficient |
+| `adherence_rate` | lower (inverted) | Fraction of intervals near the case's own dominant rhythm |
+| `qcod` | higher | Quartile coefficient of dispersion |
+
+All pairwise Spearman correlations are computed first. The axis pair with the smallest absolute correlation (most independent) is selected for quadrant assignment.
 
 #### Parameters
 
@@ -280,39 +285,82 @@ Requires `interval_statistics()` and `burstiness()` to have been run first. Reus
 | `bin_resolution_seconds` | 60.0 | Bin width for entropy/adherence computation |
 | `adherence_tolerance` | 0.5 | Fractional tolerance for adherence rate |
 | `min_intervals` | 2 | Minimum intervals for entropy/adherence |
-| `weights` | None | Feature weights, e.g. `{"cv": 1.0, "burstiness_coeff": 1.0, "normalized_entropy": 1.0}`. None = equal weights |
-| `n_quantiles` | 4 | Number of strata (default 4 → Q1…Q4) |
 
 #### Method
 
-**Step 1 — Z-score standardization** (computed over entities with all three features non-null):
+**Step 1 — Axis selection:**
 
-$$z_{i,f} = \frac{f_i - \mu_f}{\sigma_f}, \quad f \in \{\text{CV},\, B,\, \tilde{H}\}$$
+Compute all pairwise Spearman rank correlations between `cv`, `burstiness_coeff`, `adherence_rate`, and `qcod`. Select the pair $(x, y)$ with the smallest $|\rho|$.
 
-**Step 2 — Weighted composite score:**
+**Step 2 — Median-bisection:**
 
-$$S_i = \frac{w_{\text{CV}} \cdot z_{i,\text{CV}} + w_B \cdot z_{i,B} + w_{\tilde{H}} \cdot z_{i,\tilde{H}}}{w_{\text{CV}} + w_B + w_{\tilde{H}}}$$
+Compute the median of each selected axis over all complete cases, then assign quadrants:
 
-Default: $w_{\text{CV}} = w_B = w_{\tilde{H}} = 1$.
+| Quadrant | Axis-x | Axis-y |
+|----------|--------|--------|
+| $Q_{\alpha}$ | low irregularity | low irregularity |
+| $Q_{\beta}$ | high irregularity | low irregularity |
+| $Q_{\gamma}$ | low irregularity | high irregularity |
+| $Q_{\delta}$ | high irregularity | high irregularity |
 
-**Step 3 — Quantile stratification:**
+For `adherence_rate`, "high irregularity" means **below** the median (lower adherence = more irregular).
 
-$$\text{stratum}_i = Q_q \quad \text{if} \quad q_{q-1} < S_i \leq q_q$$
+`normalized_entropy` and `burstiness_coeff` are retained per case for within-quadrant characterisation but are not used for axis selection.
 
-where $q_1, \ldots, q_{n-1}$ are the $\tfrac{1}{n}, \tfrac{2}{n}, \ldots, \tfrac{n-1}{n}$ quantiles of $\{S_i\}$.
+#### Output
 
-Entities with NaN for any feature receive NaN for `composite_score` and `irregularity_stratum`.
-
-#### Output (`cs_case_scores`)
+**`cs_case_scores`** — one row per case:
 
 | Field | Description |
 |-------|-------------|
 | `cv` | Per-case coefficient of variation |
+| `qcod` | Per-case quartile coefficient of dispersion |
 | `burstiness_coeff` | Per-case burstiness coefficient |
 | `normalized_entropy` | Per-case normalized Shannon entropy |
 | `adherence_rate` | Per-case adherence to own dominant rhythm |
-| `composite_score` | $S_i$: weighted Z-score average of the three standardized features |
-| `irregularity_stratum` | Q1 (least irregular) … Qn (most irregular) |
+| `axis_x`, `axis_y` | Names of the selected least-correlated axis pair |
+| `axis_pair_corr` | Spearman correlation of the selected pair |
+| `axis_x_median_threshold` | Median threshold used to bisect axis-x |
+| `axis_y_median_threshold` | Median threshold used to bisect axis-y |
+| `irregularity_stratum` | $Q_{\alpha}$ / $Q_{\beta}$ / $Q_{\gamma}$ / $Q_{\delta}$ |
+
+**`cs_pairwise_correlations`** — all pairwise axis correlations used for selection, sorted by ascending `abs_corr`.
+
+---
+
+### 7. Quadrant Assignment Helper (`assign_strata`)
+
+A `@staticmethod` that applies pre-computed median thresholds to any DataFrame and returns it with an `irregularity_stratum` column added. Used internally by `composite_score()` and available for external callers that need to assign quadrants to a held-out subset (e.g. a CV test fold) using thresholds derived from a training subset.
+
+```python
+Irregularity.assign_strata(df, axis_x, axis_y, x_median, y_median)
+```
+
+#### Why medians are passed in, not computed here
+
+The method deliberately does **not** compute the medians itself. In a cross-validation loop the medians must be fit on the **training fold** and then applied to the **test fold** — computing them inside this method would force using the same data for both, leaking test-set information into the threshold.
+
+#### Parameters
+
+| Parameter | Description |
+|-----------|-------------|
+| `df` | Any `pl.DataFrame` that contains `axis_x` and `axis_y` columns |
+| `axis_x` | Name of the first axis column |
+| `axis_y` | Name of the second axis column |
+| `x_median` | Threshold for axis-x, fit on the reference population (e.g. training fold) |
+| `y_median` | Threshold for axis-y, fit on the reference population |
+
+#### Axis direction
+
+`adherence_rate` is inverted: values **below** the median count as high irregularity. All other axes follow the standard direction (above median = high irregularity). This is encoded in the class constant `Irregularity.INVERTED_AXES`.
+
+#### Output
+
+Returns `df` with one additional column:
+
+| Column | Values |
+|--------|--------|
+| `irregularity_stratum` | `Q_alpha` / `Q_beta` / `Q_gamma` / `Q_delta`, or `null` for rows where either axis value is null |
 
 ---
 
@@ -349,18 +397,21 @@ analysis.run(
 print(analysis.results.ins_case_statistics)       # CV and interval stats per case
 print(analysis.results.bu_case_burstiness)        # Burstiness per case
 print(analysis.results.ea_case_entropy_adherence) # Entropy and adherence per case
-print(analysis.results.cs_case_scores)            # Composite score and Q1–Q4 strata
+print(analysis.results.cs_case_scores)            # Quadrant strata (Q_alpha–Q_delta) and per-case metrics
+print(analysis.results.cs_pairwise_correlations)   # Axis selection correlation table
 print(analysis.results.domf_frequency_summary)      # Global dominant frequency
 print(analysis.results.ia_autocorrelation)          # Global interval autocorrelation
 
 # Run individual analyses and chain
 analysis.interval_statistics().burstiness().case_entropy_adherence().composite_score()
 
-# Customize composite score
-analysis.composite_score(
-    weights={"cv": 2.0, "burstiness_coeff": 1.0, "normalized_entropy": 1.0},
-    n_quantiles=5,
-)
+# Apply pre-fit thresholds to a held-out subset (e.g. a CV test fold)
+case_metrics = analysis.results.cs_case_scores  # contains axis_x, axis_y columns
+axis_x = case_metrics["axis_x"][0]
+axis_y = case_metrics["axis_y"][0]
+train_median_x = train_df[axis_x].median()
+train_median_y = train_df[axis_y].median()
+test_with_strata = Irregularity.assign_strata(test_df, axis_x, axis_y, train_median_x, train_median_y)
 ```
 
 ---

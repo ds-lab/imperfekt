@@ -43,6 +43,9 @@ class IrregularityResults:
 
 
 class Irregularity:
+    # Axes where a *lower* value means *more* irregular (all others: higher = more irregular)
+    INVERTED_AXES: frozenset[str] = frozenset({"adherence_rate"})
+
     def __init__(
         self,
         df: pl.DataFrame,
@@ -93,6 +96,52 @@ class Irregularity:
         # Cached inter-observation interval DataFrame (computed lazily)
         self._delta_t_df: pl.DataFrame = None
 
+    @staticmethod
+    def assign_strata(
+        df: pl.DataFrame,
+        axis_x: str,
+        axis_y: str,
+        x_median: float,
+        y_median: float,
+    ) -> pl.DataFrame:
+        """
+        Assign each row to an irregularity quadrant by median-bisecting two axes.
+
+        Returns df with an added "irregularity_stratum" column
+        (Q_alpha / Q_beta / Q_gamma / Q_delta, or null for rows with nulls on
+        either axis).
+
+        Axis irregularity direction:
+            adherence_rate — lower = more irregular (inverted)
+            all other axes — higher = more irregular
+            
+        Parameters:
+            df (pl.DataFrame): Input DataFrame containing the axes.
+            axis_x (str): Column name for the x-axis metric.
+            axis_y (str): Column name for the y-axis metric.
+            x_median (float): Median value for the x-axis to define the threshold.
+            y_median (float): Median value for the y-axis to define the threshold.
+        """
+        x_high = (
+            pl.col(axis_x) <= x_median
+            if axis_x in Irregularity.INVERTED_AXES
+            else pl.col(axis_x) > x_median
+        )
+        y_high = (
+            pl.col(axis_y) <= y_median
+            if axis_y in Irregularity.INVERTED_AXES
+            else pl.col(axis_y) > y_median
+        )
+        return df.with_columns(
+            pl.when(~x_high & ~y_high).then(pl.lit("Q_alpha"))
+            .when(x_high & ~y_high).then(pl.lit("Q_beta"))
+            .when(~x_high & y_high).then(pl.lit("Q_gamma"))
+            .when(x_high & y_high).then(pl.lit("Q_delta"))
+            .otherwise(pl.lit(None))
+            .alias("irregularity_stratum")
+        )
+
+   
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
@@ -651,24 +700,8 @@ class Irregularity:
             x_median = float(complete_df[axis_x].median())
             y_median = float(complete_df[axis_y].median())
 
-            x_high_irregular = (
-                pl.col(axis_x) > x_median
-                if irregularity_high[axis_x]
-                else pl.col(axis_x) <= x_median
-            )
-            y_high_irregular = (
-                pl.col(axis_y) > y_median
-                if irregularity_high[axis_y]
-                else pl.col(axis_y) <= y_median
-            )
-
+            scores_a = self.assign_strata(scores_a, axis_x, axis_y, x_median, y_median)
             scores_a = scores_a.with_columns(
-                pl.when(~x_high_irregular & ~y_high_irregular).then(pl.lit("Q_alpha"))
-                .when(x_high_irregular & ~y_high_irregular).then(pl.lit("Q_beta"))
-                .when(~x_high_irregular & y_high_irregular).then(pl.lit("Q_gamma"))
-                .when(x_high_irregular & y_high_irregular).then(pl.lit("Q_delta"))
-                .otherwise(pl.lit(None))
-                .alias("irregularity_stratum"),
                 pl.lit(axis_x).alias("axis_x"),
                 pl.lit(axis_y).alias("axis_y"),
                 pl.lit(selected_corr).alias("axis_pair_corr"),
@@ -1000,3 +1033,16 @@ if __name__ == "__main__":
     print(df)
     irregularity_analysis = Irregularity(df, save_path=Path("results/irregularity_example"), renderer="notebook_connected")
     irregularity_analysis.run(save_results=True)
+    
+    # test staticmethod assign_strata for df
+    test_df = pl.DataFrame({
+        "id": ["x", "y", "z"],
+        "cv": [0.1, 0.5, 0.9],
+        "adherence_rate": [0.8, 0.4, 0.2],
+    })
+    assigned = Irregularity.assign_strata(
+        test_df,
+        axis_x="cv",
+        axis_y="adherence_rate"
+    )
+    print(assigned)
