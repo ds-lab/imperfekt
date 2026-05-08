@@ -16,6 +16,7 @@ This module provides a comprehensive suite of analyses for examining **intravari
    - [Autocorrelation](#4-autocorrelation-autocorrelation)
    - [Windowed Significance](#5-windowed-significance-windowed_significance)
    - [DateTime Statistics](#6-datetime-statistics-date_time_statistics)
+   - [Composite Score](#7-composite-score-composite_score)
 5. [Usage Example](#usage-example)
 6. [References](#references)
 
@@ -57,6 +58,7 @@ IntravariableImperfection
 │   ├── autocorrelation()             # Temporal autocorrelation of imperfection
 │   ├── windowed_significance()       # Values near imperfect instances
 │   ├── date_time_statistics()        # Temporal distribution patterns
+│   ├── composite_score()             # Per-(case × variable) quadrant stratification
 │   ├── run()                         # Execute all analyses
 │   └── generate_html_report()        # Create HTML summary
 │
@@ -350,6 +352,49 @@ Analyzes imperfection patterns by calendar/clock time to detect **provider-level
 #### Visualization
 
 **Month × Hour Heatmap**: Two-dimensional view of imperfection rates across months and hours of day
+
+---
+
+### 7. Composite Score (`composite_score`)
+
+Assigns each (case × variable) pair to one of five imperfection strata, enabling subgroup analysis of model performance broken down by missingness pattern per variable.
+
+#### Strata
+
+| Stratum | Meaning |
+|---------|---------|
+| `Q_complete` | No imperfection for this case and variable |
+| `Q_alpha` | Low irregularity on both selected axes |
+| `Q_beta` | High on axis X, low on axis Y |
+| `Q_gamma` | Low on axis X, high on axis Y |
+| `Q_delta` | High irregularity on both axes |
+
+#### Candidate Axes (per case, per variable)
+
+| Metric | Captures |
+|--------|----------|
+| `indicated_pct` | Overall missingness burden |
+| `gap_cv` | CV of gap lengths |
+| `gap_qcod` | Quartile CoD of gap lengths (robust analog to CV) |
+| `gap_burstiness_coeff` | Goh & Barabási burstiness of gap lengths [[4]](#references) |
+| `gap_adherence_rate` | Fraction of gaps near the case's own dominant gap length (inverted: lower = more imperfect) |
+| `gap_normalized_entropy` | Shannon entropy of the gap length distribution |
+| `max_gap_fraction` | Largest single gap as fraction of total observation window |
+| `gap_onset_cv` | CV of the spacing between consecutive gap start times |
+| `mc_p11` | Markov $P(1 \to 1)$: probability that imperfection persists into the next time step |
+
+#### Axis Selection
+
+All pairwise Spearman rank correlations are computed across the candidate axes. The pair with the **lowest absolute correlation** (most orthogonal) is selected as the two stratification axes. Selection is performed independently per variable. The full correlation table is stored in `results.iv_pairwise_correlations`.
+
+#### Median Bisection
+
+The selected axes are split at their medians to produce the four quadrants. Medians are passed as parameters to `assign_strata()`, enabling leakage-free cross-validation: fit medians on the training fold, apply to the held-out test fold.
+
+#### Output
+
+- `results.iv_composite_scores` — one row per (case × variable) with all metrics, selected axes, thresholds, and `imperfection_stratum`
+- `results.iv_pairwise_correlations` — dict keyed by variable name, each a correlation table used for axis selection
 
 ---
 
