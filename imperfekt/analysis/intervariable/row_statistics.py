@@ -206,6 +206,206 @@ def analyze_row_imperfection_per_id(
     return per_id_df
 
 
+def compute_case_intervariable_metrics(
+    mask_df: pl.DataFrame,
+    cols: list = None,
+    id_col: str = "id",
+    clock_col: str = "clock",
+    clock_no_col: str = "clock_no",
+) -> pl.DataFrame:
+    """
+    Compute per-case cross-variable imperfection metrics for stratification.
+
+    Metrics computed per case (across all cols):
+        avg_indicated_vars_pct    : Mean row-level imperfection percentage across all rows.
+        co_missingness_concentration: Mean indicated_vars_pct conditioned on rows with any
+                                      imperfection (indicated_vars > 0). Null if no imperfect rows.
+        missing_variable_breadth  : Fraction of variables that have any missingness for this case.
+        pattern_entropy           : Normalised Shannon entropy over per-row missingness bitmasks
+                                    (computed on imperfect rows only). 0 = always the same co-dropout
+                                    pattern; 1 = maximally varied. Null if fewer than 2 imperfect rows.
+        max_pairwise_co_missingness: Max over all variable pairs of
+                                     count(A AND B missing) / min(count(A missing), count(B missing)).
+                                     Null if no pair has any co-missingness.
+
+    Parameters:
+        mask_df (pl.DataFrame): Binary mask (1=imperfect, 0=observed) with columns
+                                [id_col, clock_col, clock_no_col, ...variable cols...].
+        cols (list): Variable columns to analyse. If None, all non-index columns are used.
+        id_col (str): Case identifier column.
+        clock_col (str): Timestamp column.
+        clock_no_col (str): Integer time-ordering column.
+
+    Returns:
+        pl.DataFrame: One row per case with all five metrics.
+    """
+    if cols is None:
+        cols = [c for c in mask_df.columns if c not in {id_col, clock_col, clock_no_col}]
+
+    n_cols = len(cols)
+
+    # --- Row-level indicated_vars and indicated_vars_pct ---
+    row_df = mask_df.with_columns(
+        pl.fold(
+            acc=pl.lit(0),
+            function=lambda acc, x: acc + x,
+            exprs=[pl.col(c) for c in cols],
+        ).alias("_indicated_vars")
+    ).with_columns(
+        (pl.col("_indicated_vars") / n_cols * 100).alias("_indicated_vars_pct")
+    )
+
+    # --- avg_indicated_vars_pct and co_missingness_concentration ---
+    per_id_base = (
+        row_df
+        .group_by(id_col)
+        .agg(
+            pl.col("_indicated_vars_pct").mean().alias("avg_indicated_vars_pct"),
+            pl.col("_indicated_vars_pct")
+              .filter(pl.col("_indicated_vars") > 0)
+              .mean()
+              .alias("co_missingness_concentration"), # the mean if conditioned on imperfect rows only, else null
+        )
+    )
+
+    # --- missing_variable_breadth, how many variables have any missingness ---
+    breadth = (
+        mask_df
+        .group_by(id_col)
+        .agg(
+            pl.sum_horizontal([
+                pl.col(c).max().cast(pl.Int32) for c in cols
+            ]).alias("_n_vars_with_any")
+        )
+        .with_columns(
+            (pl.col("_n_vars_with_any").cast(pl.Float64) / n_cols)
+            .alias("missing_variable_breadth")
+        )
+        .select([id_col, "missing_variable_breadth"])
+    )
+
+    # --- pattern_entropy: normalised Shannon entropy over bitmask patterns (imperfect rows only) ---
+    # Build a string bitmask per row from imperfect rows only
+    imperfect_rows = (
+        mask_df
+        .with_columns(
+            pl.concat_str([pl.col(c).cast(pl.Utf8) for c in cols], separator="").alias("_bitmask")
+        )
+        .filter(
+            pl.fold(
+                acc=pl.lit(0),
+                function=lambda acc, x: acc + x,
+                exprs=[pl.col(c) for c in cols],
+            ) > 0 # 000...0 is not a pattern we want to include in the entropy calculation, since it represents no imperfection
+        )
+    )
+
+    pattern_counts = (
+        imperfect_rows
+        .group_by([id_col, "_bitmask"])
+        .agg(pl.len().alias("_pat_count"))
+    )
+
+    pattern_totals = (
+        imperfect_rows
+        .group_by(id_col)
+        .agg(pl.len().alias("_n_imperfect_rows"))
+    )
+
+    entropy_df = (
+        pattern_counts
+        .join(pattern_totals, on=id_col, how="left")
+        .with_columns(
+            (pl.col("_pat_count").cast(pl.Float64) / pl.col("_n_imperfect_rows")).alias("_frac")
+        )
+        .with_columns(
+            (-pl.col("_frac") * pl.col("_frac").log(base=2.0)).alias("_entropy_contrib")
+        )
+        .group_by(id_col)
+        .agg(
+            pl.col("_entropy_contrib").sum().alias("_entropy_bits"),
+            pl.col("_bitmask").count().cast(pl.Int64).alias("_n_unique_patterns"),
+            pl.col("_n_imperfect_rows").first().alias("_n_imperfect_rows"),
+        )
+        .with_columns(
+            pl.when(
+                (pl.col("_n_imperfect_rows") >= 2) & (pl.col("_n_unique_patterns") > 1)
+            )
+            .then(
+                pl.col("_entropy_bits")
+                / pl.col("_n_unique_patterns").cast(pl.Float64).log(base=2.0)
+            )
+            .when(pl.col("_n_imperfect_rows") >= 2)
+            .then(pl.lit(0.0))
+            .otherwise(None)
+            .alias("pattern_entropy")
+        )
+        .select([id_col, "pattern_entropy"])
+    )
+
+    # --- max_pairwise_co_missingness ---
+    # For each pair (A, B): overlap = count(A AND B missing) / min(count(A missing), count(B missing))
+    per_col_miss = (
+        mask_df
+        .group_by(id_col)
+        .agg([pl.col(c).sum().alias(f"_miss_{c}") for c in cols])
+    )
+
+    import itertools
+    pair_overlaps = mask_df.group_by(id_col).agg([
+        (pl.col(a) * pl.col(b)).sum().alias(f"_co_{a}__{b}")
+        for a, b in itertools.combinations(cols, 2)
+    ])
+
+    co_df = per_col_miss.join(pair_overlaps, on=id_col, how="left")
+
+    pair_cols = [f"_co_{a}__{b}" for a, b in itertools.combinations(cols, 2)]
+    overlap_exprs = []
+    for a, b in itertools.combinations(cols, 2):
+        co_col = f"_co_{a}__{b}"
+        min_col = f"_min_{a}_{b}"
+        overlap_col = f"_ov_{a}_{b}"
+        co_df = co_df.with_columns(
+            pl.min_horizontal(pl.col(f"_miss_{a}"), pl.col(f"_miss_{b}")).alias(min_col)
+        ).with_columns(
+            pl.when(pl.col(min_col) > 0)
+            .then(pl.col(co_col).cast(pl.Float64) / pl.col(min_col).cast(pl.Float64))
+            .otherwise(None)
+            .alias(overlap_col)
+        )
+        overlap_exprs.append(overlap_col)
+
+    if overlap_exprs:
+        co_df = co_df.with_columns(
+            pl.max_horizontal([pl.col(c) for c in overlap_exprs]).alias("max_pairwise_co_missingness")
+        ).select([id_col, "max_pairwise_co_missingness"])
+    else:
+        co_df = co_df.select([id_col]).with_columns(
+            pl.lit(None).cast(pl.Float64).alias("max_pairwise_co_missingness")
+        )
+
+    # --- Assemble ---
+    all_cases = mask_df.select(pl.col(id_col).unique()).sort(id_col)
+    result = (
+        all_cases
+        .join(per_id_base, on=id_col, how="left")
+        .join(breadth, on=id_col, how="left")
+        .join(entropy_df, on=id_col, how="left")
+        .join(co_df, on=id_col, how="left")
+        .select([
+            id_col,
+            "avg_indicated_vars_pct",
+            "co_missingness_concentration",
+            "missing_variable_breadth",
+            "pattern_entropy",
+            "max_pairwise_co_missingness",
+        ])
+        .sort(id_col)
+    )
+
+    return result
+
+
 if __name__ == "__main__":
     # Example usage
     vitals_df = pl.DataFrame(

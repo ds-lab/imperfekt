@@ -1,14 +1,15 @@
 # %%
 """
-Composite Score: Irregularity & Intravariable Imperfection Stratification
-=========================================================================
-Assigns each case to one of four imperfection quadrants (Q_alpha / Q_beta /
+Composite Score: Irregularity, Intravariable & Intervariable Imperfection Stratification
+=========================================================================================
+Assigns each case to one of five imperfection strata (Q_complete / Q_alpha / Q_beta /
 Q_gamma / Q_delta) using the least-correlated pair of metrics as axes,
 median-bisected per variable / cohort.
 
-Two analyses are demonstrated:
-  1. Irregularity composite score  — temporal observation spacing
-  2. Intravariable composite score — per-variable missingness pattern
+Three analyses are demonstrated:
+  1. Irregularity composite score   — temporal observation spacing
+  2. Intravariable composite score  — per-variable missingness pattern (one stratum per case × variable)
+  3. Intervariable composite score  — cross-variable co-missingness structure (one stratum per case)
 
 Replace the synthetic dataset block with your own data load and adjust
 SAVE_RESULTS_PATH / RENDERER as needed.
@@ -20,6 +21,7 @@ import polars as pl
 
 from imperfekt.analysis.irregularity.irregularity import Irregularity
 from imperfekt.analysis.intravariable.intravariable import IntravariableImperfection
+from imperfekt.analysis.intervariable.intervariable import IntervariableImperfection
 
 pl.Config.set_tbl_cols(20)
 pl.Config.set_tbl_rows(30)
@@ -198,3 +200,61 @@ print(iv.results.iv_pairwise_correlations[cols[0]])
 #         test_scores.filter(pl.col("variable") == var),
 #         axis_x, axis_y, x_med, y_med,
 #     )
+
+# %%
+####################################
+# 3. INTERVARIABLE COMPOSITE       #
+####################################
+ivv = IntervariableImperfection(
+    df=vitals_df,
+    id_col="id",
+    clock_col="clock",
+    clock_no_col="clock_no",
+    cols=cols,
+    save_path=SAVE_RESULTS_PATH / "intervariable" if SAVE_RESULTS else None,
+    renderer=RENDERER,
+)
+
+# row_statistics() is called automatically if not yet run.
+ivv = ivv.composite_score(save_results=SAVE_RESULTS)
+
+# %%
+print("\n=== Intervariable: case scores ===")
+print(
+    ivv.results.iv_composite_scores.select([
+        "id", "avg_indicated_vars_pct", "co_missingness_concentration",
+        "missing_variable_breadth", "pattern_entropy", "max_pairwise_co_missingness",
+        "axis_x", "axis_y", "axis_pair_corr", "intervariable_stratum",
+    ])
+)
+
+# %%
+print("\n=== Intervariable: stratum prevalence ===")
+iv_scores = ivv.results.iv_composite_scores
+total_iv = iv_scores.height
+print(
+    iv_scores.filter(pl.col("intervariable_stratum").is_not_null())
+    .group_by("intervariable_stratum")
+    .agg(pl.len().alias("n"))
+    .with_columns((pl.col("n") / total_iv * 100).round(1).alias("pct"))
+    .sort("intervariable_stratum")
+)
+
+# %%
+print("\n=== Intervariable: pairwise axis correlations ===")
+print(ivv.results.iv_pairwise_correlations)
+
+# %%
+# Cross-validation usage: fit medians on train, apply to held-out test
+# -------------------------------------------------------------------
+# axis_x = iv_scores["axis_x"][0]
+# axis_y = iv_scores["axis_y"][0]
+# split  = int(0.8 * iv_scores.height)
+# train  = iv_scores[:split]
+# test   = iv_scores[split:]
+#
+# x_med = float(train[axis_x].median())
+# y_med = float(train[axis_y].median())
+# test_with_strata = IntervariableImperfection.assign_strata(
+#     test, axis_x, axis_y, x_med, y_med,
+# )
