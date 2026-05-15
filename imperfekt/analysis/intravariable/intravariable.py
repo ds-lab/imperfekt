@@ -103,15 +103,18 @@ class IntravariableImperfection:
         self,
         df: pl.DataFrame,
         imperfection: str = "missingness",
-        mask_df: pl.DataFrame = None,
+        mask_df: pl.DataFrame | None = None,
         id_col: str = "id",
         clock_col: str = "clock",
         clock_no_col: str = "clock_no",
-        cols: list = None,
+        cols: list | None = None,
         alpha: float = 0.05,
-        save_path: Path = None,
+        save_path: Path | None = None,
         plot_library: str = "matplotlib",
         renderer: str = "notebook_connected",
+        iqr_multiplier: float = 1.5,
+        iqr_scope: str = "global",
+        iqr_missing_as: str = "ignore",
     ):
         if not renderer and not save_path:
             pretty_printing.rich_warning(
@@ -130,7 +133,9 @@ class IntravariableImperfection:
 
         # Binary indicator mask for imperfection
         self.imperfection = imperfection
-        if imperfection == "missingness" and mask_df is None:
+        if mask_df is not None:
+            self.mask = mask_df
+        elif imperfection == "missingness":
             self.mask = masking.create_missingness_mask(
                 df=self.df,
                 id_col=id_col,
@@ -138,13 +143,22 @@ class IntravariableImperfection:
                 clock_no_col=clock_no_col,
                 cols=self.cols,
             )
+        elif imperfection == "plausibility":
+            self.mask = masking.create_plausibility_mask(
+                df=self.df,
+                id_col=self.id_col,
+                clock_col=self.clock_col,
+                clock_no_col=self.clock_no_col,
+                cols=self.cols,
+                iqr_multiplier=iqr_multiplier,
+                scope=iqr_scope,
+                missing_as=iqr_missing_as,
+            )
         else:
-            if mask_df is not None:
-                self.mask = mask_df
-            else:
-                raise ValueError(
-                    f"Unsupported imperfection type: {imperfection}. Supported types: 'missingness'."
-                )
+            raise ValueError(
+                f"Unsupported imperfection type: {imperfection!r}. "
+                "Supported types: 'missingness', 'plausibility'."
+            )
 
         # Result persistence
         self.save_path = Path(save_path) if save_path else None
