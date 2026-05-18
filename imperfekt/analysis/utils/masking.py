@@ -137,8 +137,8 @@ def create_plausibility_mask(
             ``"flag"``  — flag as 1; combines missingness and implausibility.
             ``"null"``  — flag as null; unknown plausibility.
         reference_ranges (dict | None): Optional mapping of column name to
-            ``(lo, hi)`` hard clinical bounds. Applied before the statistical
-            method; the statistical method then sees only range-clean values.
+            ``(lo, hi)`` hard domain bounds. Applied before the statistical
+            method; the statistical method then sees only range-clean values (this avoids inflating the bounds with hard implausible values).
             Example: ``{"heart_rate": (0, 300), "spo2": (0, 100)}``.
 
     Returns:
@@ -249,18 +249,18 @@ def create_plausibility_mask(
             continue
 
         # --- Stage 1: reference range ---
-        rr_outlier = pl.Series(c, [False] * len(df))
+        ref_outlier = pl.Series(c, [False] * len(df))
         if reference_ranges and c in reference_ranges:
             lo, hi = reference_ranges[c]
             below = (df[c] < lo) if lo is not None else pl.Series(c, [False] * len(df))
             above = (df[c] > hi) if hi is not None else pl.Series(c, [False] * len(df))
-            rr_outlier = (~was_null) & (below | above)
+            ref_outlier = (~was_null) & (below | above)
 
         # --- Stage 2: statistical method on reference-range-clean values only ---
         stat_outlier = pl.Series(c, [False] * len(df))
         if method is not None:
             # Null out values that failed the reference range check before computing bounds
-            clean_series = df[c].set(rr_outlier, None)
+            clean_series = df[c].set(ref_outlier, None)
             clean_df = df.with_columns(clean_series.alias(c))
 
             if scope == "global":
@@ -271,7 +271,7 @@ def create_plausibility_mask(
                 )
                 if bounds is not None:
                     lo_s, hi_s = bounds
-                    stat_outlier = (~was_null) & (~rr_outlier) & ((df[c] < lo_s) | (df[c] > hi_s))
+                    stat_outlier = (~was_null) & (~ref_outlier) & ((df[c] < lo_s) | (df[c] > hi_s))
             else:  # per_id
                 bounds_df = (
                     _iqr_bounds_per_id(clean_df, c)
@@ -281,14 +281,14 @@ def create_plausibility_mask(
                 joined = df.join(bounds_df, on=id_col, how="left")
                 stat_outlier = (
                     (~was_null)
-                    & (~rr_outlier)
+                    & (~ref_outlier)
                     & (
                         (joined[c] < joined["_lo"]).fill_null(False)
                         | (joined[c] > joined["_hi"]).fill_null(False)
                     )
                 )
 
-        outlier = rr_outlier | stat_outlier
+        outlier = ref_outlier | stat_outlier
         flag_series.append(_apply_missing_as(outlier.rename(c), was_null))
 
     mask = pl.DataFrame(flag_series)
@@ -549,22 +549,66 @@ def plot_missingness_mask(
 
 
 if __name__ == "__main__":
-    # Example usage
     df = pl.DataFrame(
         {
-            "id": [1, 1, 2, 2, 3, 3],
-            "clock_no": [1, 2, 1, 2, 1, 2],
-            "heartrate": [70, None, None, 80, 75, None],
-            "resprate": [16, 18, None, None, 20, 22],
+            "id": [1, 1, 1, 2, 2, 2, 3, 3, 3],
+            "clock_no": [1, 2, 3, 1, 2, 3, 1, 2, 3],
+            "clock": ["2024-01-01", "2024-01-02", "2024-01-03"] * 3,
+            # id=1: normal; id=2: one hard outlier (999), one missing; id=3: one soft outlier (130)
+            "heartrate": [70, 72, 74, 999, None, 80, 75, 130, 78],
+            # id=1: normal; id=2: all missing; id=3: one below hard lower bound (-5)
+            "resprate": [16, 18, 17, None, None, None, -5, 22, 21],
         }
     )
-    mask = create_missingness_mask(df, cols=["heartrate"])
-    print(mask)
+
+    reference_ranges: dict[str, tuple[float | None, float | None]] = {
+        "heartrate": (0.0, 300.0),
+        "resprate": (0.0, 60.0),
+    }
+
+    print("=== Missingness mask ===")
+    print(create_missingness_mask(df, cols=["heartrate", "resprate"]))
+
+    print("\n=== Reference range mask (missing_as='ignore') ===")
+    print(create_reference_range_mask(df, reference_ranges=reference_ranges))
+
+    print("\n=== Reference range mask (missing_as='flag') ===")
+    print(create_reference_range_mask(df, reference_ranges=reference_ranges, missing_as="flag"))
+
+    print("\n=== Reference range mask (missing_as='null') ===")
+    print(create_reference_range_mask(df, reference_ranges=reference_ranges, missing_as="null"))
+
+    print("\n=== Plausibility mask: reference ranges only (method=None) ===")
+    print(create_plausibility_mask(df, method=None, reference_ranges=reference_ranges))
+
+    print("\n=== Plausibility mask: IQR only, global ===")
+    print(create_plausibility_mask(df, method="iqr", threshold=1.5, scope="global"))
+
+    print("\n=== Plausibility mask: IQR + reference ranges, global ===")
+    print(
+        create_plausibility_mask(
+            df, method="iqr", threshold=1.5, scope="global", reference_ranges=reference_ranges
+        )
+    )
+
+    print("\n=== Plausibility mask: IQR + reference ranges, per_id ===")
+    print(
+        create_plausibility_mask(
+            df, method="iqr", threshold=1.5, scope="per_id", reference_ranges=reference_ranges
+        )
+    )
+
+    print("\n=== Plausibility mask: MAD + reference ranges, global ===")
+    print(
+        create_plausibility_mask(
+            df, method="mad", threshold=3.5, scope="global", reference_ranges=reference_ranges
+        )
+    )
 
     missing_matrix = create_missingness_mask_per_col_long_table(df, "heartrate")
+    print("\n=== Missingness long table (heartrate) ===")
     print(missing_matrix)
-    plot_missingness_mask(missing_matrix)
 
     missing_matrix = create_missingness_mask_long_table(df, cols=["heartrate", "resprate"])
+    print("\n=== Missingness long table (all cols) ===")
     print(missing_matrix)
-    plot_missingness_mask(missing_matrix)

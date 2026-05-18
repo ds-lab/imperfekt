@@ -753,10 +753,10 @@ class IntravariableImperfection:
         case_stats = self.results.cs_case_level_statistics
         indicated_long = pl.concat(
             [
-                case_stats.select(
+                case_stats.select(  # ty:ignore[unresolved-attribute]
                     [
                         self.id_col,
-                        pl.lit(c).alias("variable"),  # ty:ignore[unresolved-attribute]
+                        pl.lit(c).alias("variable"),
                         pl.col(f"{c}_indicated_pct").alias("indicated_pct"),
                     ]
                 )
