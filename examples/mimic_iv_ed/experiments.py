@@ -24,32 +24,32 @@ import polars as pl
 ROOT = Path(__file__).parents[2]
 sys.path.insert(0, str(ROOT))
 
-from examples.mimic_iv_ed.extract_cohort import build_cohort  # noqa: E402
 from examples.mimic_iv_ed.config import (  # noqa: E402
-    RESULTS_DIR,
-    OUTCOME_COL,
-    WINDOW_HOURS,
-    MIN_OBS,
-    MAX_MISSINGNESS,
-    CV_N_SPLITS,
     CV_N_REPEATS,
-)
-from examples.mimic_iv_ed.features import (  # noqa: E402
-    pipeline_0_features,
-    pipeline_d_features,
-    pipeline_a_features,
-    pipeline_b_features,
-    pipeline_c_features,
-    build_stay_level,
+    CV_N_SPLITS,
+    MAX_MISSINGNESS,
+    MIN_OBS,
+    OUTCOME_COL,
+    RESULTS_DIR,
+    WINDOW_HOURS,
 )
 from examples.mimic_iv_ed.cv import (  # noqa: E402
     compute_irregularity_strata,
+    print_information_gain_ratio,
     run_cv,
-    summarise_cv,
     save_cv_results,
     save_feature_distribution_by_outcome,
     save_feature_distribution_by_quadrant_cv,
-    print_information_gain_ratio,
+    summarise_cv,
+)
+from examples.mimic_iv_ed.extract_cohort import build_cohort  # noqa: E402
+from examples.mimic_iv_ed.features import (  # noqa: E402
+    build_stay_level,
+    pipeline_0_features,
+    pipeline_a_features,
+    pipeline_b_features,
+    pipeline_c_features,
+    pipeline_d_features,
 )
 from examples.mimic_iv_ed.plotting import (  # noqa: E402
     plot_auprc_by_stratum,
@@ -76,7 +76,9 @@ def main() -> None:
     print(f"Cohort: {ts_df['stay_id'].n_unique()} stays, {len(ts_df)} observations")
     # prevalence on a stay_id level
     outcome = ts_df.group_by("stay_id").agg(pl.col(OUTCOME_COL).max()).select(OUTCOME_COL)
-    print(f"Outcome prevalence (stay-level): {outcome.mean()[0]} ({outcome.sum()[0]}/{len(outcome)})")
+    print(
+        f"Outcome prevalence (stay-level): {outcome.mean()[0]} ({outcome.sum()[0]}/{len(outcome)})"
+    )
 
     print("\nComputing irregularity strata on full dataset (axes + raw metrics only)…")
     case_metrics, axes = compute_irregularity_strata(ts_df)
@@ -101,16 +103,24 @@ def main() -> None:
     summary_a = summarise_cv(folds_a, "PipelineA")
 
     print(f"\nRunning {CV_N_SPLITS}×{CV_N_REPEATS} repeated stratified k-fold CV — Pipeline B…")
-    folds_b, last_model_b, last_X_test_b, last_test_df_b, feat_cols_b, last_test_strata_b = run_cv(stay_b, case_metrics, axes, "PipelineB")
+    folds_b, last_model_b, last_X_test_b, last_test_df_b, feat_cols_b, last_test_strata_b = run_cv(
+        stay_b, case_metrics, axes, "PipelineB"
+    )
     summary_b = summarise_cv(folds_b, "PipelineB")
 
     print(f"\nRunning {CV_N_SPLITS}×{CV_N_REPEATS} repeated stratified k-fold CV — Pipeline C…")
     folds_c, _, _, _, _, _ = run_cv(stay_c, case_metrics, axes, "PipelineC")
     summary_c = summarise_cv(folds_c, "PipelineC")
 
-    print_information_gain_ratio(summary_0, summary_d, "Pipeline0", "PipelineD", metric="auprc_lift", test_set_name="overall")
-    print_information_gain_ratio(summary_0, summary_b, "Pipeline0", "PipelineB", metric="auprc_lift", test_set_name="overall")
-    print_information_gain_ratio(summary_0, summary_c, "Pipeline0", "PipelineA", metric="auprc_lift", test_set_name="overall")
+    print_information_gain_ratio(
+        summary_0, summary_d, "Pipeline0", "PipelineD", metric="auprc_lift", test_set_name="overall"
+    )
+    print_information_gain_ratio(
+        summary_0, summary_b, "Pipeline0", "PipelineB", metric="auprc_lift", test_set_name="overall"
+    )
+    print_information_gain_ratio(
+        summary_0, summary_c, "Pipeline0", "PipelineA", metric="auprc_lift", test_set_name="overall"
+    )
 
     print("\nSaving CV results…")
     pipeline_summaries = [
@@ -128,7 +138,9 @@ def main() -> None:
         RESULTS_DIR / "feature_distribution_by_outcome.csv",
     )
 
-    print("\nSaving feature distribution table split by irregularity quadrant (Pipeline B feature space)…")
+    print(
+        "\nSaving feature distribution table split by irregularity quadrant (Pipeline B feature space)…"
+    )
     save_feature_distribution_by_quadrant_cv(
         stay_b,
         case_metrics,
@@ -154,7 +166,12 @@ def main() -> None:
     )
 
     print("\nComputing SHAP group-importance analysis for Pipeline B (last CV fold)…")
-    if last_model_b is not None and last_X_test_b is not None and last_test_df_b is not None and last_test_strata_b is not None:
+    if (
+        last_model_b is not None
+        and last_X_test_b is not None
+        and last_test_df_b is not None
+        and last_test_strata_b is not None
+    ):
         run_shap_group_analysis(
             model=last_model_b,
             X_test=last_X_test_b,

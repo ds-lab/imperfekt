@@ -1,42 +1,48 @@
-import polars as pl
 from functools import cache
 from typing import Literal
+
+import polars as pl
 
 # ── paths ────────────────────────────────────────────────────────────────────
 ED_BASE = "/mnt/dataset/mimic-iv-ed/mimic-iv-ed-2.2/ed"
 HOSP_BASE = "/workspaces/imperfekt/data/physionet.org/files/mimiciv/3.1/hosp"
-ICU_BASE  = "/workspaces/imperfekt/data/physionet.org/files/mimiciv/3.1/icu"
+ICU_BASE = "/workspaces/imperfekt/data/physionet.org/files/mimiciv/3.1/icu"
 
-VITALSIGN_PATH  = f"{ED_BASE}/vitalsign.csv"
-DIAGNOSIS_PATH  = f"{ED_BASE}/diagnosis.csv"
-EDSTAYS_PATH    = f"{ED_BASE}/edstays.csv"
+VITALSIGN_PATH = f"{ED_BASE}/vitalsign.csv"
+DIAGNOSIS_PATH = f"{ED_BASE}/diagnosis.csv"
+EDSTAYS_PATH = f"{ED_BASE}/edstays.csv"
 ADMISSIONS_PATH = f"{HOSP_BASE}/admissions.csv.gz"
-PATIENTS_PATH   = f"{HOSP_BASE}/patients.csv.gz"
-ICUSTAYS_PATH   = f"{ICU_BASE}/icustays.csv.gz"
+PATIENTS_PATH = f"{HOSP_BASE}/patients.csv.gz"
+ICUSTAYS_PATH = f"{ICU_BASE}/icustays.csv.gz"
 
 # ── ICD code definitions ──────────────────────────────────────────────────────
 SEPSIS_ICD_PREFIXES = [
     # ICD-9
-    "99591", "99592", "78552", "99590",
+    "99591",
+    "99592",
+    "78552",
+    "99590",
     # ICD-10
-    "A40", "A41", "R65",
+    "A40",
+    "A41",
+    "R65",
 ]
 
-Outcome = Literal["sepsis", "mortality", "readmission_30d", "ed_stay_length", "icu_admission", "critical_outcome"]
+Outcome = Literal[
+    "sepsis", "mortality", "readmission_30d", "ed_stay_length", "icu_admission", "critical_outcome"
+]
 
 
 # ── cached loaders (each file is read at most once per process) ───────────────
 
+
 @cache
 def _load_vitalsigns() -> pl.DataFrame:
-    return (
-        pl.read_csv(VITALSIGN_PATH)
-        .with_columns(
-            charttime=pl.col("charttime").str.strptime(pl.Datetime, "%Y-%m-%d %H:%M:%S"),
-            temperature=pl.when(pl.col("temperature").is_not_null())
-            .then((pl.col("temperature") - 32) * (5 / 9))
-            .otherwise(pl.col("temperature")),
-        )
+    return pl.read_csv(VITALSIGN_PATH).with_columns(
+        charttime=pl.col("charttime").str.strptime(pl.Datetime, "%Y-%m-%d %H:%M:%S"),
+        temperature=pl.when(pl.col("temperature").is_not_null())
+        .then((pl.col("temperature") - 32) * (5 / 9))
+        .otherwise(pl.col("temperature")),
     )
 
 
@@ -48,12 +54,9 @@ def _load_diagnosis() -> pl.DataFrame:
 @cache
 def _load_edstays() -> pl.DataFrame:
     dt_fmt = "%Y-%m-%d %H:%M:%S"
-    return (
-        pl.read_csv(EDSTAYS_PATH)
-        .with_columns(
-            intime=pl.col("intime").str.strptime(pl.Datetime, dt_fmt),
-            outtime=pl.col("outtime").str.strptime(pl.Datetime, dt_fmt),
-        )
+    return pl.read_csv(EDSTAYS_PATH).with_columns(
+        intime=pl.col("intime").str.strptime(pl.Datetime, dt_fmt),
+        outtime=pl.col("outtime").str.strptime(pl.Datetime, dt_fmt),
     )
 
 
@@ -74,28 +77,24 @@ def _load_icustays() -> pl.DataFrame:
 
 # ── cohort filters ────────────────────────────────────────────────────────────
 
+
 def filter_by_icd_prefixes(
     diagnosis_df: pl.DataFrame,
     prefixes: list[str],
 ) -> pl.DataFrame:
     """Return rows whose icd_code starts with any of the given prefixes."""
     return diagnosis_df.filter(
-        pl.any_horizontal(
-            [pl.col("icd_code").str.starts_with(p) for p in prefixes]
-        )
+        pl.any_horizontal([pl.col("icd_code").str.starts_with(p) for p in prefixes])
     )
 
 
 # ── outcome extractors ────────────────────────────────────────────────────────
 
+
 def extract_sepsis() -> pl.DataFrame:
     """One row per stay_id with sepsis=True."""
     sepsis_dx = filter_by_icd_prefixes(_load_diagnosis(), SEPSIS_ICD_PREFIXES)
-    return (
-        sepsis_dx.select("subject_id", "stay_id")
-        .unique()
-        .with_columns(sepsis=pl.lit(True))
-    )
+    return sepsis_dx.select("subject_id", "stay_id").unique().with_columns(sepsis=pl.lit(True))
 
 
 def extract_mortality(within_hours: int | None = None) -> pl.DataFrame:
@@ -115,32 +114,28 @@ def extract_mortality(within_hours: int | None = None) -> pl.DataFrame:
     """
     stay_hadm = _load_edstays().select("stay_id", "hadm_id", "intime").drop_nulls("hadm_id")
     dt_fmt = "%Y-%m-%d %H:%M:%S"
-    adm = _load_admissions().with_columns(
-        deathtime=pl.col("deathtime").str.strptime(pl.Datetime, dt_fmt, strict=False),
-    ).select("hadm_id", "hospital_expire_flag", "deathtime")
+    adm = (
+        _load_admissions()
+        .with_columns(
+            deathtime=pl.col("deathtime").str.strptime(pl.Datetime, dt_fmt, strict=False),
+        )
+        .select("hadm_id", "hospital_expire_flag", "deathtime")
+    )
 
     joined = stay_hadm.join(adm, on="hadm_id", how="left").drop_nulls("hospital_expire_flag")
 
     if within_hours is None:
-        return (
-            joined
-            .with_columns(
-                pl.col("hospital_expire_flag").cast(pl.Boolean).alias("in_hospital_mortality")
-            )
-            .select("stay_id", "in_hospital_mortality")
-        )
+        return joined.with_columns(
+            pl.col("hospital_expire_flag").cast(pl.Boolean).alias("in_hospital_mortality")
+        ).select("stay_id", "in_hospital_mortality")
 
-    return (
-        joined
-        .with_columns(
-            in_hospital_mortality=(
-                pl.col("deathtime").is_not_null()
-                & (pl.col("deathtime") >= pl.col("intime"))
-                & (pl.col("deathtime") <= pl.col("intime") + pl.duration(hours=within_hours))
-            )
+    return joined.with_columns(
+        in_hospital_mortality=(
+            pl.col("deathtime").is_not_null()
+            & (pl.col("deathtime") >= pl.col("intime"))
+            & (pl.col("deathtime") <= pl.col("intime") + pl.duration(hours=within_hours))
         )
-        .select("stay_id", "in_hospital_mortality")
-    )
+    ).select("stay_id", "in_hospital_mortality")
 
 
 def extract_ed_stay_length() -> pl.DataFrame:
@@ -177,8 +172,7 @@ def extract_readmission_30d() -> pl.DataFrame:
         dischtime=pl.col("dischtime").str.strptime(pl.Datetime, dt_fmt),
     )
     index_discharges = (
-        stay_hadm
-        .join(
+        stay_hadm.join(
             adm_parsed.select("subject_id", "hadm_id", "dischtime", "hospital_expire_flag"),
             on="hadm_id",
             how="left",
@@ -189,8 +183,9 @@ def extract_readmission_30d() -> pl.DataFrame:
         .drop("hospital_expire_flag")
     )
     readmitted = (
-        index_discharges
-        .join(adm_parsed.select("subject_id", "admittime"), on="subject_id", how="left")
+        index_discharges.join(
+            adm_parsed.select("subject_id", "admittime"), on="subject_id", how="left"
+        )
         .filter(
             (pl.col("admittime") > pl.col("dischtime"))
             & (pl.col("admittime") <= pl.col("dischtime") + pl.duration(days=30))
@@ -217,8 +212,7 @@ def extract_icu_admission() -> pl.DataFrame:
     stay_hadm = _load_edstays().select("stay_id", "hadm_id")
     icu_hadm_ids = _load_icustays().with_columns(icu_admission=pl.lit(True))
     return (
-        stay_hadm
-        .join(icu_hadm_ids, on="hadm_id", how="left")
+        stay_hadm.join(icu_hadm_ids, on="hadm_id", how="left")
         .select("stay_id", "icu_admission")
         .unique("stay_id", keep="first")
         .with_columns(pl.col("icu_admission").fill_null(False))
@@ -234,22 +228,20 @@ def extract_critical_outcome() -> pl.DataFrame:
     a hadm_id are dropped because their mortality status is unknowable.
     ICU admission is derived from icustays via hadm_id.
     """
-    mortality_df = extract_mortality(within_hours=MORTALITY_WINDOW_HOURS).select("stay_id", "in_hospital_mortality")
+    mortality_df = extract_mortality(within_hours=MORTALITY_WINDOW_HOURS).select(
+        "stay_id", "in_hospital_mortality"
+    )
     icu_df = extract_icu_admission().select("stay_id", "icu_admission")
     return (
-        mortality_df
-        .join(icu_df, on="stay_id", how="left")
+        mortality_df.join(icu_df, on="stay_id", how="left")
         .with_columns(pl.col("icu_admission").fill_null(False))
-        .with_columns(
-            critical_outcome=(
-                pl.col("in_hospital_mortality") | pl.col("icu_admission")
-            )
-        )
+        .with_columns(critical_outcome=(pl.col("in_hospital_mortality") | pl.col("icu_admission")))
         .select("stay_id", "critical_outcome")
     )
 
 
 # ── demographics ─────────────────────────────────────────────────────────────
+
 
 def extract_demographics() -> pl.DataFrame:
     """
@@ -261,10 +253,11 @@ def extract_demographics() -> pl.DataFrame:
     stays = _load_edstays().select("stay_id", "subject_id", "intime")
     patients = _load_patients()
     return (
-        stays
-        .join(patients, on="subject_id", how="left")
+        stays.join(patients, on="subject_id", how="left")
         .with_columns(
-            age_at_visit=(pl.col("anchor_age") + pl.col("intime").dt.year() - pl.col("anchor_year")).cast(pl.Int32),
+            age_at_visit=(
+                pl.col("anchor_age") + pl.col("intime").dt.year() - pl.col("anchor_year")
+            ).cast(pl.Int32),
             sex=pl.col("gender"),
         )
         .select("stay_id", "age_at_visit", "sex")
@@ -276,12 +269,15 @@ def extract_demographics() -> pl.DataFrame:
 MORTALITY_WINDOW_HOURS = 48
 
 _OUTCOME_REGISTRY: dict[Outcome, tuple[str, callable]] = {
-    "sepsis":               ("sepsis",               extract_sepsis),
-    "in_hospital_mortality":("in_hospital_mortality", lambda: extract_mortality(within_hours=MORTALITY_WINDOW_HOURS)),
-    "readmission_30d":      ("readmission_30d",       extract_readmission_30d),
-    "ed_stay_length":       ("ed_stay_length_hours",  extract_ed_stay_length),
-    "icu_admission":        ("icu_admission",         extract_icu_admission),
-    "critical_outcome":     ("critical_outcome",      extract_critical_outcome),
+    "sepsis": ("sepsis", extract_sepsis),
+    "in_hospital_mortality": (
+        "in_hospital_mortality",
+        lambda: extract_mortality(within_hours=MORTALITY_WINDOW_HOURS),
+    ),
+    "readmission_30d": ("readmission_30d", extract_readmission_30d),
+    "ed_stay_length": ("ed_stay_length_hours", extract_ed_stay_length),
+    "icu_admission": ("icu_admission", extract_icu_admission),
+    "critical_outcome": ("critical_outcome", extract_critical_outcome),
 }
 
 
@@ -355,19 +351,15 @@ def build_cohort(
         eligible_stay_ids &= set(df["stay_id"].to_list())
 
     # Filter vitalsigns to eligible stays, optionally truncating to a time window
-    vitalsigns = (
-        _load_vitalsigns()
-        .filter(pl.col("stay_id").is_in(list(eligible_stay_ids)))
-    )
+    vitalsigns = _load_vitalsigns().filter(pl.col("stay_id").is_in(list(eligible_stay_ids)))
     if window_hours is not None:
         stay_intimes = _load_edstays().select("stay_id", "intime")
         vitalsigns = (
-            vitalsigns
-            .join(stay_intimes, on="stay_id", how="left")
+            vitalsigns.join(stay_intimes, on="stay_id", how="left")
             .filter(pl.col("charttime") <= pl.col("intime") + pl.duration(hours=window_hours))
             .drop("intime")
         )
-        
+
     if min_observations is not None:
         sufficient = vitalsigns.filter(
             pl.col("stay_id").count().over("stay_id") >= min_observations
@@ -379,7 +371,10 @@ def build_cohort(
     # Stays where more than max_missingness fraction of rows are missing are dropped.
     any_null = pl.any_horizontal([pl.col(c).is_null() for c in VITAL_COLS])
     sufficient = sufficient.filter(
-        (any_null.cast(pl.Float64).sum().over("stay_id") / pl.col("stay_id").count().over("stay_id"))
+        (
+            any_null.cast(pl.Float64).sum().over("stay_id")
+            / pl.col("stay_id").count().over("stay_id")
+        )
         <= max_missingness
     )
 
@@ -400,14 +395,13 @@ def build_cohort(
 # ── main ─────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    obs_option = [None, 5,6,7,8,9,10]
-    hours_option = [3,4,5,6,7,8,9,10]
-    
+    obs_option = [None, 5, 6, 7, 8, 9, 10]
+    hours_option = [3, 4, 5, 6, 7, 8, 9, 10]
+
     for obs in obs_option:
         for hours in hours_option:
             print(f"\nBuilding cohort with min_observations={obs} and window_hours={hours}…")
-    
-            cohort = build_cohort(["critical_outcome"], min_observations=obs, window_hours=hours)
-            #print(cohort.shape)
-            print(cohort["stay_id"].n_unique())
 
+            cohort = build_cohort(["critical_outcome"], min_observations=obs, window_hours=hours)
+            # print(cohort.shape)
+            print(cohort["stay_id"].n_unique())

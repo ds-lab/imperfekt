@@ -12,17 +12,17 @@ from sklearn.model_selection import RepeatedStratifiedKFold
 ROOT = Path(__file__).parents[2]
 sys.path.insert(0, str(ROOT))
 
-from imperfekt.analysis.irregularity.irregularity import Irregularity  # noqa: E402
-from examples.utils.models import XGBoostModel  # noqa: E402
 from examples.mimic_iv_ed.config import (  # noqa: E402
-    RESULTS_DIR,
-    OUTCOME_COL,
-    CV_N_SPLITS,
     CV_N_REPEATS,
-    RANDOM_STATE,
-    VITAL_COLS,
+    CV_N_SPLITS,
     IREG_FEATURE_COLS,
+    OUTCOME_COL,
+    RANDOM_STATE,
+    RESULTS_DIR,
+    VITAL_COLS,
 )
+from examples.utils.models import XGBoostModel  # noqa: E402
+from imperfekt.analysis.irregularity.irregularity import Irregularity  # noqa: E402
 
 
 def compute_irregularity_strata(
@@ -90,9 +90,7 @@ def _feature_group(col: str) -> str:
 
 
 def _select_feature_columns(stay_df: pl.DataFrame) -> list[str]:
-    return [
-        c for c in stay_df.columns if c not in ("stay_id", OUTCOME_COL, "subject_id")
-    ]
+    return [c for c in stay_df.columns if c not in ("stay_id", OUTCOME_COL, "subject_id")]
 
 
 def run_cv(
@@ -126,9 +124,7 @@ def run_cv(
       last_test_strata - stay_id/irregularity_stratum for the final fold's
                          test set (train-derived thresholds)
     """
-    feature_cols = [
-        c for c in stay_df.columns if c not in ("stay_id", OUTCOME_COL, "subject_id")
-    ]
+    feature_cols = [c for c in stay_df.columns if c not in ("stay_id", OUTCOME_COL, "subject_id")]
 
     subject_labels = (
         stay_df.select(["subject_id", OUTCOME_COL])
@@ -183,35 +179,34 @@ def run_cv(
         med_y = train_metrics[axis_y].median()
 
         test_stay_ids = test["stay_id"]
-        test_strata = (
-            Irregularity.assign_strata(
-                case_metrics
-                .filter(pl.col("stay_id").is_in(test_stay_ids.to_list()))
-                .select(["stay_id", axis_x, axis_y])
-                .drop_nulls([axis_x, axis_y]),
-                axis_x, axis_y, med_x, med_y,
-            )
-            .select(["stay_id", "irregularity_stratum"])
-        )
+        test_strata = Irregularity.assign_strata(
+            case_metrics.filter(pl.col("stay_id").is_in(test_stay_ids.to_list()))
+            .select(["stay_id", axis_x, axis_y])
+            .drop_nulls([axis_x, axis_y]),
+            axis_x,
+            axis_y,
+            med_x,
+            med_y,
+        ).select(["stay_id", "irregularity_stratum"])
 
         # Join test strata onto test rows to get a per-row stratum label aligned
         # with y_test/y_proba, then group by stratum without repeated is_in scans.
         # Also join cv/qcod/adherence_rate for irregularity characterisation per stratum.
         ireg_cols = ["stay_id", "cv", "qcod", "adherence_rate"]
         available_ireg = [c for c in ireg_cols if c in case_metrics.columns]
-        test_strata_ireg = (
-            test_strata
-            .join(
-                case_metrics.select(available_ireg),
-                on="stay_id",
-                how="left",
-            )
+        test_strata_ireg = test_strata.join(
+            case_metrics.select(available_ireg),
+            on="stay_id",
+            how="left",
         )
 
         strata_arr = (
             test.select("stay_id")
-            .join(test_strata_ireg.select(["stay_id", "irregularity_stratum"]), on="stay_id", how="left")
-            ["irregularity_stratum"]
+            .join(
+                test_strata_ireg.select(["stay_id", "irregularity_stratum"]),
+                on="stay_id",
+                how="left",
+            )["irregularity_stratum"]
             .fill_null("")
             .to_numpy()
         )
@@ -219,9 +214,7 @@ def run_cv(
         ireg_lookup: dict[str, dict[str, float]] = {}
         for row in test_strata_ireg.iter_rows(named=True):
             sid = row["stay_id"]
-            ireg_lookup[sid] = {
-                c: row[c] for c in ("cv", "qcod", "adherence_rate") if c in row
-            }
+            ireg_lookup[sid] = {c: row[c] for c in ("cv", "qcod", "adherence_rate") if c in row}
 
         stay_ids_arr = test["stay_id"].to_numpy()
 
@@ -235,7 +228,8 @@ def run_cv(
                     vals = [
                         ireg_lookup[sid][ireg_metric]
                         for sid in stay_ids_arr[mask]
-                        if sid in ireg_lookup and ireg_metric in ireg_lookup[sid]
+                        if sid in ireg_lookup
+                        and ireg_metric in ireg_lookup[sid]
                         and ireg_lookup[sid][ireg_metric] is not None
                     ]
                     m_s[ireg_metric] = float(np.mean(vals)) if vals else float("nan")
@@ -259,7 +253,16 @@ def summarise_cv(fold_metrics: dict[str, list], pipeline_name: str) -> dict[str,
 
     summary = {}
     for key, folds in fold_metrics.items():
-        for metric in ("auprc", "auprc_lift", "auroc", "brier_skill_score", "n_pos_pct", "cv", "qcod", "adherence_rate"):
+        for metric in (
+            "auprc",
+            "auprc_lift",
+            "auroc",
+            "brier_skill_score",
+            "n_pos_pct",
+            "cv",
+            "qcod",
+            "adherence_rate",
+        ):
             vals = np.array([f[metric] for f in folds if metric in f and not np.isnan(f[metric])])
             if len(vals) == 0:
                 continue
@@ -269,16 +272,16 @@ def summarise_cv(fold_metrics: dict[str, list], pipeline_name: str) -> dict[str,
             summary.setdefault(key, {})[metric] = {"mean": mean, "ci": ci}
 
     o = summary.get("overall", {})
-    print(f"\n[{pipeline_name}] overall  " + "  ".join(
-        f"{m.upper()}={v['mean']:.3f}±{v['ci']:.3f}"
-        for m, v in o.items()
-    ))
+    print(
+        f"\n[{pipeline_name}] overall  "
+        + "  ".join(f"{m.upper()}={v['mean']:.3f}±{v['ci']:.3f}" for m, v in o.items())
+    )
     for s in sorted(k for k in summary if k != "overall"):
         vals = summary[s]
-        print(f"  {s}  " + "  ".join(
-            f"{m.upper()}={v['mean']:.3f}±{v['ci']:.3f}"
-            for m, v in vals.items()
-        ))
+        print(
+            f"  {s}  "
+            + "  ".join(f"{m.upper()}={v['mean']:.3f}±{v['ci']:.3f}" for m, v in vals.items())
+        )
     return summary
 
 
@@ -292,7 +295,16 @@ def save_cv_results(
       auroc_mean, auroc_ci, brier_skill_score_mean, brier_skill_score_ci,
       n_pos_pct_mean, n_pos_pct_ci
     """
-    metrics = ("auprc", "auprc_lift", "auroc", "brier_skill_score", "n_pos_pct", "cv", "qcod", "adherence_rate")
+    metrics = (
+        "auprc",
+        "auprc_lift",
+        "auroc",
+        "brier_skill_score",
+        "n_pos_pct",
+        "cv",
+        "qcod",
+        "adherence_rate",
+    )
 
     rows = []
     for pipeline_name, summary in pipeline_summaries:
@@ -331,8 +343,7 @@ def save_feature_distribution_by_outcome(
         return
 
     long_df = (
-        stay_df
-        .select([OUTCOME_COL] + feature_cols)
+        stay_df.select([OUTCOME_COL] + feature_cols)
         .unpivot(
             index=[OUTCOME_COL],
             on=feature_cols,
@@ -451,24 +462,22 @@ def save_feature_distribution_by_quadrant_cv(
         if med_x is None or med_y is None:
             continue
 
-        test_strata = (
-            Irregularity.assign_strata(
-                case_metrics
-                .filter(pl.col("stay_id").is_in(test["stay_id"].to_list()))
-                .select(["stay_id", axis_x, axis_y])
-                .drop_nulls([axis_x, axis_y]),
-                axis_x, axis_y, med_x, med_y,
-            )
-            .select(["stay_id", "irregularity_stratum"])
-        )
+        test_strata = Irregularity.assign_strata(
+            case_metrics.filter(pl.col("stay_id").is_in(test["stay_id"].to_list()))
+            .select(["stay_id", axis_x, axis_y])
+            .drop_nulls([axis_x, axis_y]),
+            axis_x,
+            axis_y,
+            med_x,
+            med_y,
+        ).select(["stay_id", "irregularity_stratum"])
 
         overall_prevalence = test[OUTCOME_COL].mean()
         if overall_prevalence is not None and not np.isnan(overall_prevalence):
             fold_outcome_prevalence["overall"].append(float(overall_prevalence))
 
         overall_means = (
-            test
-            .select(feature_cols)
+            test.select(feature_cols)
             .melt(
                 value_vars=feature_cols,
                 variable_name="feature",
@@ -489,10 +498,8 @@ def save_feature_distribution_by_quadrant_cv(
         if test_with_strata.height == 0:
             continue
 
-        stratum_prevalence = (
-            test_with_strata
-            .group_by("irregularity_stratum")
-            .agg(pl.col(OUTCOME_COL).mean().alias("fold_prevalence"))
+        stratum_prevalence = test_with_strata.group_by("irregularity_stratum").agg(
+            pl.col(OUTCOME_COL).mean().alias("fold_prevalence")
         )
         for row in stratum_prevalence.iter_rows(named=True):
             prev = row["fold_prevalence"]
@@ -501,8 +508,7 @@ def save_feature_distribution_by_quadrant_cv(
             fold_outcome_prevalence[row["irregularity_stratum"]].append(float(prev))
 
         stratum_means = (
-            test_with_strata
-            .melt(
+            test_with_strata.melt(
                 id_vars=["irregularity_stratum"],
                 value_vars=feature_cols,
                 variable_name="feature",
@@ -590,7 +596,7 @@ def print_information_gain_ratio(
     baseline_name: str,
     candidate_name: str,
     metric: str = "auprc",
-    test_set_name: str = "overall"
+    test_set_name: str = "overall",
 ) -> None:
     """Print overall relative gain ratio: (candidate - baseline) / baseline."""
     baseline = baseline_summary.get(test_set_name, {}).get(metric, {}).get("mean", float("nan"))

@@ -13,8 +13,8 @@ fs = s3fs.S3FileSystem(
     profile="seaweedfs",
 )
 
-if Path('/workspaces/imperfekt/data/nemsis/destinations.parquet').exists():
-    df = pl.read_parquet(Path('/workspaces/imperfekt/data/nemsis/destinations.parquet'))
+if Path("/workspaces/imperfekt/data/nemsis/destinations.parquet").exists():
+    df = pl.read_parquet(Path("/workspaces/imperfekt/data/nemsis/destinations.parquet"))
 else:
     with fs.open(f"{S3_BASE}/pcr_events.parquet") as f:
         events_df = pl.read_parquet(f)
@@ -24,33 +24,30 @@ else:
     call_df = events_df.filter(pl.col("eResponse_05").is_in(["2205001", "2205003", "2205009"]))
     # Class 1: critically ill / ICU-level destinations.
     icu_codes = [
-        "4222013", # ICU
-        "4222005", # CCU
-        "4222021", # MICU
-        "4222049", # SICU
-      #  "4222031", # OR (Optional: Add if you want to capture emergency surgery)
-      #  "4222003", # Cath Lab (Optional: Add if you want to capture heart attacks)
+        "4222013",  # ICU
+        "4222005",  # CCU
+        "4222021",  # MICU
+        "4222049",  # SICU
+        #  "4222031", # OR (Optional: Add if you want to capture emergency surgery)
+        #  "4222003", # Cath Lab (Optional: Add if you want to capture heart attacks)
     ]
 
     # Class 0: stable admitted / general ward destinations.
     ward_codes = [
-        "4222017", # Med/Surg
-        "4222033", # Orthopedic
-        "4222051", # Oncology
+        "4222017",  # Med/Surg
+        "4222033",  # Orthopedic
+        "4222051",  # Oncology
     ]
 
     # Use this list to filter to only the ICU and ward dispositions above.
     filter_for = icu_codes + ward_codes
 
-    binary_df = (
-        call_df.filter(pl.col("eDisposition_22").is_in(filter_for))
-        .with_columns(
-            pl.when(pl.col("eDisposition_22").is_in(icu_codes))
-            .then(pl.lit(1))
-            .otherwise(pl.lit(0))
-            .cast(pl.Int8)
-            .alias("label"),
-        )
+    binary_df = call_df.filter(pl.col("eDisposition_22").is_in(filter_for)).with_columns(
+        pl.when(pl.col("eDisposition_22").is_in(icu_codes))
+        .then(pl.lit(1))
+        .otherwise(pl.lit(0))
+        .cast(pl.Int8)
+        .alias("label"),
     )
     # Filter out underage patients
     binary_df = binary_df.filter(pl.col("ePatient_15") >= 18.0)
@@ -58,29 +55,41 @@ else:
     binary_df = binary_df.select(["PcrKey", "label"])
     # join on PcrKey
     df = binary_df.join(vitals_df, on="PcrKey", how="inner")
-    df = df.rename({
-        "eVitals_01": "clock",
-        "eVitals_06": "sbp",
-        "eVitals_10": "hr",
-        "eVitals_12": "o2sat",
-        "eVitals_14": "rr",
-    })
+    df = df.rename(
+        {
+            "eVitals_01": "clock",
+            "eVitals_06": "sbp",
+            "eVitals_10": "hr",
+            "eVitals_12": "o2sat",
+            "eVitals_14": "rr",
+        }
+    )
     df = df.select(["PcrKey", "clock", "sbp", "hr", "o2sat", "rr", "label"])
     date_df = df.with_columns(
-                pl.col("clock")
-                .str.to_datetime("  %d%b%Y:%H:%M:%S", strict=False)
-                .alias("clock")
-            ).filter(pl.col("clock").is_not_null())
+        pl.col("clock").str.to_datetime("  %d%b%Y:%H:%M:%S", strict=False).alias("clock")
+    ).filter(pl.col("clock").is_not_null())
 
     # per vital turn the codes into None
     PERTINENT_NEGATIVE_CODES = [8801019, 8801023, 7701001, 7701003, 8801005]
     date_df = date_df.with_columns(
-        pl.when(pl.col("sbp").is_in(PERTINENT_NEGATIVE_CODES)).then(pl.lit(None)).otherwise(pl.col("sbp")).alias("sbp"),
-        pl.when(pl.col("hr").is_in(PERTINENT_NEGATIVE_CODES)).then(pl.lit(None)).otherwise(pl.col("hr")).alias("hr"),
-        pl.when(pl.col("o2sat").is_in(PERTINENT_NEGATIVE_CODES)).then(pl.lit(None)).otherwise(pl.col("o2sat")).alias("o2sat"),
-        pl.when(pl.col("rr").is_in(PERTINENT_NEGATIVE_CODES)).then(pl.lit(None)).otherwise(pl.col("rr")).alias("rr"),
+        pl.when(pl.col("sbp").is_in(PERTINENT_NEGATIVE_CODES))
+        .then(pl.lit(None))
+        .otherwise(pl.col("sbp"))
+        .alias("sbp"),
+        pl.when(pl.col("hr").is_in(PERTINENT_NEGATIVE_CODES))
+        .then(pl.lit(None))
+        .otherwise(pl.col("hr"))
+        .alias("hr"),
+        pl.when(pl.col("o2sat").is_in(PERTINENT_NEGATIVE_CODES))
+        .then(pl.lit(None))
+        .otherwise(pl.col("o2sat"))
+        .alias("o2sat"),
+        pl.when(pl.col("rr").is_in(PERTINENT_NEGATIVE_CODES))
+        .then(pl.lit(None))
+        .otherwise(pl.col("rr"))
+        .alias("rr"),
     )
-    date_df.write_parquet(Path('/workspaces/imperfekt/data/nemsis/destinations.parquet'))
+    date_df.write_parquet(Path("/workspaces/imperfekt/data/nemsis/destinations.parquet"))
     df = date_df
 # %% count unique PCR keys by label to see how many patients we have in each class
 df.group_by("label").agg(pl.col("PcrKey").n_unique())
@@ -88,9 +97,9 @@ df.group_by("label").agg(pl.col("PcrKey").n_unique())
 df.group_by("PcrKey").agg(pl.col("clock").n_unique().alias("num_time_points")).describe()
 
 # %% Describe length first to last vital sign per patient to get a sense of how long the time series are
-df.group_by("PcrKey").agg(
-    (pl.col("clock").max() - pl.col("clock").min()).alias("duration")
-).select("duration").describe()
+df.group_by("PcrKey").agg((pl.col("clock").max() - pl.col("clock").min()).alias("duration")).select(
+    "duration"
+).describe()
 
 # %% get class distribution for different lengths (10,20,30 minutes) and minimum count of vitals per patient
 thresholds = [10, 20, 30]

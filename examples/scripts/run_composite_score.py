@@ -14,20 +14,21 @@ Three analyses are demonstrated:
 Replace the synthetic dataset block with your own data load and adjust
 SAVE_RESULTS_PATH / RENDERER as needed.
 """
+
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import polars as pl
 
-from imperfekt.analysis.irregularity.irregularity import Irregularity
-from imperfekt.analysis.intravariable.intravariable import IntravariableImperfection
 from imperfekt.analysis.intervariable.intervariable import IntervariableImperfection
+from imperfekt.analysis.intravariable.intravariable import IntravariableImperfection
+from imperfekt.analysis.irregularity.irregularity import Irregularity
 
 pl.Config.set_tbl_cols(20)
 pl.Config.set_tbl_rows(30)
 
 SAVE_RESULTS_PATH = Path("results/composite_score")
-RENDERER = None       # set to "notebook_connected" or "browser" for plots
+RENDERER = None  # set to "notebook_connected" or "browser" for plots
 SAVE_RESULTS = True
 
 # %%
@@ -43,6 +44,7 @@ SAVE_RESULTS = True
 
 rng_state = 42
 import random
+
 random.seed(rng_state)
 
 N_CASES = 20
@@ -55,20 +57,20 @@ for case_id in range(N_CASES):
     pattern = case_id % 4
     t = base_time + timedelta(hours=case_id * 2)
     for i in range(N_OBS):
-        if pattern == 0:    # regular ~60s spacing
+        if pattern == 0:  # regular ~60s spacing
             gap = 60
         elif pattern == 1:  # bursty: alternating short/long
             gap = 10 if i % 5 != 0 else 300
         elif pattern == 2:  # random uniform
             gap = random.randint(30, 180)
-        else:               # sparse, wide gaps
+        else:  # sparse, wide gaps
             gap = random.randint(120, 600)
         t += timedelta(seconds=gap)
 
         # missingness: cases 0-9 low, 10-19 high; some bursty
         missing_prob = 0.05 if case_id < 10 else 0.30
         if case_id >= 15 and 10 <= i <= 15:
-            missing_prob = 0.90   # concentrated gap burst
+            missing_prob = 0.90  # concentrated gap burst
 
         hr = None if random.random() < missing_prob else float(70 + random.randint(-15, 15))
         bp = None if random.random() < missing_prob * 0.7 else float(120 + random.randint(-20, 20))
@@ -81,8 +83,7 @@ vitals_df = pl.DataFrame(
 )
 cols = ["heartrate", "blood_pressure"]
 
-print(f"Dataset: {vitals_df['id'].n_unique()} cases, "
-      f"{vitals_df.height} rows")
+print(f"Dataset: {vitals_df['id'].n_unique()} cases, {vitals_df.height} rows")
 print(vitals_df.head(5))
 
 # %%
@@ -102,10 +103,18 @@ irr = irr.composite_score(save_results=SAVE_RESULTS)
 # %%
 print("\n=== Irregularity: case scores (selected columns) ===")
 print(
-    irr.results.cs_case_scores.select([
-        "id", "cv", "burstiness_coeff", "adherence_rate",
-        "axis_x", "axis_y", "axis_pair_corr", "irregularity_stratum",
-    ])
+    irr.results.cs_case_scores.select(
+        [
+            "id",
+            "cv",
+            "burstiness_coeff",
+            "adherence_rate",
+            "axis_x",
+            "axis_y",
+            "axis_pair_corr",
+            "irregularity_stratum",
+        ]
+    )
 )
 
 # %%
@@ -159,11 +168,21 @@ iv = iv.composite_score(save_results=SAVE_RESULTS)
 # %%
 print("\n=== Intravariable: case scores per variable ===")
 print(
-    iv.results.iv_composite_scores.select([
-        "id", "variable", "indicated_pct", "gap_cv",
-        "gap_burstiness_coeff", "gap_adherence_rate", "mc_p11",
-        "axis_x", "axis_y", "axis_pair_corr", "imperfection_stratum",
-    ])
+    iv.results.iv_composite_scores.select(
+        [
+            "id",
+            "variable",
+            "indicated_pct",
+            "gap_cv",
+            "gap_burstiness_coeff",
+            "gap_adherence_rate",
+            "mc_p11",
+            "axis_x",
+            "axis_y",
+            "axis_pair_corr",
+            "imperfection_stratum",
+        ]
+    )
 )
 
 # %%
@@ -172,9 +191,11 @@ composite = iv.results.iv_composite_scores
 for var in cols:
     var_scores = composite.filter(pl.col("variable") == var)
     total_var = var_scores.height
-    print(f"\n  {var}  (axis: "
-          f"{var_scores['axis_x'][0]} × {var_scores['axis_y'][0]}, "
-          f"corr={var_scores['axis_pair_corr'][0]:.3f})")
+    print(
+        f"\n  {var}  (axis: "
+        f"{var_scores['axis_x'][0]} × {var_scores['axis_y'][0]}, "
+        f"corr={var_scores['axis_pair_corr'][0]:.3f})"
+    )
     print(
         var_scores.filter(pl.col("imperfection_stratum").is_not_null())
         .group_by("imperfection_stratum")
@@ -221,11 +242,20 @@ ivv = ivv.composite_score(save_results=SAVE_RESULTS)
 # %%
 print("\n=== Intervariable: case scores ===")
 print(
-    ivv.results.iv_composite_scores.select([
-        "id", "avg_indicated_vars_pct", "co_missingness_concentration",
-        "missing_variable_breadth", "pattern_entropy", "max_pairwise_co_missingness",
-        "axis_x", "axis_y", "axis_pair_corr", "intervariable_stratum",
-    ])
+    ivv.results.iv_composite_scores.select(
+        [
+            "id",
+            "avg_indicated_vars_pct",
+            "co_missingness_concentration",
+            "missing_variable_breadth",
+            "pattern_entropy",
+            "max_pairwise_co_missingness",
+            "axis_x",
+            "axis_y",
+            "axis_pair_corr",
+            "intervariable_stratum",
+        ]
+    )
 )
 
 # %%

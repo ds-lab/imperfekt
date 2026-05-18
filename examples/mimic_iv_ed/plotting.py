@@ -10,17 +10,15 @@ import polars as pl
 ROOT = Path(__file__).parents[2]
 sys.path.insert(0, str(ROOT))
 
-from examples.utils.models import XGBoostModel  # noqa: E402
 from examples.mimic_iv_ed.config import (  # noqa: E402
-    RESULTS_DIR,
-    OUTCOME_COL,
-    CV_N_SPLITS,
     CV_N_REPEATS,
+    CV_N_SPLITS,
     IREG_FEATURE_COLS,
+    RESULTS_DIR,
     SPEARMAN_TOP_K_PHYS,
     SPEARMAN_TOP_K_STRUCT,
 )
-
+from examples.utils.models import XGBoostModel  # noqa: E402
 
 _STRATUM_ORDER = ["Q_alpha", "Q_beta", "Q_gamma", "Q_delta"]
 
@@ -31,7 +29,9 @@ def _sort_strata(keys: set[str]) -> list[str]:
     return known + other
 
 
-def _stratum_tick_labels(strata_keys: list[str], pipeline_summaries: list[tuple[str, dict[str, dict]]]) -> list[str]:
+def _stratum_tick_labels(
+    strata_keys: list[str], pipeline_summaries: list[tuple[str, dict[str, dict]]]
+) -> list[str]:
     """
     Build tick labels from mean ± CI prevalence aggregated across all pipelines'
     CV folds, e.g. "Q_delta\n34%±2%". Uses n_pos_pct stored per fold in the summary.
@@ -63,12 +63,9 @@ def plot_auprc_by_stratum(
     Overall AUPRC shown as horizontal dashed reference lines.
     Tick labels show mean ± CI outcome prevalence derived from CV test folds.
     """
-    strata_keys = _sort_strata({
-        k
-        for _, summary in pipeline_summaries
-        for k in summary
-        if k != "overall"
-    })
+    strata_keys = _sort_strata(
+        {k for _, summary in pipeline_summaries for k in summary if k != "overall"}
+    )
 
     def _vals(summary):
         means, lo, hi = [], [], []
@@ -126,12 +123,9 @@ def plot_auroc_by_stratum(
     Overall AUROC shown as horizontal dashed reference lines.
     Tick labels show mean outcome prevalence derived from CV test folds.
     """
-    strata_keys = _sort_strata({
-        k
-        for _, summary in pipeline_summaries
-        for k in summary
-        if k != "overall"
-    })
+    strata_keys = _sort_strata(
+        {k for _, summary in pipeline_summaries for k in summary if k != "overall"}
+    )
 
     def _vals(summary):
         means, lo, hi = [], [], []
@@ -191,12 +185,9 @@ def plot_auprc_lift_by_stratum(
     Reference line at lift = 1 (no-skill).
     Tick labels show mean ± CI outcome prevalence derived from CV test folds.
     """
-    strata_keys = _sort_strata({
-        k
-        for _, summary in pipeline_summaries
-        for k in summary
-        if k != "overall"
-    })
+    strata_keys = _sort_strata(
+        {k for _, summary in pipeline_summaries for k in summary if k != "overall"}
+    )
 
     def _vals(summary):
         means, lo, hi = [], [], []
@@ -284,9 +275,10 @@ def _compute_rfi_by_stratum(
       irregularity_stratum, phys_rfi, struct_rfi,
       phys_sum, struct_sum, n_phys, n_struct, per_feat_ratio
     """
-    strata_map = {sid: s for sid, s in zip(
-        strata["stay_id"].to_list(), strata["irregularity_stratum"].to_list()
-    )}
+    strata_map = {
+        sid: s
+        for sid, s in zip(strata["stay_id"].to_list(), strata["irregularity_stratum"].to_list())
+    }
     n_phys = len(phys_idx)
     n_struct = len(struct_idx)
     rows = []
@@ -304,16 +296,18 @@ def _compute_rfi_by_stratum(
         phys_per_feat = phys_sum / n_phys if n_phys > 0 else 0.0
         struct_per_feat = struct_sum / n_struct if n_struct > 0 else 0.0
         per_feat_ratio = struct_per_feat / phys_per_feat if phys_per_feat > 0 else float("nan")
-        rows.append({
-            "irregularity_stratum": stratum,
-            "phys_rfi": phys_rfi,
-            "struct_rfi": struct_rfi,
-            "phys_sum": phys_sum,
-            "struct_sum": struct_sum,
-            "n_phys": n_phys,
-            "n_struct": n_struct,
-            "per_feat_ratio": per_feat_ratio,
-        })
+        rows.append(
+            {
+                "irregularity_stratum": stratum,
+                "phys_rfi": phys_rfi,
+                "struct_rfi": struct_rfi,
+                "phys_sum": phys_sum,
+                "struct_sum": struct_sum,
+                "n_phys": n_phys,
+                "n_struct": n_struct,
+                "per_feat_ratio": per_feat_ratio,
+            }
+        )
     return pl.DataFrame(rows)
 
 
@@ -341,9 +335,24 @@ def _plot_group_importance_by_stratum(
     fig, ax_stack = plt.subplots(figsize=(7, 4.5))
 
     ax_stack.bar(x, phys_pct, color="#4C72B0", label=f"Physiological ({n_phys} features)")
-    ax_stack.bar(x, struct_pct, bottom=phys_pct, color="#DD8452", label=f"Structural metadata ({n_struct} features)")
+    ax_stack.bar(
+        x,
+        struct_pct,
+        bottom=phys_pct,
+        color="#DD8452",
+        label=f"Structural metadata ({n_struct} features)",
+    )
     for i, (p, s) in enumerate(zip(phys_pct, struct_pct)):
-        ax_stack.text(i, p + s / 2, f"{s:.1f}%", ha="center", va="center", fontsize=7, color="white", fontweight="bold")
+        ax_stack.text(
+            i,
+            p + s / 2,
+            f"{s:.1f}%",
+            ha="center",
+            va="center",
+            fontsize=7,
+            color="white",
+            fontweight="bold",
+        )
     ax_stack.set_ylim(0, 100)
     ax_stack.set_yticks(np.arange(0, 101, 20))
     ax_stack.set_ylabel("Share of total |SHAP| mass (%)")
@@ -403,8 +412,12 @@ def _spearman_structural_floor(
     top_k_phys = min(SPEARMAN_TOP_K_PHYS, len(phys_idx_map))
     top_k_struct = min(SPEARMAN_TOP_K_STRUCT, len(struct_idx_map))
 
-    top_phys = sorted(phys_idx_map, key=lambda c: mean_abs[phys_idx_map[c]], reverse=True)[:top_k_phys]
-    top_struct = sorted(struct_idx_map, key=lambda c: mean_abs[struct_idx_map[c]], reverse=True)[:top_k_struct]
+    top_phys = sorted(phys_idx_map, key=lambda c: mean_abs[phys_idx_map[c]], reverse=True)[
+        :top_k_phys
+    ]
+    top_struct = sorted(struct_idx_map, key=lambda c: mean_abs[struct_idx_map[c]], reverse=True)[
+        :top_k_struct
+    ]
 
     rows: list[dict] = []
     for struct_feat in top_struct:
@@ -461,9 +474,7 @@ def _spearman_structural_floor(
     mean_abs_rho = float(np.nanmean(abs_rhos)) if len(abs_rhos) > 0 else float("nan")
     sig_pairs = int(np.sum((~np.isnan(pvals)) & (pvals < 0.05)))
 
-    top_phys_desc = ", ".join(
-        f"{feat} ({mean_abs[phys_idx_map[feat]]:.4f})" for feat in top_phys
-    )
+    top_phys_desc = ", ".join(f"{feat} ({mean_abs[phys_idx_map[feat]]:.4f})" for feat in top_phys)
     top_struct_desc = ", ".join(
         f"{feat} ({mean_abs[struct_idx_map[feat]]:.4f})" for feat in top_struct
     )
@@ -492,15 +503,13 @@ def _plot_spearman_heatmap(
         return
 
     meta_order = (
-        spearman_df
-        .select(["metadata_feature", "metadata_mean_abs_shap"])
+        spearman_df.select(["metadata_feature", "metadata_mean_abs_shap"])
         .unique(subset=["metadata_feature"], keep="first")
         .sort("metadata_mean_abs_shap", descending=True)["metadata_feature"]
         .to_list()
     )
     phys_order = (
-        spearman_df
-        .select(["physiology_feature", "physiology_mean_abs_shap"])
+        spearman_df.select(["physiology_feature", "physiology_mean_abs_shap"])
         .unique(subset=["physiology_feature"], keep="first")
         .sort("physiology_mean_abs_shap", descending=True)["physiology_feature"]
         .to_list()

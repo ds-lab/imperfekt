@@ -8,11 +8,11 @@ import polars as pl
 ROOT = Path(__file__).parents[2]
 sys.path.insert(0, str(ROOT))
 
+from examples.mimic_iv_ed.config import IREG_FEATURE_COLS, OUTCOME_COL, VITAL_COLS  # noqa: E402
 from imperfekt.features.irregularity import (  # noqa: E402
     add_interval_features,
     add_windowed_acceleration,
 )
-from examples.mimic_iv_ed.config import OUTCOME_COL, VITAL_COLS, IREG_FEATURE_COLS  # noqa: E402
 
 
 def _vital_agg_exprs() -> list:
@@ -101,8 +101,9 @@ def pipeline_c_features(df: pl.DataFrame) -> pl.DataFrame:
     )
     fill_cols = VITAL_COLS + IREG_FEATURE_COLS
     filled = (
-        df_ireg
-        .upsample(time_column="charttime", every="30m", group_by="stay_id", maintain_order=True)
+        df_ireg.upsample(
+            time_column="charttime", every="30m", group_by="stay_id", maintain_order=True
+        )
         .with_columns([pl.col(c).forward_fill().over("stay_id") for c in fill_cols])
         .with_columns([pl.col(c).backward_fill().over("stay_id") for c in fill_cols])
     )
@@ -118,8 +119,4 @@ def build_stay_level(ts_df: pl.DataFrame, feature_fn) -> pl.DataFrame:
         .with_columns(sex_female=pl.col("sex").eq("F").cast(pl.Int8))
         .drop("sex")
     )
-    return (
-        features
-        .join(stay_meta, on="stay_id", how="left")
-        .drop_nulls(OUTCOME_COL)
-    )
+    return features.join(stay_meta, on="stay_id", how="left").drop_nulls(OUTCOME_COL)
