@@ -212,7 +212,7 @@ def asymmetric_missing_observation_lagged_correlation(
     id_col: str = "id",
     clock_no_col: str = "clock_no",
     max_lag: int = 10,
-):
+) -> pl.DataFrame:
     """
     Compute lagged rank biserial correlation between missing indicators of one variable and
     observations of another. This is an asymmetric analysis where we compare the missing
@@ -231,9 +231,7 @@ def asymmetric_missing_observation_lagged_correlation(
         max_lag (int): Maximum lag (both positive and negative) to compute.
 
     Returns:
-        tuple: (lags, crosscorrs)
-            lags (np.ndarray): Array of lag values (negative to positive).
-            crosscorrs (np.ndarray): Cross-correlation at each lag.
+        pl.DataFrame: DataFrame with columns 'lag' and 'crosscorr' indicating the lag and corresponding rank biserial correlation.
     """
     if indicated_col not in mask_df.columns:
         raise ValueError(f"Column '{indicated_col}' not found in mask DataFrame.")

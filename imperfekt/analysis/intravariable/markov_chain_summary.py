@@ -168,7 +168,11 @@ def compute_case_markov_p11(
         pretty_printing.rich_warning(
             f"⚠️ All cases have fewer than {min_observations} observations. Cannot compute valid P(1→1) estimates. Returning empty DataFrame."
         )
-        return pl.DataFrame({id_col: [], "variable": [], "mc_p11": []})
+        id_dtype = mask_df.schema[id_col]
+        return pl.DataFrame(
+            {id_col: [], "variable": [], "mc_p11": []},
+            schema={id_col: id_dtype, "variable": pl.String, "mc_p11": pl.Float64},
+        )
 
     transitions_11 = (
         long.filter((pl.col("state") == 1) & (pl.col("next_state") == 1))  # both indicated

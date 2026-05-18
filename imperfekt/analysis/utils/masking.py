@@ -1,4 +1,5 @@
 import warnings
+from pathlib import Path
 
 import plotly.graph_objects as go
 import polars as pl
@@ -6,7 +7,7 @@ import polars as pl
 
 def create_reference_range_mask(
     df: pl.DataFrame,
-    reference_ranges: dict[str, tuple[float | None, float | None]],
+    reference_ranges: dict[str, tuple[int | float, int | float]],
     id_col: str = "id",
     clock_no_col: str = "clock_no",
     clock_col: str = "clock",
@@ -92,7 +93,7 @@ def create_plausibility_mask(
     threshold: float = 1.5,
     scope: str = "global",
     missing_as: str = "ignore",
-    reference_ranges: dict[str, tuple[float | None, float | None]] | None = None,
+    reference_ranges: dict[str, tuple[int | float, int | float]] | None = None,
 ) -> pl.DataFrame:
     """
     Create a plausibility mask, optionally combining reference range checks
@@ -419,7 +420,7 @@ def plot_missingness_mask(
     id_col: str = "id",
     clock_no_col: str = "clock_no",
     renderer: str | None = "browser",
-    save_path: str | None = None,
+    save_path: str | Path | None = None,
     save_results: bool = True,
 ) -> None:
     """
@@ -433,8 +434,8 @@ def plot_missingness_mask(
         id_col (str): The name of the column representing the unique identifier for each row. Defaults to "id".
         clock_no_col (str): The name of the column representing the clock number (integer index that orders time-series). Defaults to "clock_no".
         renderer (str): The renderer to use for displaying the plot. Defaults to "browser".
-        save_path (str, optional): Path to save the plot as an HTML file. If None, the plot will not be saved.
-        save_result (bool): Whether to save the plot as an HTML file. Defaults to True
+        save_path (str | Path, optional): Path to save the plot as an HTML file. If None, the plot will not be saved.
+        save_results (bool): Whether to save the plot as an HTML file. Defaults to True
 
     Returns:
         None: Displays the heatmap plot in the browser.
@@ -561,7 +562,7 @@ if __name__ == "__main__":
         }
     )
 
-    reference_ranges: dict[str, tuple[float | None, float | None]] = {
+    reference_ranges: dict[str, tuple[int | float, int | float]] = {
         "heartrate": (0.0, 300.0),
         "resprate": (0.0, 60.0),
     }

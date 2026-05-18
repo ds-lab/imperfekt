@@ -39,13 +39,13 @@ class IntervariableResults:
         self.rs_case_level_statistics: pl.DataFrame | None = None
         self.rs_empty_statistics: tuple | None = None
         self.rs_empty_case_level_statistics: pl.DataFrame | None = None
-        self.mcar_results: pl.DataFrame | None = None
+        self.mcar_results: dict = {}
         self.mar_mnar_results: pl.DataFrame | None = None
         self.sc_symmetric_correlation: pl.DataFrame | None = None
         self.sc_chi2_intervariable_matrix: pl.DataFrame | None = None
-        self.sc_symmetric_crosscorrelation: dict[str, pl.DataFrame | None] = {}
-        self.ac_asymmetric_statistical_results: dict[str, pl.DataFrame | None] = {}
-        self.ac_asymmetric_crosscorrelation: dict[str, pl.DataFrame | None] = {}
+        self.sc_symmetric_crosscorrelation: dict[str, pl.DataFrame] = {}
+        self.ac_asymmetric_statistical_results: dict[str, pl.DataFrame] = {}
+        self.ac_asymmetric_crosscorrelation: dict[str, pl.DataFrame] = {}
         self.iv_composite_scores: pl.DataFrame | None = None
         self.iv_pairwise_correlations: pl.DataFrame | None = None
         # Plots
@@ -208,7 +208,7 @@ class IntervariableImperfection:
                 id_col=self.id_col,
                 clock_col=self.clock_col,
                 clock_no_col=self.clock_no_col,
-                save_path=self._path(f"{new_path_level_name}/all_null_rows_stats.csv"),
+                save_path=self._path(f"{new_path_level_name}/all_null_rows_stats.csv") if self.save_path else None,
                 save_results=save_results,
             )
             if self.renderer and self.results.rs_empty_statistics is not None:
@@ -265,28 +265,29 @@ class IntervariableImperfection:
             id_col=self.id_col,
             clock_col=self.clock_col,
             clock_no_col=self.clock_no_col,
-            save_path=self._path(f"{new_path_level_name}/row_completeness_stats.csv"),
+            save_path=self._path(f"{new_path_level_name}/row_completeness_stats.csv") if self.save_path else None,
             save_results=save_results,
         )
 
-        if self.renderer:
+        if self.renderer and self.results.rs_overall_statistics is not None:
             print("Row Completeness Stats:")
             print(
                 self.results.rs_overall_statistics.describe(interpolation="linear"),
                 "\n",
             )
 
-        visualization_utils.plot_histogram(
-            self.results.rs_overall_statistics,
-            x="indicated_vars_pct",
-            title="Imperfect Variables Per Row Percentage",
-            xaxis_title="Imperfect Variables Percentage",
-            yaxis_title="#Cases",
-            renderer=self.renderer,
-            save_path=self._path(f"{new_path_level_name}/indicated_vars_pct_histogram.png"),
-            save_results=save_results,
-            library=self.plot_library,
-        )
+        if self.results.rs_overall_statistics is not None:
+            visualization_utils.plot_histogram(
+                self.results.rs_overall_statistics,
+                x="indicated_vars_pct",
+                title="Imperfect Variables Per Row Percentage",
+                xaxis_title="Imperfect Variables Percentage",
+                yaxis_title="#Cases",
+                renderer=self.renderer,
+                save_path=self._path(f"{new_path_level_name}/indicated_vars_pct_histogram.png"),
+                save_results=save_results,
+                library=self.plot_library,
+            )
 
         # 4. Imperfect-variable stats per ID
         self.results.rs_case_level_statistics = row_statistics.analyze_row_imperfection_per_id(
@@ -295,7 +296,7 @@ class IntervariableImperfection:
             id_col=self.id_col,
             clock_col=self.clock_col,
             clock_no_col=self.clock_no_col,
-            save_path=self._path(f"{new_path_level_name}/row_completeness_per_id_stats.csv"),
+            save_path=self._path(f"{new_path_level_name}/row_completeness_per_id_stats.csv") if self.save_path else None,
             save_results=save_results,
         )
 
@@ -381,13 +382,14 @@ class IntervariableImperfection:
         )
 
         if self.save_path and save_results:
-            # Save the results to a CSV file if a path is provided
-            patterns_csv = self.results.mcar_results["patterns"].write_csv(None, separator="\t")
-            with open(self._path(f"{new_path_level_name}/little_mcar_test_results.csv"), "w") as f:
-                f.write("mcar_test:\n")
-                f.write(str(self.results.mcar_results["little_mcar_test"]) + "\n")
-                f.write("Patterns:\n")
-                f.write(patterns_csv)
+            out_path = self._path(f"{new_path_level_name}/little_mcar_test_results.csv")
+            if out_path:
+                patterns_csv = self.results.mcar_results["patterns"].write_csv(None, separator="\t")
+                with open(out_path, "w") as f:
+                    f.write("mcar_test:\n")
+                    f.write(str(self.results.mcar_results["little_mcar_test"]) + "\n")
+                    f.write("Patterns:\n")
+                    f.write(patterns_csv)
 
         return self
 
@@ -532,6 +534,7 @@ class IntervariableImperfection:
                             max_lag=max_lag,
                         )
                     )
+
                     if self.renderer:
                         print(f"Cross-correlation between {col_x} and {col_y}:")
                         print(
@@ -546,8 +549,8 @@ class IntervariableImperfection:
 
                     self.results.plots.sc_lag_scatter_plot[pair_key] = (
                         visualization_utils.plot_scatter(
-                            x=self.results.sc_symmetric_crosscorrelation[pair_key]["lag"],
-                            y=self.results.sc_symmetric_crosscorrelation[pair_key]["crosscorr"],
+                            x=self.results.sc_symmetric_crosscorrelation[pair_key]["lag"].to_numpy(),
+                            y=self.results.sc_symmetric_crosscorrelation[pair_key]["crosscorr"].to_numpy(),
                             title=f"{col_x} - {col_y} Cross-Correlation",
                             xaxis_title="Lags",
                             yaxis_title="Phi coefficient",
@@ -575,6 +578,8 @@ class IntervariableImperfection:
                 ),
             )
             for k, v in self.results.sc_symmetric_crosscorrelation.items():
+                if v is None:
+                    continue
                 all_ccfs = pl.concat(
                     [
                         all_ccfs,
@@ -714,8 +719,8 @@ class IntervariableImperfection:
                     # Visualize lagged correlations
                     self.results.plots.ac_lag_scatter_plot[pair_key] = (
                         visualization_utils.plot_scatter(
-                            x=self.results.ac_asymmetric_crosscorrelation[pair_key]["lag"],
-                            y=self.results.ac_asymmetric_crosscorrelation[pair_key]["crosscorr"],
+                            x=self.results.ac_asymmetric_crosscorrelation[pair_key]["lag"].to_numpy(),
+                            y=self.results.ac_asymmetric_crosscorrelation[pair_key]["crosscorr"].to_numpy(),
                             title=f"Asymmetric Correlation: Missing {indicated_col} vs Observed {obs_col}",
                             xaxis_title="Lag",
                             yaxis_title="Rank-Biserial Correlation",
@@ -745,14 +750,16 @@ class IntervariableImperfection:
             )
             for k, v in self.results.ac_asymmetric_crosscorrelation.items():
                 # replace all nulls in v with 0
+                if v is None:
+                    continue
                 all_ccfs = pl.concat(
                     [
                         all_ccfs,
                         pl.DataFrame(
                             {
                                 "col_pair": k,
-                                "lag": v["lag"],
-                                "crosscorr": v["crosscorr"],
+                                "lag": v["lag"].to_numpy(),
+                                "crosscorr": v["crosscorr"].to_numpy(),
                             }
                         ),
                     ],
@@ -963,6 +970,8 @@ class IntervariableImperfection:
         if self.results.ac_asymmetric_crosscorrelation:
             try:
                 for pair_key, ccf_df in self.results.ac_asymmetric_crosscorrelation.items():
+                    if ccf_df is None:
+                        continue
                     lag0_rows = ccf_df.filter(pl.col("lag") == 0)
                     if not lag0_rows.is_empty():
                         val = lag0_rows["crosscorr"][0]
@@ -1074,6 +1083,11 @@ class IntervariableImperfection:
             clock_col=self.clock_col,
             clock_no_col=self.clock_no_col,
         )
+        if base is None:
+            pretty_printing.rich_warning(
+                "Could not compute intervariable metrics for composite score (no complete cases?)."
+            )
+            return self
 
         candidate_axes = [
             "avg_indicated_vars_pct",
@@ -1143,8 +1157,8 @@ class IntervariableImperfection:
                 pl.lit(None).cast(pl.Utf8).alias("intervariable_stratum"),
             )
         else:
-            x_median = float(complete_df[axis_x].median())
-            y_median = float(complete_df[axis_y].median())
+            x_median = float(complete_df.select(pl.col(axis_x).cast(pl.Float64).median()).item() or 0.0)
+            y_median = float(complete_df.select(pl.col(axis_y).cast(pl.Float64).median()).item() or 0.0)
             scores = self.assign_strata(scores, axis_x, axis_y, x_median, y_median)
             scores = scores.with_columns(
                 pl.lit(axis_x).alias("axis_x"),
@@ -1173,9 +1187,10 @@ class IntervariableImperfection:
         self.results.iv_composite_scores = scores
 
         if self.renderer:
-            total = len(scores)
+            stratified = scores.filter(pl.col("intervariable_stratum").is_not_null())
+            total = len(stratified)
             prevalence = (
-                scores.filter(pl.col("intervariable_stratum").is_not_null())
+                stratified
                 .group_by("intervariable_stratum")
                 .agg(pl.len().alias("n"))
                 .with_columns((pl.col("n") / total * 100).round(1).alias("pct"))

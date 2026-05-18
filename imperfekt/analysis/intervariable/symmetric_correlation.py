@@ -156,7 +156,7 @@ def lagged_cross_correlation(
     id_col: str = "id",
     clock_no_col: str = "clock_no",
     max_lag: int = 10,
-):
+) -> pl.DataFrame:
     """
     Compute lagged cross-correlation between imperfection indicators of two variables.
     The function computes the cross-correlation for lags from -max_lag to +max_lag, where negative lags indicate
@@ -179,8 +179,7 @@ def lagged_cross_correlation(
         save_results (bool): Whether to save the results (default: True).
 
     Returns:
-        lags (np.ndarray): Array of lag values (negative to positive).
-        crosscorrs (np.ndarray): Cross-correlation at each lag.
+        pl.DataFrame: A DataFrame with columns "lag" and "crosscorr" containing the lag values and corresponding cross-correlation coefficients.
     """
     if max_lag < 1:
         raise ValueError("max_lag must be at least 1.")

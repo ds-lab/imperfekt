@@ -908,16 +908,17 @@ class IntravariableImperfection:
             all_scores.append(scores)
 
             if self.renderer:
-                total = len(scores)
+                stratified = scores.filter(pl.col("imperfection_stratum").is_not_null())
+                total = len(stratified)
                 prevalence = (
-                    scores.filter(pl.col("imperfection_stratum").is_not_null())
+                    stratified
                     .group_by("imperfection_stratum")
                     .agg(pl.len().alias("n"))
                     .with_columns((pl.col("n") / total * 100).round(1).alias("pct"))
                     .sort("imperfection_stratum")
                 )
                 pretty_printing.rich_info(
-                    f"[{var}] selected axes: {axis_x} × {axis_y} (corr={selected_corr:.3f})"
+                    f"{var}: selected axes: {axis_x} × {axis_y} (corr={selected_corr:.3f})"
                 )
                 print(prevalence)
 

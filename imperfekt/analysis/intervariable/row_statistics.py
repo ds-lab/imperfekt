@@ -9,7 +9,7 @@ def analyze_all_null_rows(
     id_col: str = "id",
     clock_col: str = "clock",
     clock_no_col: str = "clock_no",
-    save_path: str | None = None,
+    save_path: str | Path | None = None,
     save_results: bool = True,
 ) -> tuple[int, float]:
     """
@@ -115,7 +115,7 @@ def analyze_row_imperfection(
     id_col: str = "id",
     clock_col: str = "clock",
     clock_no_col: str = "clock_no",
-    save_path: str | None = None,
+    save_path: str | Path | None = None,
     save_results: bool = True,
 ) -> pl.DataFrame | None:
     """
@@ -168,7 +168,7 @@ def analyze_row_imperfection_per_id(
     id_col: str = "id",
     clock_col: str = "clock",
     clock_no_col: str = "clock_no",
-    save_path: str | None = None,
+    save_path: str | Path | None = None,
     save_results: bool = True,
 ) -> pl.DataFrame:
     """

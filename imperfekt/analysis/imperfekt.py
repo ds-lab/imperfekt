@@ -26,6 +26,12 @@ class Imperfekt:
         save_path: Path | None = None,
         plot_library: str = "matplotlib",
         renderer: str | None = "notebook_connected",
+        imperfection: str = "missingness",
+        plausibility_method: str | None = "iqr",
+        plausibility_threshold: float = 1.5,
+        plausibility_scope: str = "global",
+        plausibility_missing_as: str = "ignore",
+        plausibility_reference_ranges: dict[str, tuple[int | float, int | float]] | None = None,
     ):
         """
         Initializes the Preliminary analysis class.
@@ -40,6 +46,12 @@ class Imperfekt:
             save_path (Path): Path to save results. If None, results will not be saved.
             plot_library (str): The plotting library to use ('matplotlib' or 'plotly').
             renderer (str): The renderer for Plotly visualizations.
+            imperfection (str): The type of imperfection to analyze. ``"missingness"`` (default) or ``"plausibility"``.
+            plausibility_method (str | None): Outlier method for plausibility mask: ``"iqr"`` (default), ``"mad"``, or ``None``.
+            plausibility_threshold (float): IQR multiplier or MAD Z-score cutoff. Defaults to 1.5.
+            plausibility_scope (str): ``"global"`` or ``"per_id"`` bounds for the statistical method.
+            plausibility_missing_as (str): How to treat originally-missing values in the plausibility mask.
+            plausibility_reference_ranges (dict | None): Hard domain bounds per column, e.g. ``{"heart_rate": (0, 300)}``.
         """
         if not renderer and not save_path:
             pretty_printing.rich_warning(
@@ -56,6 +68,14 @@ class Imperfekt:
         self._initial_check()
         self._generate_clock_no_col()
 
+        # Imperfection type and plausibility parameters
+        self.imperfection = imperfection
+        self.plausibility_method = plausibility_method
+        self.plausibility_threshold = plausibility_threshold
+        self.plausibility_scope = plausibility_scope
+        self.plausibility_missing_as = plausibility_missing_as
+        self.plausibility_reference_ranges = plausibility_reference_ranges
+
         self.missingness_mask = masking.create_missingness_mask(
             df=self.df,
             id_col=id_col,
@@ -63,6 +83,27 @@ class Imperfekt:
             clock_no_col=clock_no_col,
             cols=self.cols,
         )
+
+        if imperfection == "missingness":
+            self.mask = self.missingness_mask
+        elif imperfection == "plausibility":
+            self.mask = masking.create_plausibility_mask(
+                df=self.df,
+                id_col=self.id_col,
+                clock_col=self.clock_col,
+                clock_no_col=self.clock_no_col,
+                cols=self.cols,
+                method=plausibility_method,
+                threshold=plausibility_threshold,
+                scope=plausibility_scope,
+                missing_as=plausibility_missing_as,
+                reference_ranges=plausibility_reference_ranges,
+            )
+        else:
+            raise ValueError(
+                f"Unsupported imperfection type: {imperfection!r}. "
+                "Supported types: 'missingness', 'plausibility'."
+            )
 
         self.alpha = alpha
 
@@ -96,7 +137,7 @@ class Imperfekt:
 
         self.intravariable = IntravariableImperfection(
             df=self.df,
-            mask_df=self.missingness_mask,
+            mask_df=self.mask,
             id_col=self.id_col,
             clock_col=self.clock_col,
             clock_no_col=self.clock_no_col,
@@ -109,7 +150,7 @@ class Imperfekt:
 
         self.intervariable = IntervariableImperfection(
             df=self.df,
-            mask_df=self.missingness_mask,
+            mask_df=self.mask,
             id_col=self.id_col,
             clock_col=self.clock_col,
             clock_no_col=self.clock_no_col,
@@ -277,6 +318,12 @@ class Imperfekt:
                 save_path=group_save_path,
                 plot_library=self.plot_library,
                 renderer=self.renderer,
+                imperfection=self.imperfection,
+                plausibility_method=self.plausibility_method,
+                plausibility_threshold=self.plausibility_threshold,
+                plausibility_scope=self.plausibility_scope,
+                plausibility_missing_as=self.plausibility_missing_as,
+                plausibility_reference_ranges=self.plausibility_reference_ranges,
             )
 
             if not cheap_mode:
@@ -392,6 +439,12 @@ class Imperfekt:
                 save_path=event_save_path / label if event_save_path is not None else None,
                 plot_library=self.plot_library,
                 renderer=self.renderer,
+                imperfection=self.imperfection,
+                plausibility_method=self.plausibility_method,
+                plausibility_threshold=self.plausibility_threshold,
+                plausibility_scope=self.plausibility_scope,
+                plausibility_missing_as=self.plausibility_missing_as,
+                plausibility_reference_ranges=self.plausibility_reference_ranges,
             )
 
             # Perform a speced-down run that only runs analysis that don't depend on ordered continuous data (for example gap statistics breaks by the split)
