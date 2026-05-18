@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import numpy as np
 import plotly.graph_objects as go
 import polars as pl
@@ -11,7 +13,7 @@ def markov_chain_summary(
     id_col: str = "id",
     clock_no_col: str = "clock_no",
     labels: list = ["Observed", "Imperfect"],
-    save_path: str = None,
+    save_path: str | Path | None = None,
     save_results: bool = True,
 ) -> dict:
     """
@@ -139,8 +141,7 @@ def compute_case_markov_p11(
             id_col, variable, mc_p11 (float in [0, 1] or null).
     """
     long = (
-        mask_df
-        .sort([id_col, clock_no_col])
+        mask_df.sort([id_col, clock_no_col])
         .unpivot(
             index=[id_col, clock_no_col],
             on=cols,
@@ -148,57 +149,60 @@ def compute_case_markov_p11(
             value_name="state",
         )
         .with_columns(
-            pl.col("state").shift(-1).over([id_col, "variable"]).alias("next_state") # get next state for case x variable
+            pl.col("state")
+            .shift(-1)
+            .over([id_col, "variable"])
+            .alias("next_state")  # get next state for case x variable
         )
         .filter(pl.col("next_state").is_not_null())
     )
 
     obs_counts = (
-        mask_df
-        .group_by(id_col)
-        .agg(pl.len().alias("_n_obs")) # necessary to later check if we have enough observations to compute a valid P(1→1)
+        mask_df.group_by(id_col).agg(
+            pl.len().alias("_n_obs")
+        )  # necessary to later check if we have enough observations to compute a valid P(1→1)
     )
-    
+
     # obs_count should be greater min_observations for all cases, otherwise abort here
     if obs_counts.select(pl.col("_n_obs").min()).item() < min_observations:
         pretty_printing.rich_warning(
-             f"⚠️ All cases have fewer than {min_observations} observations. Cannot compute valid P(1→1) estimates. Returning empty DataFrame."
+            f"⚠️ All cases have fewer than {min_observations} observations. Cannot compute valid P(1→1) estimates. Returning empty DataFrame."
         )
         return pl.DataFrame({id_col: [], "variable": [], "mc_p11": []})
-        
+
     transitions_11 = (
-        long
-        .filter((pl.col("state") == 1) & (pl.col("next_state") == 1)) # both indicated
+        long.filter((pl.col("state") == 1) & (pl.col("next_state") == 1))  # both indicated
         .group_by([id_col, "variable"])
-        .agg(pl.len().alias("_n11")) # rows where we have an indicated value at time t followed by an indicated value at t+1
+        .agg(
+            pl.len().alias("_n11")
+        )  # rows where we have an indicated value at time t followed by an indicated value at t+1
     )
 
     transitions_1x = (
-        long
-        .filter(pl.col("state") == 1)
+        long.filter(pl.col("state") == 1)
         .group_by([id_col, "variable"])
-        .agg(pl.len().alias("_n1x")) # rows where we have an indicated value at time t, regardless of next state
+        .agg(
+            pl.len().alias("_n1x")
+        )  # rows where we have an indicated value at time t, regardless of next state
     )
 
     all_pairs = (
-        mask_df.select(id_col).unique()
+        mask_df.select(id_col)
+        .unique()
         .join(pl.DataFrame({"variable": cols}), how="cross")
-        .sort([id_col, "variable"]) # ensure all (id, variable) pairs are present, even those with no transitions
+        .sort(
+            [id_col, "variable"]
+        )  # ensure all (id, variable) pairs are present, even those with no transitions
     )
 
     result = (
-        all_pairs
-        .join(obs_counts, on=id_col, how="left")
+        all_pairs.join(obs_counts, on=id_col, how="left")
         .join(transitions_1x, on=[id_col, "variable"], how="left")
         .join(transitions_11, on=[id_col, "variable"], how="left")
         .with_columns(
-            pl.when(
-                pl.col("_n_obs").ge(min_observations) & pl.col("_n1x").gt(0)
-            )
-            .then(
-                pl.col("_n11").fill_null(0).cast(pl.Float64) / pl.col("_n1x").cast(pl.Float64)
-            )
-            .otherwise(None) # 
+            pl.when(pl.col("_n_obs").ge(min_observations) & pl.col("_n1x").gt(0))
+            .then(pl.col("_n11").fill_null(0).cast(pl.Float64) / pl.col("_n1x").cast(pl.Float64))
+            .otherwise(None)  #
             .alias("mc_p11")
         )
         .select([id_col, "variable", "mc_p11"])
@@ -213,7 +217,7 @@ def plot_markov_heatmap(
     labels,
     title="Markov Chain Transition Matrix",
     renderer="browser",
-    save_path: str = None,
+    save_path: str | Path | None = None,
     save_results: bool = True,
 ) -> go.Figure:
     """
@@ -248,8 +252,9 @@ def plot_markov_heatmap(
         fig.show(renderer=renderer)
 
     if save_results and save_path:
+        save_path = Path(save_path) if not isinstance(save_path, Path) else save_path
         if not save_path.suffix == ".png":
-            save_path += ".png"
+            save_path = save_path.with_suffix(".png")
 
         fig.write_image(save_path)
         print(f"Markov heatmap saved to {save_path}")

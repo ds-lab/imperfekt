@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import polars as pl
 
 from imperfekt.analysis.irregularity import burstiness as burstiness_module
@@ -12,7 +14,7 @@ from imperfekt.analysis.utils.kruskal_wallis import perform_statistical_analysis
 
 def analyze_gap_lengths(
     mask_df: pl.DataFrame,
-    cols: list = None,
+    cols: list | None = None,
     id_col: str = "id",
     clock_col: str = "clock",
     clock_no_col: str = "clock_no",
@@ -88,10 +90,10 @@ def analyze_gap_lengths(
 def gap_lengths(
     lengths_df: pl.DataFrame,
     col: str,
-    save_path: str = None,
+    save_path: str | Path | None = None,
     save_results: bool = True,
     plot_library: str = "matplotlib",
-    renderer: str = "browser",
+    renderer: str | None = "browser",
 ) -> tuple:
     """
     Visualize the gap and observation lengths in a DataFrame for a specific variable.
@@ -107,17 +109,20 @@ def gap_lengths(
     Returns:
         Visualizations of gap and observation lengths for the specified variable.
     """
-    gaps = lengths_df.filter(
-        (pl.col("variable") == col) & (pl.col("count_clock_no") > 0)
-    )
+    gaps = lengths_df.filter((pl.col("variable") == col) & (pl.col("count_clock_no") > 0))
 
     if gaps.is_empty():
         if renderer:
-            pretty_printing.rich_info(f"Gap Lengths for {col}: no true gaps found (all observations are adjacent).")
+            pretty_printing.rich_info(
+                f"Gap Lengths for {col}: no true gaps found (all observations are adjacent)."
+            )
         return gaps, None
 
     if renderer:
         pretty_printing.rich_info(f"Gap Lengths for {col}: {gaps.describe(interpolation='linear')}")
+
+    if type(save_path) is str:
+        save_path: Path = Path(save_path)
 
     gap_fig = visualization_utils.plot_violin(
         gaps,
@@ -126,13 +131,13 @@ def gap_lengths(
         yaxis_title="Gap Length (seconds)",
         library=plot_library,
         renderer=renderer,
-        save_path=save_path / f"{col}_gap_length_boxplot.png" if save_results else None,
+        save_path=save_path / f"{col}_gap_length_boxplot.png" if type(save_path) is Path else None,
         save_results=save_results,
     )
 
     if save_path and save_results:
         gaps.describe(interpolation="linear").write_csv(
-            save_path / f"{col}_gap_lengths_summary.csv"
+            save_path / f"{col}_gap_lengths_summary.csv" if type(save_path) is Path else None
         )
 
     return gaps, gap_fig
@@ -146,7 +151,7 @@ def gap_lengths(
 def extract_gap_return_values(
     df: pl.DataFrame,
     mask_df: pl.DataFrame,
-    cols: list = None,
+    cols: list | None = None,
     id_col: str = "id",
     clock_col: str = "clock",
     clock_no_col: str = "clock_no",
@@ -194,11 +199,11 @@ def extract_gap_return_values(
 
 def gap_returns(
     spans: pl.DataFrame,
-    col: str = None,
-    bins: list = None,
+    col: str | None = None,
+    bins: list | None = None,
     plot_library: str = "matplotlib",
-    renderer: str = "browser",
-    save_path: str = None,
+    renderer: str | None = "browser",
+    save_path: str | Path | None = None,
     save_results: bool = True,
 ) -> tuple:
     """
@@ -251,7 +256,7 @@ def gap_returns(
             renderer=renderer,
             category_order=labels,
             save_path=save_path / f"{col}_gap_return_boxplot.png"
-            if save_path and save_results
+            if type(save_path) is Path
             else None,
             save_results=save_results,
         )
@@ -285,10 +290,11 @@ def gap_returns(
     )
 
     if save_path and save_results:
+        save_path = save_path if type(save_path) is Path else Path(save_path)
         summary_df.write_csv(save_path / f"{col}_gap_return_summary.csv")
         print(f"Gap return summary saved to {save_path / f'{col}_gap_return_summary.csv'}")
 
-    return kw_result, gap_return_boxplot, pval_heatmap_fig, es_heatmap_fig
+    return kw_result, gap_return_boxplot, pval_heatmap_fig, es_heatmap_fig, bins
 
 
 ############################################################
@@ -325,7 +331,20 @@ def compute_gap_dominant_length(
         {"time_length": "interval_seconds"}
     )
     if valid.is_empty():
-        return None
+        return pl.DataFrame(
+            {
+                "dominant_gap_seconds": [None],
+                "dominant_gap_bin": [None],
+                "gap_adherence_rate": [None],
+                "n_total_gaps": [0],
+                "n_adhering_gaps": [0],
+                "gap_entropy_bits": [None],
+                "gap_normalized_entropy": [None],
+                "gap_n_unique_bins": [0],
+                "bin_resolution_seconds": [bin_resolution_seconds],
+                "adherence_tolerance": [adherence_tolerance],
+            }
+        )
 
     summary, _ = interval_statistics_module.compute_dominant_frequency(
         delta_t_df=valid,
@@ -333,16 +352,18 @@ def compute_gap_dominant_length(
         adherence_tolerance=adherence_tolerance,
     )
 
-    return summary.rename({
-        "dominant_interval_seconds": "dominant_gap_seconds",
-        "dominant_interval_bin": "dominant_gap_bin",
-        "adherence_rate": "gap_adherence_rate",
-        "n_total_intervals": "n_total_gaps",
-        "n_adhering_intervals": "n_adhering_gaps",
-        "interval_entropy_bits": "gap_entropy_bits",
-        "normalized_entropy": "gap_normalized_entropy",
-        "n_unique_bins": "gap_n_unique_bins",
-    })
+    return summary.rename(
+        {
+            "dominant_interval_seconds": "dominant_gap_seconds",
+            "dominant_interval_bin": "dominant_gap_bin",
+            "adherence_rate": "gap_adherence_rate",
+            "n_total_intervals": "n_total_gaps",
+            "n_adhering_intervals": "n_adhering_gaps",
+            "interval_entropy_bits": "gap_entropy_bits",
+            "normalized_entropy": "gap_normalized_entropy",
+            "n_unique_bins": "gap_n_unique_bins",
+        }
+    )
 
 
 def compute_gap_burstiness(
@@ -372,16 +393,25 @@ def compute_gap_burstiness(
         {"time_length": "interval_seconds"}
     )
     if valid.is_empty():
-        return None
+        return pl.DataFrame(
+            {
+                "n_gaps": [0],
+                "mean_gap_seconds": [None],
+                "std_gap_seconds": [None],
+                "gap_burstiness_coeff": [None],
+            }
+        )
 
     result = burstiness_module.compute_global_burstiness(valid, id_col=id_col)
 
-    return result.rename({
-        "n_intervals": "n_gaps",
-        "mean_interval": "mean_gap_seconds",
-        "std_interval": "std_gap_seconds",
-        "burstiness_coeff": "gap_burstiness_coeff",
-    })
+    return result.rename(
+        {
+            "n_intervals": "n_gaps",
+            "mean_interval": "mean_gap_seconds",
+            "std_interval": "std_gap_seconds",
+            "burstiness_coeff": "gap_burstiness_coeff",
+        }
+    )
 
 
 ############################################################
@@ -435,72 +465,46 @@ def compute_case_gap_metrics(
                       Missing metrics receive null.
     """
     # Only true gaps (count_clock_no > 0) and non-null time_length
-    true_gaps = gaps_df.filter(
-        (pl.col("count_clock_no") > 0) & pl.col("time_length").is_not_null()
-    )
+    true_gaps = gaps_df.filter((pl.col("count_clock_no") > 0) & pl.col("time_length").is_not_null())
 
-    all_pairs = (
-        true_gaps.select([id_col, "variable"]).unique()
-        .sort([id_col, "variable"])
-    )
+    all_pairs = true_gaps.select([id_col, "variable"]).unique().sort([id_col, "variable"])
 
     # --- Base stats: n_gaps, mean, std, q25, q75, max ---
-    base = (
-        true_gaps
-        .group_by([id_col, "variable"])
-        .agg(
-            pl.len().alias("n_gaps"),
-            pl.col("time_length").mean().alias("_mean"),
-            pl.col("time_length").std().alias("_std"),
-            pl.col("time_length").quantile(0.25, interpolation="linear").alias("_q25"),
-            pl.col("time_length").quantile(0.75, interpolation="linear").alias("_q75"),
-            pl.col("time_length").max().alias("_max"),
-        )
+    base = true_gaps.group_by([id_col, "variable"]).agg(
+        pl.len().alias("n_gaps"),
+        pl.col("time_length").mean().alias("_mean"),
+        pl.col("time_length").std().alias("_std"),
+        pl.col("time_length").quantile(0.25, interpolation="linear").alias("_q25"),
+        pl.col("time_length").quantile(0.75, interpolation="linear").alias("_q75"),
+        pl.col("time_length").max().alias("_max"),
     )
 
     base = base.with_columns(
-        pl.when(
-            (pl.col("n_gaps") >= min_gaps) & (pl.col("_mean") > 0)
-        )
+        pl.when((pl.col("n_gaps") >= min_gaps) & (pl.col("_mean") > 0))
         .then(pl.col("_std") / pl.col("_mean"))
         .otherwise(None)
         .alias("gap_cv"),
-
-        pl.when(
-            (pl.col("n_gaps") >= min_gaps_qcod)
-            & ((pl.col("_q75") + pl.col("_q25")) > 0)
-        )
+        pl.when((pl.col("n_gaps") >= min_gaps_qcod) & ((pl.col("_q75") + pl.col("_q25")) > 0))
         .then((pl.col("_q75") - pl.col("_q25")) / (pl.col("_q75") + pl.col("_q25")))
         .otherwise(None)
         .alias("gap_qcod"),
-
-        pl.when(
-            (pl.col("n_gaps") >= 3)
-            & ((pl.col("_std") + pl.col("_mean")) > 0)
-        )
+        pl.when((pl.col("n_gaps") >= 3) & ((pl.col("_std") + pl.col("_mean")) > 0))
         .then((pl.col("_std") - pl.col("_mean")) / (pl.col("_std") + pl.col("_mean")))
         .otherwise(None)
         .alias("gap_burstiness_coeff"),
     )
 
     # --- max_gap_fraction: max_gap / total observation window per case ---
-    window_df = (
-        mask_df
-        .group_by(id_col)
-        .agg(
-            (
-                pl.col(clock_col).max() - pl.col(clock_col).min()
-            ).dt.total_seconds().alias("_window_seconds")
-        )
+    window_df = mask_df.group_by(id_col).agg(
+        (pl.col(clock_col).max() - pl.col(clock_col).min())
+        .dt.total_seconds()
+        .alias("_window_seconds")
     )
 
     base = (
-        base
-        .join(window_df, on=id_col, how="left")
+        base.join(window_df, on=id_col, how="left")
         .with_columns(
-            pl.when(
-                pl.col("n_gaps").ge(1) & pl.col("_window_seconds").gt(0)
-            )
+            pl.when(pl.col("n_gaps").ge(1) & pl.col("_window_seconds").gt(0))
             .then(pl.col("_max") / pl.col("_window_seconds"))
             .otherwise(None)
             .alias("max_gap_fraction")
@@ -510,19 +514,13 @@ def compute_case_gap_metrics(
 
     # --- Entropy and adherence per (case, variable) ---
     binned = true_gaps.with_columns(
-        (pl.col("time_length") / bin_resolution_seconds)
-        .round(0)
-        .cast(pl.Int64)
-        .alias("_gap_bin")
+        (pl.col("time_length") / bin_resolution_seconds).round(0).cast(pl.Int64).alias("_gap_bin")
     )
 
-    case_var_totals = (
-        binned.group_by([id_col, "variable"]).agg(pl.len().alias("_n_total"))
-    )
+    case_var_totals = binned.group_by([id_col, "variable"]).agg(pl.len().alias("_n_total"))
 
     case_bin_counts = (
-        binned
-        .group_by([id_col, "variable", "_gap_bin"])
+        binned.group_by([id_col, "variable", "_gap_bin"])
         .agg(pl.len().alias("_bin_count"))
         .join(case_var_totals, on=[id_col, "variable"], how="left")
         .with_columns(
@@ -534,22 +532,18 @@ def compute_case_gap_metrics(
     )
 
     case_entropy = (
-        case_bin_counts
-        .group_by([id_col, "variable"])
+        case_bin_counts.group_by([id_col, "variable"])
         .agg(
             pl.col("_entropy_contrib").sum().alias("_entropy_bits"),
             pl.col("_gap_bin").count().cast(pl.Int64).alias("_n_unique_bins"),
             pl.col("_gap_bin")
-              .sort_by(["_bin_count", "_gap_bin"], descending=True)
-              .first()
-              .alias("_dominant_bin"),
+            .sort_by(["_bin_count", "_gap_bin"], descending=True)
+            .first()
+            .alias("_dominant_bin"),
         )
         .with_columns(
             pl.when(pl.col("_n_unique_bins") > 1)
-            .then(
-                pl.col("_entropy_bits")
-                / pl.col("_n_unique_bins").cast(pl.Float64).log(base=2.0)
-            )
+            .then(pl.col("_entropy_bits") / pl.col("_n_unique_bins").cast(pl.Float64).log(base=2.0))
             .otherwise(0.0)
             .alias("gap_normalized_entropy"),
             (pl.col("_dominant_bin") * bin_resolution_seconds).alias("_dominant_gap_seconds"),
@@ -563,8 +557,7 @@ def compute_case_gap_metrics(
     )
 
     adherence = (
-        binned_with_dom
-        .with_columns(
+        binned_with_dom.with_columns(
             pl.col("time_length")
             .is_between(
                 pl.col("_dominant_gap_seconds") * (1.0 - adherence_tolerance),
@@ -579,20 +572,18 @@ def compute_case_gap_metrics(
             pl.len().alias("_n_total_adh"),
         )
         .with_columns(
-            (pl.col("_n_adhering").cast(pl.Float64) / pl.col("_n_total_adh"))
-            .alias("gap_adherence_rate")
+            (pl.col("_n_adhering").cast(pl.Float64) / pl.col("_n_total_adh")).alias(
+                "gap_adherence_rate"
+            )
         )
         .select([id_col, "variable", "gap_adherence_rate"])
     )
 
-    entropy_result = case_entropy.select(
-        [id_col, "variable", "gap_normalized_entropy"]
-    )
+    entropy_result = case_entropy.select([id_col, "variable", "gap_normalized_entropy"])
 
     # --- gap_onset_cv: CV of inter-onset intervals (gap start times) ---
     onset_cv = (
-        true_gaps
-        .sort([id_col, "variable", "run_start_clock"])
+        true_gaps.sort([id_col, "variable", "run_start_clock"])
         .with_columns(
             pl.col("run_start_clock")
             .diff()
@@ -608,10 +599,7 @@ def compute_case_gap_metrics(
             pl.col("_onset_interval").std().alias("_onset_std"),
         )
         .with_columns(
-            pl.when(
-                (pl.col("_n_onsets") >= (min_gaps_onset - 1))
-                & (pl.col("_onset_mean") > 0)
-            )
+            pl.when((pl.col("_n_onsets") >= (min_gaps_onset - 1)) & (pl.col("_onset_mean") > 0))
             .then(pl.col("_onset_std") / pl.col("_onset_mean"))
             .otherwise(None)
             .alias("gap_onset_cv")
@@ -621,21 +609,24 @@ def compute_case_gap_metrics(
 
     # --- Assemble ---
     result = (
-        all_pairs
-        .join(base, on=[id_col, "variable"], how="left")
+        all_pairs.join(base, on=[id_col, "variable"], how="left")
         .join(entropy_result, on=[id_col, "variable"], how="left")
         .join(adherence, on=[id_col, "variable"], how="left")
         .join(onset_cv, on=[id_col, "variable"], how="left")
-        .select([
-            id_col, "variable",
-            "n_gaps",
-            "gap_cv", "gap_qcod",
-            "gap_burstiness_coeff",
-            "gap_normalized_entropy",
-            "gap_adherence_rate",
-            "max_gap_fraction",
-            "gap_onset_cv",
-        ])
+        .select(
+            [
+                id_col,
+                "variable",
+                "n_gaps",
+                "gap_cv",
+                "gap_qcod",
+                "gap_burstiness_coeff",
+                "gap_normalized_entropy",
+                "gap_adherence_rate",
+                "max_gap_fraction",
+                "gap_onset_cv",
+            ]
+        )
         .sort([id_col, "variable"])
     )
 
@@ -683,6 +674,6 @@ if __name__ == "__main__":
     print(result)
     kw_result, gap_return_boxplot, pval_heatmap_fig, es_heatmap_fig = gap_returns(result, col="dbp")
     print(kw_result)
-    
+
     burstiness = compute_gap_burstiness(result.filter(pl.col("variable") == "dbp"))
     print(burstiness)

@@ -22,22 +22,22 @@ class IrregularityPlots:
 class IrregularityResults:
     def __init__(self):
         # Interval statistics
-        self.ins_case_statistics: pl.DataFrame = None
-        self.ins_global_statistics: pl.DataFrame = None
+        self.ins_case_statistics: pl.DataFrame | None = None
+        self.ins_global_statistics: pl.DataFrame | None = None
         # Dominant frequency
-        self.domf_frequency_summary: pl.DataFrame = None
-        self.domf_bin_counts: pl.DataFrame = None
+        self.domf_frequency_summary: pl.DataFrame | None = None
+        self.domf_bin_counts: pl.DataFrame | None = None
         # Burstiness
-        self.bu_case_burstiness: pl.DataFrame = None
-        self.bu_global_burstiness: pl.DataFrame = None
+        self.bu_case_burstiness: pl.DataFrame | None = None
+        self.bu_global_burstiness: pl.DataFrame | None = None
         # Interval autocorrelation
-        self.ia_autocorrelation: pl.DataFrame = None
+        self.ia_autocorrelation: pl.DataFrame | None = None
         # Case entropy and adherence
-        self.ea_case_entropy_adherence: pl.DataFrame = None
+        self.ea_case_entropy_adherence: pl.DataFrame | None = None
         # Composite score (median-bisection on selected least-correlated axis pair)
-        self.cs_case_scores: pl.DataFrame = None
+        self.cs_case_scores: pl.DataFrame | None = None
         # Pairwise metric correlation table used for axis selection
-        self.cs_pairwise_correlations: pl.DataFrame = None
+        self.cs_pairwise_correlations: pl.DataFrame | None = None
         # Plots
         self.plots = IrregularityPlots()
 
@@ -51,9 +51,9 @@ class Irregularity:
         df: pl.DataFrame,
         id_col: str = "id",
         clock_col: str = "clock",
-        save_path: Path = None,
+        save_path: Path | None = None,
         plot_library: str = "matplotlib",
-        renderer: str = "notebook_connected",
+        renderer: str | None = "notebook_connected",
     ):
         """
         Initializes the Irregularity analysis class.
@@ -63,7 +63,7 @@ class Irregularity:
             id_col (str): The column representing unique identifiers.
             clock_col (str): The column representing time or clock. May be a Datetime
                              column or a numeric column (integer/float representing seconds).
-            save_path (Path): Path to save results. If None, results will not be saved.
+            save_path (Path | None): Path to save results. If None, results will not be saved.
             plot_library (str): The plotting library to use ('matplotlib' or 'plotly').
             renderer (str): The renderer for Plotly visualizations.
         """
@@ -73,7 +73,9 @@ class Irregularity:
                 "Visualizations will not be displayed or saved."
             )
         # Dataframe that will be analyzed
-        self.df: pl.DataFrame = df if isinstance(df, pl.DataFrame) else pl.DataFrame(df) # if pandas DataFrame is passed, convert to Polars
+        self.df: pl.DataFrame = (
+            df if isinstance(df, pl.DataFrame) else pl.DataFrame(df)
+        )  # if pandas DataFrame is passed, convert to Polars
         # Relevant columns for the analysis
         self.id_col = id_col
         self.clock_col = clock_col
@@ -94,7 +96,7 @@ class Irregularity:
         self.results = IrregularityResults()
 
         # Cached inter-observation interval DataFrame (computed lazily)
-        self._delta_t_df: pl.DataFrame = None
+        self._delta_t_df: pl.DataFrame | None = None
 
     @staticmethod
     def assign_strata(
@@ -114,7 +116,7 @@ class Irregularity:
         Axis irregularity direction:
             adherence_rate — lower = more irregular (inverted)
             all other axes — higher = more irregular
-            
+
         Parameters:
             df (pl.DataFrame): Input DataFrame containing the axes.
             axis_x (str): Column name for the x-axis metric.
@@ -133,15 +135,18 @@ class Irregularity:
             else pl.col(axis_y) > y_median
         )
         return df.with_columns(
-            pl.when(~x_high & ~y_high).then(pl.lit("Q_alpha"))
-            .when(x_high & ~y_high).then(pl.lit("Q_beta"))
-            .when(~x_high & y_high).then(pl.lit("Q_gamma"))
-            .when(x_high & y_high).then(pl.lit("Q_delta"))
+            pl.when(~x_high & ~y_high)
+            .then(pl.lit("Q_alpha"))
+            .when(x_high & ~y_high)
+            .then(pl.lit("Q_beta"))
+            .when(~x_high & y_high)
+            .then(pl.lit("Q_gamma"))
+            .when(x_high & y_high)
+            .then(pl.lit("Q_delta"))
             .otherwise(pl.lit(None))
             .alias("irregularity_stratum")
         )
 
-   
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
@@ -190,14 +195,13 @@ class Irregularity:
                 )
 
             self._delta_t_df = (
-                sorted_df
-                .with_columns(intervals)
+                sorted_df.with_columns(intervals)
                 .filter(pl.col("interval_seconds").is_not_null())
                 .filter(pl.col("interval_seconds") > 0)
             )
         return self._delta_t_df
 
-    def _path(self, subpath: str) -> Path:
+    def _path(self, subpath: str) -> Path | None:
         """Generates a full path for saving results."""
         if self.save_path:
             return self.save_path / subpath
@@ -249,7 +253,11 @@ class Irregularity:
                 "cv = std/mean per case (0 = perfectly regular, higher = more irregular); "
                 "iqr = spread of interval lengths."
             )
-            print(self.results.ins_case_statistics.describe(interpolation="linear", percentiles=[0.05, 0.25, 0.5, 0.75, 0.95]))
+            print(
+                self.results.ins_case_statistics.describe(
+                    interpolation="linear", percentiles=[0.05, 0.25, 0.5, 0.75, 0.95]
+                )
+            )
             pretty_printing.rich_info(
                 "Interval Statistics — Global: pooled summary over all inter-observation intervals."
             )
@@ -339,7 +347,9 @@ class Irregularity:
             dominant_bin=dominant_bin,
             library=self.plot_library,
             renderer=self.renderer,
-            save_path=self._path(f"{new_path_level_name}/interval_frequency_bar.png"),
+            save_path=self._path(f"{new_path_level_name}/interval_frequency_bar.png")
+            if path
+            else None,
             save_results=save_results,
         )
         self.results.plots.domf_interval_frequency_bar = freq_bar
@@ -382,18 +392,24 @@ class Irregularity:
         )
 
         if self.renderer:
-            pretty_printing.rich_info("Burstiness — Case Level (B=1: bursty, B=-1: perfectly periodic):")
-            print(self.results.bu_case_burstiness.describe(interpolation="linear", percentiles=[0.05, 0.25, 0.5, 0.75, 0.95]))
-            pretty_printing.rich_info("Burstiness — Global (B=1: bursty, B=-1: perfectly periodic):")
+            pretty_printing.rich_info(
+                "Burstiness — Case Level (B=1: bursty, B=-1: perfectly periodic):"
+            )
+            print(
+                self.results.bu_case_burstiness.describe(
+                    interpolation="linear", percentiles=[0.05, 0.25, 0.5, 0.75, 0.95]
+                )
+            )
+            pretty_printing.rich_info(
+                "Burstiness — Global (B=1: bursty, B=-1: perfectly periodic):"
+            )
             print(self.results.bu_global_burstiness)
 
         if save_results and path:
             self.results.bu_case_burstiness.write_csv(path / "case_burstiness.csv")
             self.results.bu_global_burstiness.write_csv(path / "global_burstiness.csv")
 
-        b_df = self.results.bu_case_burstiness.filter(
-            pl.col("burstiness_coeff").is_not_null()
-        )
+        b_df = self.results.bu_case_burstiness.filter(pl.col("burstiness_coeff").is_not_null())
         if b_df.height > 0:
             b_violin = visualization_utils.plot_violin(
                 b_df,
@@ -402,16 +418,16 @@ class Irregularity:
                 yaxis_title="Burstiness Coefficient B",
                 library=self.plot_library,
                 renderer=self.renderer,
-                save_path=self._path(f"{new_path_level_name}/burstiness_violin.png"),
+                save_path=self._path(f"{new_path_level_name}/burstiness_violin.png")
+                if path
+                else None,
                 save_results=save_results,
             )
             self.results.plots.bu_burstiness_violin = b_violin
 
         return self
 
-    def interval_autocorrelation(
-        self, lags: int = 20, save_results: bool = True
-    ) -> "Irregularity":
+    def interval_autocorrelation(self, lags: int = 20, save_results: bool = True) -> "Irregularity":
         """
         Compute the autocorrelation of inter-observation intervals across lags.
 
@@ -472,7 +488,7 @@ class Irregularity:
             title="Autocorrelation of Inter-Observation Intervals",
             xaxis_title="Lag",
             yaxis_title="Autocorrelation",
-            save_path=self._path(f"{new_path_level_name}/interval_acf_plot.png"),
+            save_path=self._path(f"{new_path_level_name}/interval_acf_plot.png") if path else None,
             save_results=save_results,
             renderer=self.renderer,
             library=self.plot_library,
@@ -539,9 +555,7 @@ class Irregularity:
             print(self.results.ea_case_entropy_adherence.describe(interpolation="linear"))
 
         if save_results and path:
-            self.results.ea_case_entropy_adherence.write_csv(
-                path / "case_entropy_adherence.csv"
-            )
+            self.results.ea_case_entropy_adherence.write_csv(path / "case_entropy_adherence.csv")
 
         return self
 
@@ -593,14 +607,14 @@ class Irregularity:
         if self.save_path and save_results:
             path = self.save_path / new_path_level_name
             path.mkdir(parents=True, exist_ok=True)
-        
+
         # Get or compute all necessary metrics for axis selection
         if self.results.ins_case_statistics is None:
             self.interval_statistics(save_results=save_results)
-            
+
         if self.results.bu_case_burstiness is None:
             self.burstiness(save_results=save_results)
-            
+
         if self.results.ea_case_entropy_adherence is not None:
             entropy_df = self.results.ea_case_entropy_adherence
         else:
@@ -614,10 +628,9 @@ class Irregularity:
             )
 
         base = (
-            self.results.ins_case_statistics
-            .select([self.id_col, "cv", "qcod"])
+            self.results.ins_case_statistics.select([self.id_col, "cv", "qcod"])  # ty:ignore[unresolved-attribute]
             .join(
-                self.results.bu_case_burstiness.select([self.id_col, "burstiness_coeff"]),
+                self.results.bu_case_burstiness.select([self.id_col, "burstiness_coeff"]),  # ty:ignore[unresolved-attribute]
                 on=self.id_col,
                 how="left",
             )
@@ -650,7 +663,7 @@ class Irregularity:
 
         corr_rows = []
         for i, col_x in enumerate(metric_cols):
-            for col_y in metric_cols[i + 1:]:
+            for col_y in metric_cols[i + 1 :]:
                 corr, n_complete = _pair_corr(base, col_x, col_y)
                 corr_rows.append(
                     {
@@ -697,8 +710,9 @@ class Irregularity:
                 pl.lit(None).cast(pl.Float64).alias("axis_y_median_threshold"),
             )
         else:
-            x_median = float(complete_df[axis_x].median())
-            y_median = float(complete_df[axis_y].median())
+            # .item() extracts the underlying Python scalar from a 1x1 dataframe/series
+            x_median = float(complete_df.select(pl.col(axis_x).cast(pl.Float64).median()).item())
+            y_median = float(complete_df.select(pl.col(axis_y).cast(pl.Float64).median()).item())
 
             scores_a = self.assign_strata(scores_a, axis_x, axis_y, x_median, y_median)
             scores_a = scores_a.with_columns(
@@ -709,12 +723,22 @@ class Irregularity:
                 pl.lit(y_median).alias("axis_y_median_threshold"),
             )
 
-        scores_a = scores_a.select([
-            self.id_col, "cv", "qcod", "burstiness_coeff", "normalized_entropy", "adherence_rate",
-            "axis_x", "axis_y", "axis_pair_corr",
-            "axis_x_median_threshold", "axis_y_median_threshold",
-            "irregularity_stratum",
-        ])
+        scores_a = scores_a.select(
+            [
+                self.id_col,
+                "cv",
+                "qcod",
+                "burstiness_coeff",
+                "normalized_entropy",
+                "adherence_rate",
+                "axis_x",
+                "axis_y",
+                "axis_pair_corr",
+                "axis_x_median_threshold",
+                "axis_y_median_threshold",
+                "irregularity_stratum",
+            ]
+        )
         self.results.cs_case_scores = scores_a
 
         if self.renderer:
@@ -783,7 +807,7 @@ class Irregularity:
         self,
         bin_resolution_seconds: float,
         adherence_tolerance: float,
-    ) -> pl.DataFrame:
+    ) -> pl.DataFrame | None:
         """
         Assemble a single-row summary DataFrame from all completed analyses.
 
@@ -809,17 +833,14 @@ class Irregularity:
         if self.results.ins_global_statistics is not None:
             stats = self.results.ins_global_statistics
             # describe() returns rows keyed by "statistic" column
-            stat_map = {
-                r["statistic"]: r["interval_seconds"]
-                for r in stats.to_dicts()
-            }
+            stat_map = {r["statistic"]: r["interval_seconds"] for r in stats.to_dicts()}
             for stat_key, col_name in [
-                ("mean",   "mean_seconds"),
-                ("50%",    "median_seconds"),
-                ("25%",    "q25_seconds"),
-                ("75%",    "q75_seconds"),
-                ("min",    "min_seconds"),
-                ("max",    "max_seconds"),
+                ("mean", "mean_seconds"),
+                ("50%", "median_seconds"),
+                ("25%", "q25_seconds"),
+                ("75%", "q75_seconds"),
+                ("min", "min_seconds"),
+                ("max", "max_seconds"),
             ]:
                 row[col_name] = stat_map.get(stat_key)
 
@@ -849,7 +870,11 @@ class Irregularity:
             if axis_row.height > 0:
                 row["selected_axis_x"] = axis_row["axis_x"][0]
                 row["selected_axis_y"] = axis_row["axis_y"][0]
-                row["selected_axis_pair_corr"] = float(axis_row["axis_pair_corr"][0]) if axis_row["axis_pair_corr"][0] is not None else None
+                row["selected_axis_pair_corr"] = (
+                    float(axis_row["axis_pair_corr"][0])
+                    if axis_row["axis_pair_corr"][0] is not None
+                    else None
+                )
 
             threshold_row = cs.filter(pl.col("axis_x_median_threshold").is_not_null())
             if threshold_row.height > 0:
@@ -868,7 +893,9 @@ class Irregularity:
         if self.results.cs_pairwise_correlations is not None:
             corr_df = self.results.cs_pairwise_correlations.filter(pl.col("corr").is_not_null())
             if corr_df.height > 0:
-                top = corr_df.sort(["abs_corr", "n_complete_cases"], descending=[False, True]).row(0, named=True)
+                top = corr_df.sort(["abs_corr", "n_complete_cases"], descending=[False, True]).row(
+                    0, named=True
+                )
                 row["least_correlated_axis_1"] = top["axis_1"]
                 row["least_correlated_axis_2"] = top["axis_2"]
                 row["least_correlated_pair_corr"] = float(top["corr"])
@@ -881,10 +908,12 @@ class Irregularity:
         if not row:
             return None
 
-        return pl.DataFrame({
-            "name": list(row.keys()),
-            "value": [str(v) if v is not None else None for v in row.values()],
-        })
+        return pl.DataFrame(
+            {
+                "name": list(row.keys()),
+                "value": [str(v) if v is not None else None for v in row.values()],
+            }
+        )
 
     def run(
         self,
@@ -983,10 +1012,23 @@ if __name__ == "__main__":
     df = pl.DataFrame(
         {
             "id": [
-                "a", "a", "a", "a", "a",
-                "b", "b", "b", "b", "b",
-                "c", "c", "c", "c", "c",
-                "d", "d",
+                "a",
+                "a",
+                "a",
+                "a",
+                "a",
+                "b",
+                "b",
+                "b",
+                "b",
+                "b",
+                "c",
+                "c",
+                "c",
+                "c",
+                "c",
+                "d",
+                "d",
             ],
             "clock": [
                 # a — irregular gaps (bursty)
@@ -1012,16 +1054,42 @@ if __name__ == "__main__":
                 "2023-02-02 00:30:00",
             ],
             "heartrate": [
-                60, None, 70, 65, None,
-                72, 74, 71, 73, 70,
-                80, None, 85, 82, None,
-                90, None,
+                60,
+                None,
+                70,
+                65,
+                None,
+                72,
+                74,
+                71,
+                73,
+                70,
+                80,
+                None,
+                85,
+                82,
+                None,
+                90,
+                None,
             ],
             "blood_pressure": [
-                120, 130, None, None, None,
-                118, 120, 119, 121, 117,
-                135, 140, None, None, None,
-                125, None,
+                120,
+                130,
+                None,
+                None,
+                None,
+                118,
+                120,
+                119,
+                121,
+                117,
+                135,
+                140,
+                None,
+                None,
+                None,
+                125,
+                None,
             ],
         }
     ).with_columns(
@@ -1029,20 +1097,22 @@ if __name__ == "__main__":
             pl.col("clock").str.strptime(pl.Datetime, format="%Y-%m-%d %H:%M:%S"),
         ]
     )
-    
+
     print(df)
-    irregularity_analysis = Irregularity(df, save_path=Path("results/irregularity_example"), renderer="notebook_connected")
+    irregularity_analysis = Irregularity(
+        df, save_path=Path("results/irregularity_example"), renderer="notebook_connected"
+    )
     irregularity_analysis.run(save_results=True)
-    
+
     # test staticmethod assign_strata for df
-    test_df = pl.DataFrame({
-        "id": ["x", "y", "z"],
-        "cv": [0.1, 0.5, 0.9],
-        "adherence_rate": [0.8, 0.4, 0.2],
-    })
+    test_df = pl.DataFrame(
+        {
+            "id": ["x", "y", "z"],
+            "cv": [0.1, 0.5, 0.9],
+            "adherence_rate": [0.8, 0.4, 0.2],
+        }
+    )
     assigned = Irregularity.assign_strata(
-        test_df,
-        axis_x="cv",
-        axis_y="adherence_rate"
+        test_df, axis_x="cv", axis_y="adherence_rate", x_median=0.5, y_median=0.5
     )
     print(assigned)

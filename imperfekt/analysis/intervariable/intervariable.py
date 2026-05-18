@@ -21,33 +21,33 @@ from imperfekt.config.global_settings import VITALS
 
 class IntervariablePlots:
     def __init__(self):
-        self.rs_case_level_histogram: go.Figure | plt.Figure = None
-        self.rs_case_level_boxplot: go.Figure | plt.Figure = None
-        self.mcar_upset_plot: go.Figure = None
-        self.sc_lag_scatter_plot: dict[str, go.Figure | plt.Figure] = {}
-        self.sc_correlation_heatmap: go.Figure | plt.Figure = None
-        self.sc_correlation_dendogram: go.Figure | plt.Figure = None
-        self.ac_multi_histogram: dict[str, go.Figure | plt.Figure] = {}
-        self.ac_multi_boxplot: dict[str, go.Figure | plt.Figure] = {}
-        self.ac_lag_scatter_plot: dict[str, go.Figure | plt.Figure] = {}
+        self.rs_case_level_histogram: go.Figure | plt.Figure | None = None
+        self.rs_case_level_boxplot: go.Figure | plt.Figure | None = None
+        self.mcar_upset_plot: go.Figure | None = None
+        self.sc_lag_scatter_plot: dict[str, go.Figure | plt.Figure | None] = {}
+        self.sc_correlation_heatmap: go.Figure | plt.Figure | None = None
+        self.sc_correlation_dendogram: go.Figure | plt.Figure | None = None
+        self.ac_multi_histogram: dict[str, go.Figure | plt.Figure | None] = {}
+        self.ac_multi_boxplot: dict[str, go.Figure | plt.Figure | None] = {}
+        self.ac_lag_scatter_plot: dict[str, go.Figure | plt.Figure | None] = {}
 
 
 class IntervariableResults:
     def __init__(self):
         # Analytical results
-        self.rs_overall_statistics: pl.DataFrame = None
-        self.rs_case_level_statistics: pl.DataFrame = None
-        self.rs_empty_statistics: pl.DataFrame = None
-        self.rs_empty_case_level_statistics: pl.DataFrame = None
-        self.mcar_results: pl.DataFrame = None
-        self.mar_mnar_results: pl.DataFrame = None
-        self.sc_symmetric_correlation: pl.DataFrame = None
-        self.sc_chi2_intervariable_matrix: pl.DataFrame = None
-        self.sc_symmetric_crosscorrelation: dict[str, pl.DataFrame] = {}
-        self.ac_asymmetric_statistical_results: dict[str, pl.DataFrame] = {}
-        self.ac_asymmetric_crosscorrelation: dict[str, pl.DataFrame] = {}
-        self.iv_composite_scores: pl.DataFrame = None
-        self.iv_pairwise_correlations: pl.DataFrame = None
+        self.rs_overall_statistics: pl.DataFrame | None = None
+        self.rs_case_level_statistics: pl.DataFrame | None = None
+        self.rs_empty_statistics: tuple | None = None
+        self.rs_empty_case_level_statistics: pl.DataFrame | None = None
+        self.mcar_results: pl.DataFrame | None = None
+        self.mar_mnar_results: pl.DataFrame | None = None
+        self.sc_symmetric_correlation: pl.DataFrame | None = None
+        self.sc_chi2_intervariable_matrix: pl.DataFrame | None = None
+        self.sc_symmetric_crosscorrelation: dict[str, pl.DataFrame | None] = {}
+        self.ac_asymmetric_statistical_results: dict[str, pl.DataFrame | None] = {}
+        self.ac_asymmetric_crosscorrelation: dict[str, pl.DataFrame | None] = {}
+        self.iv_composite_scores: pl.DataFrame | None = None
+        self.iv_pairwise_correlations: pl.DataFrame | None = None
         # Plots
         self.plots = IntervariablePlots()
 
@@ -113,10 +113,12 @@ class IntervariableImperfection:
         alpha: float = 0.05,
         save_path: Path | None = None,
         plot_library: str = "matplotlib",
-        renderer: str = "notebook_connected",
-        iqr_multiplier: float = 1.5,
-        iqr_scope: str = "global",
-        iqr_missing_as: str = "ignore",
+        renderer: str | None = "notebook_connected",
+        plausibility_method: str | None = "iqr",
+        plausibility_threshold: float = 1.5,
+        plausibility_scope: str = "global",
+        plausibility_missing_as: str = "ignore",
+        plausibility_reference_ranges: dict | None = None,
     ):
         if not renderer and not save_path:
             pretty_printing.rich_warning(
@@ -151,9 +153,11 @@ class IntervariableImperfection:
                 clock_col=self.clock_col,
                 clock_no_col=self.clock_no_col,
                 cols=self.cols,
-                iqr_multiplier=iqr_multiplier,
-                scope=iqr_scope,
-                missing_as=iqr_missing_as,
+                method=plausibility_method,
+                threshold=plausibility_threshold,
+                scope=plausibility_scope,
+                missing_as=plausibility_missing_as,
+                reference_ranges=plausibility_reference_ranges,
             )
         else:
             raise ValueError(
@@ -207,7 +211,7 @@ class IntervariableImperfection:
                 save_path=self._path(f"{new_path_level_name}/all_null_rows_stats.csv"),
                 save_results=save_results,
             )
-            if self.renderer:
+            if self.renderer and self.results.rs_empty_statistics is not None:
                 pretty_printing.rich_info(
                     f"All null rows: {self.results.rs_empty_statistics[0]}, Percentage: {self.results.rs_empty_statistics[1]:.4f}%\n"
                 )
@@ -339,7 +343,7 @@ class IntervariableImperfection:
             save_results (bool): Whether to save the results to files. Defaults to True.
 
         Returns:
-            dict: A dictionary containing the results of Little's MCAR test.
+            pl.DataFrame: A DataFrame containing the results of Little's MCAR test.
         """
         new_path_level_name = "mcar_test"
         if self.save_path and save_results:
@@ -861,7 +865,7 @@ class IntervariableImperfection:
             print(f"🚩Error building intervariable summary: {e}")
 
     def generate_html_report(
-        self, report_path: str = "intervariable_report.html", title: str = None
+        self, report_path: str = "intervariable_report.html", title: str | None = None
     ):
         """Generates an HTML report from the analysis results."""
         if not self.save_path:
@@ -879,7 +883,7 @@ class IntervariableImperfection:
 
         pretty_printing.rich_info(f"✅ Report generated at [green]{full_report_path}[/green]")
 
-    def _path(self, subpath: str) -> Path:
+    def _path(self, subpath: str) -> Path | None:
         if self.save_path:
             return self.save_path / subpath
         return None
@@ -904,8 +908,14 @@ class IntervariableImperfection:
                 rs = self.results.rs_overall_statistics
                 _add("rs_indicated_vars_pct_mean", rs["indicated_vars_pct"].mean())
                 _add("rs_indicated_vars_pct_median", rs["indicated_vars_pct"].median())
-                _add("rs_indicated_vars_pct_p25", rs["indicated_vars_pct"].quantile(0.25, interpolation="nearest"))
-                _add("rs_indicated_vars_pct_p75", rs["indicated_vars_pct"].quantile(0.75, interpolation="nearest"))
+                _add(
+                    "rs_indicated_vars_pct_p25",
+                    rs["indicated_vars_pct"].quantile(0.25, interpolation="nearest"),
+                )
+                _add(
+                    "rs_indicated_vars_pct_p75",
+                    rs["indicated_vars_pct"].quantile(0.75, interpolation="nearest"),
+                )
                 _add("rs_indicated_vars_pct_max", rs["indicated_vars_pct"].max())
             except Exception:
                 pass
@@ -929,7 +939,11 @@ class IntervariableImperfection:
                     _add(f"mar_mnar_{col}_p_value", row.get("p_value"))
                     auc_mar = row.get("auc_mar")
                     auc_mnar = row.get("auc_mnar")
-                    auc_delta = (auc_mnar - auc_mar) if (auc_mar is not None and auc_mnar is not None) else None
+                    auc_delta = (
+                        (auc_mnar - auc_mar)
+                        if (auc_mar is not None and auc_mnar is not None)
+                        else None
+                    )
                     _add(f"mar_mnar_{col}_auc_delta", auc_delta)
             except Exception:
                 pass
@@ -1003,10 +1017,14 @@ class IntervariableImperfection:
             .then(pl.lit("Q_complete"))
             .when(pl.col(axis_x).is_null() | pl.col(axis_y).is_null())
             .then(pl.lit(None))
-            .when(~x_high & ~y_high).then(pl.lit("Q_alpha"))
-            .when(x_high & ~y_high).then(pl.lit("Q_beta"))
-            .when(~x_high & y_high).then(pl.lit("Q_gamma"))
-            .when(x_high & y_high).then(pl.lit("Q_delta"))
+            .when(~x_high & ~y_high)
+            .then(pl.lit("Q_alpha"))
+            .when(x_high & ~y_high)
+            .then(pl.lit("Q_beta"))
+            .when(~x_high & y_high)
+            .then(pl.lit("Q_gamma"))
+            .when(x_high & y_high)
+            .then(pl.lit("Q_delta"))
             .otherwise(pl.lit(None))
             .alias("intervariable_stratum")
         )
@@ -1080,13 +1098,15 @@ class IntervariableImperfection:
         present_axes = [a for a in candidate_axes if a in base.columns]
         for ax_x, ax_y in itertools.combinations(present_axes, 2):
             corr, n_complete = _pair_corr(base, ax_x, ax_y)
-            corr_rows.append({
-                "axis_1": ax_x,
-                "axis_2": ax_y,
-                "corr": corr,
-                "abs_corr": float(abs(corr)) if not np.isnan(corr) else float("nan"),
-                "n_complete_cases": n_complete,
-            })
+            corr_rows.append(
+                {
+                    "axis_1": ax_x,
+                    "axis_2": ax_y,
+                    "corr": corr,
+                    "abs_corr": float(abs(corr)) if not np.isnan(corr) else float("nan"),
+                    "n_complete_cases": n_complete,
+                }
+            )
 
         corr_table = pl.DataFrame(corr_rows).sort(
             ["abs_corr", "n_complete_cases"], descending=[False, True], nulls_last=True
@@ -1134,17 +1154,22 @@ class IntervariableImperfection:
                 pl.lit(y_median).alias("axis_y_median_threshold"),
             )
 
-        scores = scores.select([
-            self.id_col,
-            "avg_indicated_vars_pct",
-            "co_missingness_concentration",
-            "missing_variable_breadth",
-            "pattern_entropy",
-            "max_pairwise_co_missingness",
-            "axis_x", "axis_y", "axis_pair_corr",
-            "axis_x_median_threshold", "axis_y_median_threshold",
-            "intervariable_stratum",
-        ])
+        scores = scores.select(
+            [
+                self.id_col,
+                "avg_indicated_vars_pct",
+                "co_missingness_concentration",
+                "missing_variable_breadth",
+                "pattern_entropy",
+                "max_pairwise_co_missingness",
+                "axis_x",
+                "axis_y",
+                "axis_pair_corr",
+                "axis_x_median_threshold",
+                "axis_y_median_threshold",
+                "intervariable_stratum",
+            ]
+        )
         self.results.iv_composite_scores = scores
 
         if self.renderer:
@@ -1211,6 +1236,7 @@ if __name__ == "__main__":
     base_B = datetime(2023, 1, 2, 8, 0, 0)
 
     from datetime import timedelta
+
     times_A = [base_A + timedelta(seconds=60 * i) for i in range(10)]
     times_B = [base_B + timedelta(seconds=60 * i) for i in range(10)]
 
@@ -1222,10 +1248,9 @@ if __name__ == "__main__":
     bp_A = [120.0, 118.0, 122.0, 119.0, 121.0, None, 117.0, 123.0, 120.0, 119.0]
     bp_B = [115.0, 116.0, 114.0, 117.0, 115.0, 118.0, 116.0, 119.0, None, 114.0]
 
-    rows = (
-        [("A", times_A[i], hr_A[i], bp_A[i], i) for i in range(10)]
-        + [("B", times_B[i], hr_B[i], bp_B[i], i) for i in range(10)]
-    )
+    rows = [("A", times_A[i], hr_A[i], bp_A[i], i) for i in range(10)] + [
+        ("B", times_B[i], hr_B[i], bp_B[i], i) for i in range(10)
+    ]
 
     df = pl.DataFrame(
         rows,

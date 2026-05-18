@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import plotly.graph_objects as go
 import polars as pl
 
@@ -10,7 +12,7 @@ def extract_datetime_distribution(
     mask_df: pl.DataFrame,
     col: str,
     clock_col: str = "clock",
-    save_path: str = None,
+    save_path: str | Path | None = None,
     save_results: bool = True,
 ) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
     """
@@ -76,8 +78,8 @@ def visualize_month_daytime_heatmap(
     mask_df: pl.DataFrame,
     col: str,
     clock_col: str = "clock",
-    renderer: str = "browser",
-    save_path: str = None,
+    renderer: str | None = "browser",
+    save_path: str | Path | None = None,
     save_results: bool = True,
 ) -> go.Figure:
     """

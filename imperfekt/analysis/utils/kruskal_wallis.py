@@ -1,4 +1,5 @@
 from itertools import combinations
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -18,10 +19,10 @@ def perform_statistical_analysis(
     c: str,
     group_col: str,
     posthoc_method: str,
-    renderer: str,
-    save_path: str,
-    save_results: bool,
-    analyzed_col: str = None,
+    renderer: str | None = None,
+    save_path: str | Path | None = None,
+    save_results: bool = False,
+    analyzed_col: str | None = None,
 ):
     """Helper function to perform statistical analysis for a given column."""
     # Prepare data for the test: a list of arrays, one for each diagnosis group
@@ -44,6 +45,7 @@ def perform_statistical_analysis(
             print(f"95% CI: [{kw_result['ci_lower']:.4f}, {kw_result['ci_upper']:.4f}]")
 
         if save_path and save_results:
+            save_path = Path(save_path) if isinstance(save_path, str) else save_path
             with open(save_path / f"kw_results_{c}.txt", "w") as f:
                 f.write(f"H-Statistic: {stat:.4f}\n")
                 f.write(f"p-value: {p_value:.4g}\n")
@@ -97,7 +99,9 @@ def kruskal_wallis_effect_size_ci(
         n_total = sum(len(group) for group in groups)
         k_groups = len(groups)
         if n_total <= k_groups:
-            raise ValueError(f"Total sample size ({n_total}) must be greater than the number of groups ({k_groups}).")
+            raise ValueError(
+                f"Total sample size ({n_total}) must be greater than the number of groups ({k_groups})."
+            )
         else:
             eta_sq = (h_stat - k_groups + 1) / (n_total - k_groups)
             return eta_sq
@@ -130,9 +134,9 @@ def _perform_posthoc_tests(
     c: str,
     group_col: str,
     posthoc_method: str,
-    renderer: str,
-    save_path: str,
-    save_results: bool,
+    renderer: str | None = None,
+    save_path: str | Path | None = None,
+    save_results: bool = False,
 ):
     """Helper function to perform post-hoc tests."""
     analysis_pd = analysis_pd[analysis_pd[c].notna()]  # Ensure no NaN values in the column
@@ -160,7 +164,7 @@ def _perform_posthoc_tests(
 
         # Visualize effect sizes with a heatmap
         es_heatmap_fig = posthoc_heatmap(
-            effect_size_matrix,
+            effect_size_matrix.to_pandas(),
             col=c,
             type="posthoc_effect_sizes",
             renderer=renderer,
@@ -168,7 +172,8 @@ def _perform_posthoc_tests(
             save_results=save_results,
         )
         # Save effect size results if required
-        if save_results and save_path:
+        if save_results and save_path is not None:
+            save_path = Path(save_path) if isinstance(save_path, str) else save_path
             pd.DataFrame(effect_size_results).to_csv(
                 save_path / f"posthoc_effect_sizes_rbc_{c}.csv"
             )
@@ -196,7 +201,7 @@ def _perform_posthoc_tests(
 
 def calculate_dcsf_effect_sizes(
     df: pd.DataFrame, val_col: str, group_col: str
-) -> tuple[list, pd.DataFrame]:
+) -> tuple[list, pl.DataFrame]:
     """
     Calculate the effect sizes for all pairwise group comparisons.
 
@@ -230,22 +235,27 @@ def calculate_dcsf_effect_sizes(
         effect_sizes.loc[group2, group1] = mwu_result["effect_size"]
         effect_sizes.fillna(0, inplace=True)  # Fill diagonal with 0s
 
-    return results, effect_sizes
+    return results, pl.DataFrame(effect_sizes)
 
 
 def posthoc_heatmap(
-    posthoc_results: pl.DataFrame,
-    col: str = None,
+    posthoc_results: pd.DataFrame,
+    col: str,
     type: str = "dunn_p_values",
-    renderer: str = None,
-    save_path: str = None,
+    renderer: str | None = None,
+    save_path: str | Path | None = None,
     save_results: bool = False,
-) -> None:
+) -> go.Figure:
     """Create a heatmap for post-hoc test results.
     Parameters:
-        posthoc_results (pl.DataFrame): DataFrame containing the results of Dunn's post-hoc test.
+        posthoc_results (pl.DataFrame): DataFrame containing the post-hoc test results (p-values or effect sizes).
+        col (str): The name of the column for which the post-hoc test was performed. Used for labeling the heatmap.
+        type (str): Type of post-hoc results to visualize. Must be either "posthoc_p_values" or "posthoc_effect_sizes". Default is "dunn_p_values".
+        renderer (str | None): The renderer to use for displaying the heatmap. If None, the heatmap will not be displayed.
+        save_path (str | Path | None): Path to save the heatmap HTML file. If None, the heatmap will not be saved.
+        save_results (bool): Whether to save the heatmap to the specified path. Default is False.
     Returns:
-        None: Displays the heatmap using Plotly.
+        go.Figure: The Plotly figure object for the heatmap.
     """
     if type == "posthoc_p_values":
         title_text = f"<b>Post-Hoc Test Pairwise p-values for {col.title()}</b>"
@@ -286,7 +296,8 @@ def posthoc_heatmap(
     if renderer:
         fig.show(renderer=renderer)
 
-    if save_results and save_path:
+    if save_results and save_path is not None:
+        save_path = Path(save_path) if isinstance(save_path, str) else save_path
         fig.write_html(save_path / f"{type}_heatmap_{col}.html")
         print(f"Saved {type} heatmap for {col} to {save_path / f'{type}_heatmap_{col}.html'}")
 

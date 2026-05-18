@@ -1,8 +1,8 @@
 # in imperfekt/features/core.py
 import numpy as np
 import polars as pl
-from imperfekt.analysis.utils import pretty_printing
 
+from imperfekt.analysis.utils import pretty_printing
 from imperfekt.features import interaction, irregularity, temporal, window
 
 
@@ -184,7 +184,8 @@ class FeatureGenerator:
         if len(cols) <= 1:
             pretty_cols = ", ".join(cols)
             pretty_printing.rich_warning(
-                "⚠️ Not enough columns for interaction features. Skipping interaction feature generation. Columns provided: "f"{pretty_cols}"
+                "⚠️ Not enough columns for interaction features. Skipping interaction feature generation. Columns provided: "
+                f"{pretty_cols}"
             )
             return self
         self.df = interaction.add_pairwise_interactions(
@@ -210,9 +211,7 @@ class FeatureGenerator:
         Parameters:
             acceleration_window_size: Rolling window size for acceleration statistics. Default 5.
         """
-        self.df = irregularity.add_interval_features(
-            self.df, self.id_col, self.clock_col
-        )
+        self.df = irregularity.add_interval_features(self.df, self.id_col, self.clock_col)
         self.df = irregularity.add_windowed_acceleration(
             self.df, self.id_col, self.clock_col, window_size=acceleration_window_size
         )

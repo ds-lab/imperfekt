@@ -4,8 +4,8 @@ import polars as pl
 
 from imperfekt.analysis.intervariable.intervariable import IntervariableImperfection
 from imperfekt.analysis.intravariable.intravariable import IntravariableImperfection
-from imperfekt.analysis.preliminary.preliminary import Preliminary
 from imperfekt.analysis.irregularity.irregularity import Irregularity
+from imperfekt.analysis.preliminary.preliminary import Preliminary
 from imperfekt.analysis.utils import masking, pretty_printing
 from imperfekt.analysis.utils.events import (
     calculate_event_percentage,
@@ -21,11 +21,11 @@ class Imperfekt:
         id_col: str = "id",
         clock_col: str = "clock",
         clock_no_col: str = "clock_no",
-        cols: list = None,
+        cols: list | None = None,
         alpha: float = 0.05,
-        save_path: Path = None,
+        save_path: Path | None = None,
         plot_library: str = "matplotlib",
-        renderer: str = "notebook_connected",
+        renderer: str | None = "notebook_connected",
     ):
         """
         Initializes the Preliminary analysis class.
@@ -68,7 +68,7 @@ class Imperfekt:
 
         # Result persistence
         self.save_path = save_path
-        if self.save_path:
+        if self.save_path is not None:
             self.save_path = Path(self.save_path)
             self.save_path.mkdir(parents=True, exist_ok=True)
 
@@ -89,7 +89,7 @@ class Imperfekt:
             clock_no_col=self.clock_no_col,
             cols=self.cols,
             alpha=self.alpha,
-            save_path=self.save_path / "preliminary" if self.save_path else None,
+            save_path=self.save_path / "preliminary" if self.save_path is not None else None,
             plot_library=self.plot_library,
             renderer=self.renderer,
         )
@@ -102,7 +102,7 @@ class Imperfekt:
             clock_no_col=self.clock_no_col,
             cols=self.cols,
             alpha=self.alpha,
-            save_path=self.save_path / "intravariable" if self.save_path else None,
+            save_path=self.save_path / "intravariable" if self.save_path is not None else None,
             plot_library=self.plot_library,
             renderer=self.renderer,
         )
@@ -115,18 +115,18 @@ class Imperfekt:
             clock_no_col=self.clock_no_col,
             cols=self.cols,
             alpha=self.alpha,
-            save_path=self.save_path / "intervariable" if self.save_path else None,
+            save_path=self.save_path / "intervariable" if self.save_path is not None else None,
             plot_library=self.plot_library,
             renderer=self.renderer,
         )
-        
+
         self.irregularity = Irregularity(
             df=self.df,
             id_col=self.id_col,
             clock_col=self.clock_col,
-            save_path=self.save_path / "irregularity" if self.save_path else None,
+            save_path=self.save_path / "irregularity" if self.save_path is not None else None,
             plot_library=self.plot_library,
-            renderer=self.renderer
+            renderer=self.renderer,
         )
 
         # Result Persistence
@@ -137,7 +137,7 @@ class Imperfekt:
         self,
         save_results: bool = True,
         generate_html: bool = True,
-        addition_to_title: str = None,
+        addition_to_title: str | None = None,
         cheap_mode: bool = False,
     ):
         """
@@ -178,10 +178,10 @@ class Imperfekt:
     def run_grouped_analysis(
         self,
         annotation_col: str,
-        annotation_df: pl.DataFrame = None,
+        annotation_df: pl.DataFrame | None = None,
         save_results: bool = True,
-        top_n_groups: int = None,
-        addition_to_title: str = None,
+        top_n_groups: int | None = None,
+        addition_to_title: str | None = None,
         cheap_mode: bool = False,
     ):
         """
@@ -298,15 +298,15 @@ class Imperfekt:
                 self.group_results[group].irregularity.composite_score(save_results=save_results)
             if group_save_path:
                 self.group_results[group].generate_html_reports(
-                    addition_to_title=addition_to_title + f" - Group: {group}"
+                    addition_to_title=f"{addition_to_title} - Group: {group}"
                 )
         pretty_printing.rich_info("Grouped analysis complete.")
 
     def run_event_based_analysis(
         self,
         events_df: pl.DataFrame,
-        event_name_col: str = None,
-        included_event_names: list = None,
+        event_name_col: str | None = None,
+        included_event_names: list | None = None,
         window_size: int = 0,
         window_location: str = "both",  # 'both', 'before', 'after'
         remove_ids_without_events: bool = True,
@@ -389,7 +389,7 @@ class Imperfekt:
                 clock_no_col=self.clock_no_col,
                 cols=self.cols,
                 alpha=self.alpha,
-                save_path=event_save_path / label,
+                save_path=event_save_path / label if event_save_path is not None else None,
                 plot_library=self.plot_library,
                 renderer=self.renderer,
             )
@@ -422,7 +422,7 @@ class Imperfekt:
                     title = f"Non-event Timestamps - {(100 - event_percentage):.2f}%"
                 self.event_results[label].generate_html_reports(addition_to_title=title)
 
-    def generate_html_reports(self, addition_to_title: str = None):
+    def generate_html_reports(self, addition_to_title: str | None = None):
         """
         Generates HTML reports for the analysis results.
         """
@@ -439,9 +439,9 @@ class Imperfekt:
                 pl.cum_count(self.id_col).over(self.id_col).alias(self.clock_no_col)
             )
 
-    def _path(self, subpath: str) -> Path:
+    def _path(self, subpath: str) -> Path | None:
         """Generates a full path for saving results."""
-        if self.save_path:
+        if self.save_path is not None:
             return self.save_path / subpath
         return None
 

@@ -1,6 +1,5 @@
 import polars as pl
 
-
 ############################################################
 #          Burstiness Coefficient Analysis                 #
 ############################################################
@@ -31,8 +30,7 @@ def compute_burstiness_coefficient(
             id, n_intervals, mean_interval, std_interval, burstiness_coeff.
     """
     case_stats = (
-        delta_t_df
-        .group_by(id_col)
+        delta_t_df.group_by(id_col)
         .agg(
             pl.len().alias("n_intervals"),
             pl.col("interval_seconds").mean().alias("mean_interval"),
@@ -87,11 +85,7 @@ def compute_global_burstiness(
             n_intervals, mean_interval, std_interval, burstiness_coeff.
     """
     eligible_ids = (
-        delta_t_df
-        .group_by(id_col)
-        .agg(pl.len().alias("n"))
-        .filter(pl.col("n") >= 3)
-        .select(id_col)
+        delta_t_df.group_by(id_col).agg(pl.len().alias("n")).filter(pl.col("n") >= 3).select(id_col)
     )
     pooled = delta_t_df.join(eligible_ids, on=id_col, how="inner")
 
@@ -110,9 +104,11 @@ def compute_global_burstiness(
     else:
         b = None
 
-    return pl.DataFrame({
-        "n_intervals": [n],
-        "mean_interval": [mean_val],
-        "std_interval": [std_val],
-        "burstiness_coeff": [b],
-    })
+    return pl.DataFrame(
+        {
+            "n_intervals": [n],
+            "mean_interval": [mean_val],
+            "std_interval": [std_val],
+            "burstiness_coeff": [b],
+        }
+    )

@@ -1,4 +1,5 @@
 import traceback
+from collections.abc import Sequence
 from datetime import timedelta
 from pathlib import Path
 
@@ -12,7 +13,7 @@ from imperfekt.analysis.intravariable import (
     date_time_statistics,
     gap_statistics,
     markov_chain_summary,
-    windowed_significance
+    windowed_significance,
 )
 from imperfekt.analysis.utils import masking, pretty_printing, statistics_utils, visualization_utils
 
@@ -35,20 +36,20 @@ class IntravariablePlots:
 class IntravariableResults:
     def __init__(self):
         # Analytical results
-        self.cs_overall_statistics: pl.DataFrame = None
-        self.cs_case_level_statistics: pl.DataFrame = None
-        self.gs_gaps_observation_runs: pl.DataFrame = None
+        self.cs_overall_statistics: pl.DataFrame | None = None
+        self.cs_case_level_statistics: pl.DataFrame | None = None
+        self.gs_gaps_observation_runs: pl.DataFrame | None = None
         self.gs_gaps_df: dict[str, pl.DataFrame] = {}
         self.gs_gap_dominant: dict[str, pl.DataFrame] = {}
         self.gs_gap_burstiness: dict[str, pl.DataFrame] = {}
-        self.gr_gap_returns: pl.DataFrame = None
+        self.gr_gap_returns: pl.DataFrame | None = None
         self.gr_gap_kruskal: dict = {}
         self.mc_markov_summary: dict = {}
         self.ac_autocorrelation: dict = {}
         self.ws_observations_around_indicated: dict = {}
-        self.ws_mwu_result: pl.DataFrame = None
+        self.ws_mwu_result: pl.DataFrame | None = None
         self.dt_date_time_statistics: dict = {}
-        self.iv_composite_scores: pl.DataFrame = None
+        self.iv_composite_scores: pl.DataFrame | None = None
         self.iv_pairwise_correlations: dict[str, pl.DataFrame] = {}
         # Plots
         self.plots = IntravariablePlots()
@@ -111,10 +112,12 @@ class IntravariableImperfection:
         alpha: float = 0.05,
         save_path: Path | None = None,
         plot_library: str = "matplotlib",
-        renderer: str = "notebook_connected",
-        iqr_multiplier: float = 1.5,
-        iqr_scope: str = "global",
-        iqr_missing_as: str = "ignore",
+        renderer: str | None = "notebook_connected",
+        plausibility_method: str | None = "iqr",
+        plausibility_threshold: float = 1.5,
+        plausibility_scope: str = "global",
+        plausibility_missing_as: str = "ignore",
+        plausibility_reference_ranges: dict | None = None,
     ):
         if not renderer and not save_path:
             pretty_printing.rich_warning(
@@ -150,9 +153,11 @@ class IntravariableImperfection:
                 clock_col=self.clock_col,
                 clock_no_col=self.clock_no_col,
                 cols=self.cols,
-                iqr_multiplier=iqr_multiplier,
-                scope=iqr_scope,
-                missing_as=iqr_missing_as,
+                method=plausibility_method,
+                threshold=plausibility_threshold,
+                scope=plausibility_scope,
+                missing_as=plausibility_missing_as,
+                reference_ranges=plausibility_reference_ranges,
             )
         else:
             raise ValueError(
@@ -317,19 +322,18 @@ class IntravariableImperfection:
 
     def gap_returns(
         self,
+        gap_and_return_bins: list | None = None,
         save_results: bool = True,
-        gap_and_return_bins: list = None,
     ):
         """Analyzes gaps and their corresponding return values for each column.
 
         Parameters:
             save_results (bool): Whether to save the results to files.
-            gap_and_return_bins (list): Bins for gap and return analysis.
+            gap_and_return_bins (list | None): Bins for gap and return analysis. E.g., quartiles ([0.25, 0.5, 0.75]), default is 0.125 bins if None.
 
         Returns:
             self: Returns the instance of IntravariableImperfection for method chaining.
         """
-        self.gr_gap_and_return_bins = gap_and_return_bins
         # Get the return value for each gap and column, shape: same as gs_gaps_observation_runs + return_value, return_time, clock_no of return
         self.results.gr_gap_returns = gap_statistics.extract_gap_return_values(
             df=self.df,
@@ -353,6 +357,7 @@ class IntravariableImperfection:
                 gap_return_boxfig,
                 posthoc_pval_heatmap_fig,
                 posthoc_es_heatmap_fig,
+                self.results.gr_gap_and_return_bins,
             ) = gap_statistics.gap_returns(
                 spans=self.results.gr_gap_returns,
                 col=c,
@@ -674,10 +679,14 @@ class IntravariableImperfection:
             .then(pl.lit("Q_complete"))
             .when(pl.col(axis_x).is_null() | pl.col(axis_y).is_null())
             .then(pl.lit(None))
-            .when(~x_high & ~y_high).then(pl.lit("Q_alpha"))
-            .when(x_high & ~y_high).then(pl.lit("Q_beta"))
-            .when(~x_high & y_high).then(pl.lit("Q_gamma"))
-            .when(x_high & y_high).then(pl.lit("Q_delta"))
+            .when(~x_high & ~y_high)
+            .then(pl.lit("Q_alpha"))
+            .when(x_high & ~y_high)
+            .then(pl.lit("Q_beta"))
+            .when(~x_high & y_high)
+            .then(pl.lit("Q_gamma"))
+            .when(x_high & y_high)
+            .then(pl.lit("Q_delta"))
             .otherwise(pl.lit(None))
             .alias("imperfection_stratum")
         )
@@ -742,15 +751,22 @@ class IntravariableImperfection:
 
         # --- indicated_pct per (case, variable) ---
         case_stats = self.results.cs_case_level_statistics
-        indicated_long = pl.concat([
-            case_stats.select([self.id_col, pl.lit(c).alias("variable"),
-                               pl.col(f"{c}_indicated_pct").alias("indicated_pct")])
-            for c in self.cols
-        ])
+        indicated_long = pl.concat(
+            [
+                case_stats.select(
+                    [
+                        self.id_col,
+                        pl.lit(c).alias("variable"),  # ty:ignore[unresolved-attribute]
+                        pl.col(f"{c}_indicated_pct").alias("indicated_pct"),
+                    ]
+                )
+                for c in self.cols
+            ]
+        )
 
         # --- per-case gap metrics ---
         gap_metrics = gap_statistics.compute_case_gap_metrics(
-            gaps_df=self.results.gs_gaps_observation_runs,
+            gaps_df=self.results.gs_gaps_observation_runs,  # ty:ignore[invalid-argument-type]
             mask_df=self.mask,
             id_col=self.id_col,
             clock_col=self.clock_col,
@@ -768,10 +784,8 @@ class IntravariableImperfection:
         )
 
         # --- join all metrics ---
-        base = (
-            indicated_long
-            .join(gap_metrics, on=[self.id_col, "variable"], how="left")
-            .join(p11, on=[self.id_col, "variable"], how="left")
+        base = indicated_long.join(gap_metrics, on=[self.id_col, "variable"], how="left").join(
+            p11, on=[self.id_col, "variable"], how="left"
         )
 
         candidate_axes = [
@@ -807,15 +821,17 @@ class IntravariableImperfection:
             corr_rows = []
             present_axes = [a for a in candidate_axes if a in var_df.columns]
             for i, ax_x in enumerate(present_axes):
-                for ax_y in present_axes[i + 1:]:
+                for ax_y in present_axes[i + 1 :]:
                     corr, n_complete = _pair_corr(var_df, ax_x, ax_y)
-                    corr_rows.append({
-                        "axis_1": ax_x,
-                        "axis_2": ax_y,
-                        "corr": corr,
-                        "abs_corr": float(abs(corr)) if not np.isnan(corr) else float("nan"),
-                        "n_complete_cases": n_complete,
-                    })
+                    corr_rows.append(
+                        {
+                            "axis_1": ax_x,
+                            "axis_2": ax_y,
+                            "corr": corr,
+                            "abs_corr": float(abs(corr)) if not np.isnan(corr) else float("nan"),
+                            "n_complete_cases": n_complete,
+                        }
+                    )
 
             corr_table = pl.DataFrame(corr_rows).sort(
                 ["abs_corr", "n_complete_cases"], descending=[False, True], nulls_last=True
@@ -852,8 +868,13 @@ class IntravariableImperfection:
                     pl.lit(None).cast(pl.Utf8).alias("imperfection_stratum"),
                 )
             else:
-                x_median = float(complete_df[axis_x].median())
-                y_median = float(complete_df[axis_y].median())
+                x_median = float(
+                    complete_df.select(pl.col(axis_x).cast(pl.Float64).median()).item()
+                )
+                y_median = float(
+                    complete_df.select(pl.col(axis_y).cast(pl.Float64).median()).item()
+                )
+
                 scores = self.assign_strata(scores, axis_x, axis_y, x_median, y_median)
                 scores = scores.with_columns(
                     pl.lit(axis_x).alias("axis_x"),
@@ -863,16 +884,27 @@ class IntravariableImperfection:
                     pl.lit(y_median).alias("axis_y_median_threshold"),
                 )
 
-            scores = scores.select([
-                self.id_col, "variable",
-                "indicated_pct",
-                "gap_cv", "gap_qcod", "gap_burstiness_coeff",
-                "gap_normalized_entropy", "gap_adherence_rate",
-                "max_gap_fraction", "gap_onset_cv", "mc_p11",
-                "axis_x", "axis_y", "axis_pair_corr",
-                "axis_x_median_threshold", "axis_y_median_threshold",
-                "imperfection_stratum",
-            ])
+            scores = scores.select(
+                [
+                    self.id_col,
+                    "variable",
+                    "indicated_pct",
+                    "gap_cv",
+                    "gap_qcod",
+                    "gap_burstiness_coeff",
+                    "gap_normalized_entropy",
+                    "gap_adherence_rate",
+                    "max_gap_fraction",
+                    "gap_onset_cv",
+                    "mc_p11",
+                    "axis_x",
+                    "axis_y",
+                    "axis_pair_corr",
+                    "axis_x_median_threshold",
+                    "axis_y_median_threshold",
+                    "imperfection_stratum",
+                ]
+            )
             all_scores.append(scores)
 
             if self.renderer:
@@ -885,8 +917,7 @@ class IntravariableImperfection:
                     .sort("imperfection_stratum")
                 )
                 pretty_printing.rich_info(
-                    f"[{var}] selected axes: {axis_x} × {axis_y} "
-                    f"(corr={selected_corr:.3f})"
+                    f"[{var}] selected axes: {axis_x} × {axis_y} (corr={selected_corr:.3f})"
                 )
                 print(prevalence)
 
@@ -903,7 +934,7 @@ class IntravariableImperfection:
     def run(
         self,
         save_results: bool = True,
-        gap_and_return_bins: list = None,
+        gap_and_return_bins: list | None = None,
         bin_resolution_seconds: float = 60.0,
         adherence_tolerance: float = 0.5,
         window_size: timedelta = timedelta(minutes=5),
@@ -917,7 +948,7 @@ class IntravariableImperfection:
 
         Parameters:
             save_results (bool): Whether to save the results to files.
-            gap_and_return_bins (list): Bins for gap and return analysis.
+            gap_and_return_bins (list | None): Bins for gap and return analysis. E.g., quartiles ([0.25, 0.5, 0.75]), default is 0.125 bins if None.
             bin_resolution_seconds (float): Bin width for dominant gap length detection.
             adherence_tolerance (float): Fractional tolerance for gap adherence rate.
             window_size (timedelta): Size of the temporal window for the analysis of observations around Imperfect values.
@@ -1022,7 +1053,7 @@ class IntravariableImperfection:
             pl.DataFrame with columns ['name', col1, col2, ...], values as strings.
         """
         # metric_name -> {col: value}
-        rows: dict[str, dict] = {}
+        rows: dict[str, dict[str, str | None]] = {}
 
         def _set(metric: str, col: str, value):
             rows.setdefault(metric, {})[col] = str(value) if value is not None else None
@@ -1041,15 +1072,19 @@ class IntravariableImperfection:
             for c in self.cols:
                 pct_col = f"{c}_indicated_pct"
                 thresh_col = next(
-                    (col for col in cs.columns if col.startswith(f"{c}_above_") and col.endswith("_threshold")),
+                    (
+                        col
+                        for col in cs.columns
+                        if col.startswith(f"{c}_above_") and col.endswith("_threshold")
+                    ),
                     None,
                 )
                 if pct_col in cs.columns:
                     vals = cs[pct_col].drop_nulls()
-                    _set("cs_entity_pct_mean", c, float(vals.mean()) if vals.len() > 0 else None)
-                    _set("cs_entity_pct_std", c, float(vals.std()) if vals.len() > 0 else None)
-                    _set("cs_entity_pct_min", c, float(vals.min()) if vals.len() > 0 else None)
-                    _set("cs_entity_pct_max", c, float(vals.max()) if vals.len() > 0 else None)
+                    _set("cs_entity_pct_mean", c, vals.mean() if vals.len() > 0 else None)
+                    _set("cs_entity_pct_std", c, vals.std() if vals.len() > 0 else None)
+                    _set("cs_entity_pct_min", c, vals.min() if vals.len() > 0 else None)
+                    _set("cs_entity_pct_max", c, vals.max() if vals.len() > 0 else None)
                 if thresh_col and thresh_col in cs.columns:
                     _set("cs_n_entities_above_threshold", c, int(cs[thresh_col].sum()))
 
@@ -1057,12 +1092,16 @@ class IntravariableImperfection:
         if self.results.gs_gaps_df:
             for c in self.cols:
                 gaps_frame = self.results.gs_gaps_df.get(c)
-                col_gaps = gaps_frame["time_length"].drop_nulls() if gaps_frame is not None else pl.Series("time_length", [], dtype=pl.Float64)
+                col_gaps = (
+                    gaps_frame["time_length"].drop_nulls()
+                    if gaps_frame is not None
+                    else pl.Series("time_length", [], dtype=pl.Float64)
+                )
                 if col_gaps.len() > 0:
-                    _set("gs_gap_length_mean_seconds", c, float(col_gaps.mean()))
-                    _set("gs_gap_length_median_seconds", c, float(col_gaps.median()))
-                    _set("gs_gap_length_min_seconds", c, float(col_gaps.min()))
-                    _set("gs_gap_length_max_seconds", c, float(col_gaps.max()))
+                    _set("gs_gap_length_mean_seconds", c, col_gaps.mean())
+                    _set("gs_gap_length_median_seconds", c, col_gaps.median())
+                    _set("gs_gap_length_min_seconds", c, col_gaps.min())
+                    _set("gs_gap_length_max_seconds", c, col_gaps.max())
 
         for c in self.cols:
             dom = self.results.gs_gap_dominant.get(c)
@@ -1128,18 +1167,18 @@ class IntravariableImperfection:
             for c in self.cols:
                 _set(metric, c, value)
 
-        if not rows:
-            return None
+        if len(rows) == 0:
+            return pl.DataFrame()  # empty summary
 
-        names = list(rows.keys())
-        data = {"name": names}
+        names: list[str] = list(rows.keys())
+        data: dict[str, Sequence[str | None]] = {"name": names}
         for c in self.cols:
             data[c] = [rows[m].get(c) for m in names]
 
         return pl.DataFrame(data)
 
     def generate_html_report(
-        self, report_path: str = "intravariable_report.html", title: str = None
+        self, report_path: str = "intravariable_report.html", title: str | None = None
     ):
         """Generates an HTML report from the analysis results."""
         if not self.save_path:
@@ -1149,7 +1188,9 @@ class IntravariableImperfection:
             self.save_path = Path(self.save_path)
             self.save_path.mkdir(parents=True, exist_ok=True)
 
-        from imperfekt.analysis.intravariable.html_report_generator import IntravariableHTMLReportGenerator
+        from imperfekt.analysis.intravariable.html_report_generator import (
+            IntravariableHTMLReportGenerator,
+        )
 
         # Create report generator and generate report
         report_generator = IntravariableHTMLReportGenerator(self)
@@ -1157,7 +1198,7 @@ class IntravariableImperfection:
 
         pretty_printing.rich_info(f"✅ Report generated at [green]{full_report_path}[/green]")
 
-    def _path(self, subpath: str) -> Path:
+    def _path(self, subpath: str) -> Path | None:
         """Generates a full path for saving results."""
         if self.save_path:
             return self.save_path / subpath
@@ -1219,10 +1260,9 @@ if __name__ == "__main__":
     bp_A = [120.0, 118.0, 122.0, 119.0, 121.0, None, 117.0, 123.0, 120.0, 119.0]
     bp_B = [115.0, 116.0, 114.0, 117.0, 115.0, 118.0, 116.0, 119.0, None, 114.0]
 
-    rows = (
-        [("A", times_A[i], hr_A[i], bp_A[i], i) for i in range(10)]
-        + [("B", times_B[i], hr_B[i], bp_B[i], i) for i in range(10)]
-    )
+    rows = [("A", times_A[i], hr_A[i], bp_A[i], i) for i in range(10)] + [
+        ("B", times_B[i], hr_B[i], bp_B[i], i) for i in range(10)
+    ]
 
     df = pl.DataFrame(
         rows,

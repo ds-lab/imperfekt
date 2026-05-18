@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import polars as pl
 
 ############################################################
@@ -7,11 +9,11 @@ import polars as pl
 
 def analyze_column_imperfection(
     mask_df: pl.DataFrame,
-    cols: list = None,
+    cols: list | None = None,
     id_col: str = "id",
     clock_col: str = "clock",
     clock_no_col: str = "clock_no",
-    save_path: str = None,
+    save_path: str | Path | None = None,
     save_results: bool = True,
 ) -> pl.DataFrame:
     """
@@ -75,12 +77,12 @@ def analyze_column_imperfection(
 
 def analyze_column_imperfection_per_id(
     mask_df: pl.DataFrame,
-    cols: list = None,
+    cols: list | None = None,
     id_col: str = "id",
     clock_col: str = "clock",
     clock_no_col: str = "clock_no",
     threshold: float = 5,
-    save_path: str = None,
+    save_path: str | Path | None = None,
     save_results: bool = True,
 ) -> pl.DataFrame:
     """

@@ -3,8 +3,8 @@ import polars as pl
 
 def filter_events_df(
     events_df: pl.DataFrame,
-    event_name_col: str = None,
-    included_event_names: list = None,
+    event_name_col: str | None = None,
+    included_event_names: list | None = None,
 ) -> pl.DataFrame:
     """
     Filter events DataFrame based on included event names.
@@ -91,7 +91,7 @@ def create_event_mask(
     return event_matches, mask
 
 
-def calculate_event_percentage(event_mask: pl.DataFrame) -> pl.DataFrame:
+def calculate_event_percentage(event_mask: pl.DataFrame) -> float:
     """
     Calculates the percentage of events occurring within a specified window.
 
@@ -99,7 +99,7 @@ def calculate_event_percentage(event_mask: pl.DataFrame) -> pl.DataFrame:
         event_mask (pl.DataFrame): The mask DataFrame indicating event occurrences.
 
     Returns:
-        pl.DataFrame: A DataFrame with the event percentage for each unique identifier.
+        float: The percentage of events in the mask.
     """
     # Calculate the event percentage
     event_count = event_mask.filter(pl.col("event_mask")).height
