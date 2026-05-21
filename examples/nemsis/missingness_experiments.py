@@ -15,7 +15,7 @@ df_filtered = df.with_columns(
     pl.col("clock").min().over("PcrKey").alias("_start_clock")
 ).with_columns(
     ((pl.col("clock") - pl.col("_start_clock")).dt.total_minutes()).alias("_minutes_from_start")
-).filter(pl.col("_minutes_from_start") <= 30).drop(["_start_clock", "_minutes_from_start"])
+).filter(pl.col("_minutes_from_start") <= 120).drop(["_start_clock", "_minutes_from_start"])
 
 valid_keys = (
     df_filtered.group_by("PcrKey")
@@ -58,19 +58,30 @@ print(
     .sort("variable")
 )
 
+# All pairwise rho values (including non-selected pairs)
+print("\n=== Intravariable: all axis-pair correlations (rho) ===")
+for var, corr_tbl in imp.intravariable.results.iv_pairwise_correlations.items():
+    print(f"\n-- variable: {var} --")
+    print(corr_tbl.sort("abs_corr"))
+
 intra_scores = intra_scores.join(labels, on="PcrKey", how="left")
 
 def intra_dist(df: pl.DataFrame, title: str) -> None:
-    total = len(df.filter(pl.col("imperfection_stratum").is_not_null()))
+    df = df.filter(pl.col("imperfection_stratum").is_not_null())
     dist = (
-        df.filter(pl.col("imperfection_stratum").is_not_null())
-        .group_by(["variable", "imperfection_stratum"])
+        df.group_by(["variable", "imperfection_stratum"])
         .agg(pl.len().alias("n"))
-        .with_columns((pl.col("n") / total * 100).round(1).alias("pct"))
+        .with_columns(
+            (pl.col("n") / pl.col("n").sum().over("variable") * 100)
+            .round(1)
+            .alias("pct")
+        )
         .sort(["variable", "imperfection_stratum"])
     )
-    print(f"\n=== Intravariable — {title} (n={total} case×variable pairs) ===")
-    print(dist)
+    for var, var_df in dist.group_by("variable", maintain_order=True):
+        var_total = var_df["n"].sum()
+        print(f"\n=== Intravariable — {title} | variable={var[0]} (n={var_total}) ===")
+        print(var_df.drop("variable"))
 
 # %%
 intra_dist(intra_scores, "Full cohort")
@@ -92,6 +103,12 @@ print(
                          "axis_x_median_threshold", "axis_y_median_threshold"])
     .unique()
 )
+
+# All pairwise rho values (including non-selected pairs)
+print("\n=== Intervariable: all axis-pair correlations (rho) ===")
+inter_pair_corrs = imp.intervariable.results.iv_pairwise_correlations
+if inter_pair_corrs is not None:
+    print(inter_pair_corrs.sort("abs_corr"))
 
 inter_scores = inter_scores.join(labels, on="PcrKey", how="left")
 

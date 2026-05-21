@@ -339,19 +339,25 @@ def build_cohort(
     if unknown:
         raise ValueError(f"Unknown outcomes: {unknown}. Choose from {set(_OUTCOME_REGISTRY)}")
 
+    def _log(label: str, df: pl.DataFrame) -> None:
+        print(f"  {df['stay_id'].n_unique():>7,}  stay_ids  │  {label}")
+
     # Collect outcome DataFrames; each covers only the stays it can evaluate
     outcome_dfs: dict[str, pl.DataFrame] = {}
     for outcome in outcomes:
         col_name, extractor = _OUTCOME_REGISTRY[outcome]
         outcome_dfs[col_name] = extractor()
+        _log(f"outcome extractor: {col_name}", outcome_dfs[col_name])
 
     # Restrict to stays present in every outcome (intersection)
     eligible_stay_ids: set[int] = set(outcome_dfs[next(iter(outcome_dfs))]["stay_id"].to_list())
     for df in outcome_dfs.values():
         eligible_stay_ids &= set(df["stay_id"].to_list())
+    print(f"  {len(eligible_stay_ids):>7,}  stay_ids  │  after outcome intersection")
 
     # Filter vitalsigns to eligible stays, optionally truncating to a time window
     vitalsigns = _load_vitalsigns().filter(pl.col("stay_id").is_in(list(eligible_stay_ids)))
+    _log("vitalsigns with any measurement", vitalsigns)
     if window_hours is not None:
         stay_intimes = _load_edstays().select("stay_id", "intime")
         vitalsigns = (
@@ -359,11 +365,13 @@ def build_cohort(
             .filter(pl.col("charttime") <= pl.col("intime") + pl.duration(hours=window_hours))
             .drop("intime")
         )
+        _log(f"after truncation to {window_hours}h window", vitalsigns)
 
     if min_observations is not None:
         sufficient = vitalsigns.filter(
             pl.col("stay_id").count().over("stay_id") >= min_observations
         )
+        _log(f"after min_observations >= {min_observations}", sufficient)
     else:
         sufficient = vitalsigns
 
@@ -377,6 +385,7 @@ def build_cohort(
         )
         <= max_missingness
     )
+    _log(f"after max_missingness <= {max_missingness}", sufficient)
 
     cohort = sufficient
     for col_name, outcome_df in outcome_dfs.items():
@@ -388,6 +397,7 @@ def build_cohort(
 
     demographics = extract_demographics().select("stay_id", "age_at_visit", "sex")
     cohort = cohort.join(demographics, on="stay_id", how="left")
+    _log("final cohort (with outcomes + demographics)", cohort)
 
     return cohort
 

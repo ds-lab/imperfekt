@@ -1108,10 +1108,15 @@ class IntervariableImperfection:
                 return float("nan"), n
             return float(spearmanr(x, y).statistic), n
 
+        # Axis selection and median computation are done on imperfect cases only.
+        # Q_complete cases (avg_indicated_vars_pct == 0) are structurally excluded from
+        # quadrant assignment and would bias the median thresholds if included.
+        imperfect_base = base.filter(pl.col("avg_indicated_vars_pct") > 0)
+
         corr_rows = []
-        present_axes = [a for a in candidate_axes if a in base.columns]
+        present_axes = [a for a in candidate_axes if a in imperfect_base.columns]
         for ax_x, ax_y in itertools.combinations(present_axes, 2):
-            corr, n_complete = _pair_corr(base, ax_x, ax_y)
+            corr, n_complete = _pair_corr(imperfect_base, ax_x, ax_y)
             corr_rows.append(
                 {
                     "axis_1": ax_x,
@@ -1144,7 +1149,7 @@ class IntervariableImperfection:
             )
 
         complete_mask = pl.col(axis_x).is_not_null() & pl.col(axis_y).is_not_null()
-        complete_df = base.filter(complete_mask)
+        complete_df = imperfect_base.filter(complete_mask)
 
         scores = base.clone()
         if complete_df.height < 2:

@@ -21,7 +21,7 @@ df_filtered = df.with_columns(
     pl.col("clock").min().over("PcrKey").alias("_start_clock")
 ).with_columns(
     ((pl.col("clock") - pl.col("_start_clock")).dt.total_minutes()).alias("_minutes_from_start")
-).filter(pl.col("_minutes_from_start") <= 30).drop(["_start_clock", "_minutes_from_start"])
+).filter(pl.col("_minutes_from_start") <= 120).drop(["_start_clock", "_minutes_from_start"])
 
 valid_keys = (
     df_filtered.group_by("PcrKey")

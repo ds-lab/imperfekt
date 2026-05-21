@@ -20,8 +20,15 @@ else:
         events_df = pl.read_parquet(f)
     with fs.open(f"{S3_BASE}/vitals.parquet") as f:
         vitals_df = pl.read_parquet(f)
+    def _log(label: str, df: pl.DataFrame) -> None:
+        print(f"  {df['PcrKey'].n_unique():>9,}  PcrKeys  │  {label}")
+
+    _log("all events loaded", events_df)
+
     # Only 911 calls, emergency resonses
     call_df = events_df.filter(pl.col("eResponse_05").is_in(["2205001", "2205003", "2205009"]))
+    _log("after 911/emergency response filter (eResponse_05)", call_df)
+
     # Class 1: critically ill / ICU-level destinations.
     icu_codes = [
         "4222013",  # ICU
@@ -49,12 +56,18 @@ else:
         .cast(pl.Int8)
         .alias("label"),
     )
+    _log("after destination filter (ICU or ward codes)", binary_df)
+
     # Filter out underage patients
     binary_df = binary_df.filter(pl.col("ePatient_15") >= 18.0)
+    _log("after age >= 18 filter", binary_df)
+
     # Select necessary columns for joining and modeling
     binary_df = binary_df.select(["PcrKey", "label"])
     # join on PcrKey
     df = binary_df.join(vitals_df, on="PcrKey", how="inner")
+    _log("after inner join with vitals", df)
+
     df = df.rename(
         {
             "eVitals_01": "clock",
@@ -68,6 +81,7 @@ else:
     date_df = df.with_columns(
         pl.col("clock").str.to_datetime("  %d%b%Y:%H:%M:%S", strict=False).alias("clock")
     ).filter(pl.col("clock").is_not_null())
+    _log("after clock parse (drop unparseable timestamps)", date_df)
 
     # per vital turn the codes into None
     PERTINENT_NEGATIVE_CODES = [8801019, 8801023, 7701001, 7701003, 8801005]
@@ -89,10 +103,13 @@ else:
         .otherwise(pl.col("rr"))
         .alias("rr"),
     )
+    _log("final cohort (pertinent negatives recoded to null)", date_df)
+
     date_df.write_parquet(Path("/workspaces/imperfekt/data/nemsis/destinations.parquet"))
     df = date_df
-# %% count unique PCR keys by label to see how many patients we have in each class
-df.group_by("label").agg(pl.col("PcrKey").n_unique())
+# %% cohort size summary (always runs; per-step counts print only on fresh build)
+print(f"  {df['PcrKey'].n_unique():>9,}  PcrKeys  │  final cohort (loaded from cache or built fresh)")
+print(df.group_by("label").agg(pl.col("PcrKey").n_unique().alias("n_PcrKeys")).sort("label"))
 # %% describe number of unique clock values per PCR key to get a sense of how many time points we have per patient
 df.group_by("PcrKey").agg(pl.col("clock").n_unique().alias("num_time_points")).describe()
 
@@ -102,8 +119,8 @@ df.group_by("PcrKey").agg((pl.col("clock").max() - pl.col("clock").min()).alias(
 ).describe()
 
 # %% get class distribution for different lengths (10,20,30 minutes) and minimum count of vitals per patient
-thresholds = [10, 20, 30]
-min_vitals = [2, 3, 5]
+thresholds = [10, 20, 30, 45, 60, 120, 99999]
+min_vitals = [3, 5, 8, 10]
 
 # Attach each patient's first clock so we can compute per-row offset
 df_with_start = df.with_columns(
@@ -113,18 +130,17 @@ df_with_start = df.with_columns(
 )
 
 for t in thresholds:
-    # Count vitals within the window [0, t] minutes from first reading
     patient_stats = (
         df_with_start.filter(pl.col("minutes_from_start") <= t)
         .group_by("PcrKey")
         .agg(
-            pl.col("clock").count().alias("num_vitals"),
+            pl.len().alias("num_vitals"),
             pl.col("label").first().alias("label"),
         )
     )
     for min_v in min_vitals:
         cohort = patient_stats.filter(pl.col("num_vitals") >= min_v)
         dist = cohort.group_by("label").agg(pl.len().alias("n")).sort("label")
-        print(f"duration >= {t}min, vitals >= {min_v}: {dist.to_dicts()}")
+        print(f"window <= {t}min, vitals >= {min_v}: {dist.to_dicts()}")
 
 # %%

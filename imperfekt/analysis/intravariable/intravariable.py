@@ -788,16 +788,15 @@ class IntravariableImperfection:
             p11, on=[self.id_col, "variable"], how="left"
         )
 
+        # Only axes that are structurally defined for every imperfect case (indicated_pct > 0).
+        # Axes derived from gap length distributions (gap_cv, gap_qcod, gap_burstiness_coeff,
+        # gap_onset_cv, mc_p11) require multiple gaps and are null for cases with only one gap,
+        # making them unsuitable for axis selection across the full imperfect population.
         candidate_axes = [
             "indicated_pct",
-            "gap_cv",
-            "gap_qcod",
-            "gap_burstiness_coeff",
             "gap_adherence_rate",
             "gap_normalized_entropy",
             "max_gap_fraction",
-            "gap_onset_cv",
-            "mc_p11",
         ]
 
         def _pair_corr(df: pl.DataFrame, col_x: str, col_y: str) -> tuple:
@@ -817,12 +816,17 @@ class IntravariableImperfection:
         for var in self.cols:
             var_df = base.filter(pl.col("variable") == var)
 
+            # Axis selection and median computation are done on imperfect cases only.
+            # Q_complete cases (indicated_pct == 0) are structurally excluded from quadrant
+            # assignment and would bias the median thresholds if included.
+            imperfect_df = var_df.filter(pl.col("indicated_pct") > 0)
+
             # Build pairwise correlation table for this variable
             corr_rows = []
-            present_axes = [a for a in candidate_axes if a in var_df.columns]
+            present_axes = [a for a in candidate_axes if a in imperfect_df.columns]
             for i, ax_x in enumerate(present_axes):
                 for ax_y in present_axes[i + 1 :]:
-                    corr, n_complete = _pair_corr(var_df, ax_x, ax_y)
+                    corr, n_complete = _pair_corr(imperfect_df, ax_x, ax_y)
                     corr_rows.append(
                         {
                             "axis_1": ax_x,
@@ -847,7 +851,7 @@ class IntravariableImperfection:
                 selected_corr = float(selected["corr"])
             else:
                 axis_x = "indicated_pct"
-                axis_y = "gap_cv"
+                axis_y = "gap_normalized_entropy"
                 selected_corr = float("nan")
                 pretty_printing.rich_warning(
                     f"[{var}] Could not compute pairwise correlations for axis selection. "
@@ -855,7 +859,7 @@ class IntravariableImperfection:
                 )
 
             complete_mask = pl.col(axis_x).is_not_null() & pl.col(axis_y).is_not_null()
-            complete_df = var_df.filter(complete_mask)
+            complete_df = imperfect_df.filter(complete_mask)
 
             scores = var_df.clone()
             if complete_df.height < 2:
