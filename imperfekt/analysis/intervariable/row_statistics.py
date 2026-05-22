@@ -318,12 +318,12 @@ def compute_case_intervariable_metrics(
             pl.col("_n_imperfect_rows").first().alias("_n_imperfect_rows"),
         )
         .with_columns(
-            pl.when((pl.col("_n_imperfect_rows") >= 2) & (pl.col("_n_unique_patterns") > 1))
+            pl.when((pl.col("_n_imperfect_rows") >= 1) & (pl.col("_n_unique_patterns") > 1))
             .then(
                 pl.col("_entropy_bits")
                 / pl.col("_n_unique_patterns").cast(pl.Float64).log(base=2.0)
             )
-            .when(pl.col("_n_imperfect_rows") >= 2)
+            .when(pl.col("_n_imperfect_rows") >= 1)
             .then(pl.lit(0.0))
             .otherwise(None)
             .alias("pattern_entropy")
@@ -356,7 +356,7 @@ def compute_case_intervariable_metrics(
         ).with_columns(
             pl.when(pl.col(min_col) > 0)
             .then(pl.col(co_col).cast(pl.Float64) / pl.col(min_col).cast(pl.Float64))
-            .otherwise(None)
+            .otherwise(pl.lit(0.0))
             .alias(overlap_col)
         )
         overlap_exprs.append(overlap_col)

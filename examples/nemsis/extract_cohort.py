@@ -4,17 +4,20 @@ from pathlib import Path
 import polars as pl
 import s3fs
 
+from config import YEAR, COHORT_PATH
+
 pl.Config.set_tbl_cols(100)
 pl.Config.set_tbl_rows(100)
 
-S3_BASE = "ewai/data/nemsis/2024/raw_parquet"
+
+S3_BASE = f"ewai/data/nemsis/{YEAR}/raw_parquet"
 fs = s3fs.S3FileSystem(
     endpoint_url="https://s3.storage.ds-lab.org",
     profile="seaweedfs",
 )
 
-if Path("/workspaces/imperfekt/data/nemsis/destinations.parquet").exists():
-    df = pl.read_parquet(Path("/workspaces/imperfekt/data/nemsis/destinations.parquet"))
+if Path(COHORT_PATH).exists():
+    df = pl.read_parquet(Path(COHORT_PATH))
 else:
     with fs.open(f"{S3_BASE}/pcr_events.parquet") as f:
         events_df = pl.read_parquet(f)
@@ -105,10 +108,22 @@ else:
     )
     _log("final cohort (pertinent negatives recoded to null)", date_df)
 
-    date_df.write_parquet(Path("/workspaces/imperfekt/data/nemsis/destinations.parquet"))
+    date_df = date_df.sort(["PcrKey", "clock"]).unique(subset=["PcrKey", "clock"], keep="first", maintain_order=True)
+    _log("after deduplication (first per PcrKey+clock)", date_df)
+
+    date_df = date_df.filter(
+        ~(
+            pl.col("sbp").is_null()
+            & pl.col("hr").is_null()
+            & pl.col("o2sat").is_null()
+            & pl.col("rr").is_null()
+        )
+    )
+    _log("after dropping all-null vital rows", date_df)
+
+    date_df.write_parquet(Path(COHORT_PATH))
     df = date_df
-# %% deduplicate: keep first row per (PcrKey, clock) — must happen before any filtering
-df = df.sort(["PcrKey", "clock"]).unique(subset=["PcrKey", "clock"], keep="first", maintain_order=True)
+# %%
 
 # %% cohort size summary (always runs; per-step counts print only on fresh build)
 print(f"  {df['PcrKey'].n_unique():>9,}  PcrKeys  │  final cohort (loaded from cache or built fresh)")

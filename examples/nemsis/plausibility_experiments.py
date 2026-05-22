@@ -5,6 +5,7 @@ from typing import TypedDict
 import polars as pl
 
 from imperfekt import Imperfekt
+from config import COHORT_PATH
 
 pl.Config.set_tbl_cols(8)
 
@@ -14,14 +15,14 @@ class Modus(TypedDict):
     missing_as: str
     ranges: bool
 
-df = pl.read_parquet(Path("/workspaces/imperfekt/data/nemsis/destinations.parquet"))
+df = pl.read_parquet(Path(COHORT_PATH))
 
 # %%
 df_filtered = df.with_columns(
     pl.col("clock").min().over("PcrKey").alias("_start_clock")
 ).with_columns(
     ((pl.col("clock") - pl.col("_start_clock")).dt.total_minutes()).alias("_minutes_from_start")
-).filter(pl.col("_minutes_from_start") <= 120).drop(["_start_clock", "_minutes_from_start"])
+).filter(pl.col("_minutes_from_start") <= 30).drop(["_start_clock", "_minutes_from_start"])
 
 valid_keys = (
     df_filtered.group_by("PcrKey")
