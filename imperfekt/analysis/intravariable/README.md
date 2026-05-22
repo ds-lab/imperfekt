@@ -371,21 +371,34 @@ Assigns each (case × variable) pair to one of five imperfection strata, enablin
 
 #### Candidate Axes (per case, per variable)
 
-| Metric | Captures |
-|--------|----------|
-| `indicated_pct` | Overall missingness burden |
-| `gap_cv` | CV of gap lengths |
-| `gap_qcod` | Quartile CoD of gap lengths (robust analog to CV) |
-| `gap_burstiness_coeff` | Goh & Barabási burstiness of gap lengths [[4]](#references) |
-| `gap_adherence_rate` | Fraction of gaps near the case's own dominant gap length (inverted: lower = more imperfect) |
-| `gap_normalized_entropy` | Shannon entropy of the gap length distribution |
-| `max_gap_fraction` | Largest single gap as fraction of total observation window |
-| `gap_onset_cv` | CV of the spacing between consecutive gap start times |
-| `mc_p11` | Markov $P(1 \to 1)$: probability that imperfection persists into the next time step |
+All metrics below are computed per (case × variable). Only a subset is eligible for axis selection (see [Axis Selection](#axis-selection) below).
+
+| Metric | Captures | Min. gaps required |
+|--------|----------|--------------------|
+| `indicated_pct` | Overall missingness burden | — |
+| `gap_cv` | CV of gap lengths (std / mean) | ≥ 2 |
+| `gap_qcod` | Quartile CoD of gap lengths — robust analog to CV: $(Q_{75}-Q_{25})/(Q_{75}+Q_{25})$ | ≥ 4 |
+| `gap_burstiness_coeff` | Goh & Barabási burstiness of gap lengths [[4]](#references) | ≥ 3 |
+| `gap_adherence_rate` | Fraction of gaps near the case's own dominant gap length (inverted: lower = more imperfect) | ≥ 1 |
+| `gap_normalized_entropy` | Shannon entropy of the gap length distribution | ≥ 1 |
+| `max_gap_fraction` | Largest single gap as fraction of total observation window | ≥ 1 |
+| `gap_onset_cv` | CV of the spacing between consecutive gap start times | ≥ 3 |
+| `gap_missing_centroid` | Mean clock-position of missing ticks on the case–variable's normalized $[0, 1]$ observation timeline ($\approx 0$ = front-loaded, $\approx 0.5$ = symmetric, $\approx 1$ = back-loaded) | — |
+| `mc_p11` | Markov $P(1 \to 1)$: probability that imperfection persists into the next time step | — |
+
+> **Limitation — gaps at the start or end of a case's timeline**: `time_length` (gap duration in seconds) is `null` for any gap that has no preceding or following observation within the same case, i.e. the imperfect run starts at the very first record or ends at the very last record. Because there is no bracketing observation to anchor the gap boundary, its duration is undefined. All metrics that rely on `time_length` (`gap_cv`, `gap_qcod`, `gap_burstiness_coeff`, `gap_adherence_rate`, `gap_normalized_entropy`, `max_gap_fraction`, `gap_onset_cv`) therefore require at least one gap with a finite duration — those metrics are `null` for a case that has only boundary gaps or only a single gap with an undefined length.
 
 #### Axis Selection
 
-All pairwise Spearman rank correlations are computed across the candidate axes. The pair with the **lowest absolute correlation** (most orthogonal) is selected as the two stratification axes. Selection is performed independently per variable. The full correlation table is stored in `results.iv_pairwise_correlations`.
+Only the five axes that are structurally defined for every imperfect case are eligible for axis selection:
+
+- `indicated_pct`, `gap_adherence_rate`, `gap_normalized_entropy`, `max_gap_fraction`, `gap_missing_centroid`
+
+Axes derived from gap length distributions (`gap_cv`, `gap_qcod`, `gap_burstiness_coeff`, `gap_onset_cv`, `mc_p11`) require multiple gaps and produce `null` for cases with only one gap, making them unsuitable for axis selection across the full imperfect population. They are included in `iv_composite_scores` for reference but not used to split cases into quadrants.
+
+Before computing correlations, axes that are near-constant (more than 50 % of values equal to the median) are excluded for that variable, as they cannot meaningfully bisect the population.
+
+All pairwise Spearman rank correlations are computed across the eligible axes. The pair with the **lowest absolute correlation** (most orthogonal) is selected as the two stratification axes. Selection is performed independently per variable. The full correlation table is stored in `results.iv_pairwise_correlations`.
 
 #### Median Bisection
 

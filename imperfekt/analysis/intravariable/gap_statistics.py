@@ -445,6 +445,10 @@ def compute_case_gap_metrics(
         max_gap_fraction    : max_gap / total_observation_window; requires >= 1 gap
         gap_onset_cv        : CV of inter-onset intervals (spacing between gap start times);
                               requires min_gaps_onset gaps
+        gap_missing_centroid: mean clock-position of missing ticks on the (case, variable)'s
+                              normalized [0, 1] observation timeline. ~0 = front-loaded,
+                              ~0.5 = symmetric, ~1 = back-loaded. Each missing tick contributes
+                              its own clock; weight is implicit via tick count.
 
     Parameters:
         gaps_df (pl.DataFrame): Output of analyze_gap_lengths(), with columns
@@ -467,7 +471,14 @@ def compute_case_gap_metrics(
     # Only true gaps (count_clock_no > 0) and non-null time_length
     true_gaps = gaps_df.filter((pl.col("count_clock_no") > 0) & pl.col("time_length").is_not_null())
 
-    all_pairs = true_gaps.select([id_col, "variable"]).unique().sort([id_col, "variable"])
+    # all_pairs must cover every imperfect (id, variable) pair, not just those with finite-
+    # duration gaps. Cases whose only gaps are boundary gaps (time_length is null because
+    # the imperfect run starts at the first or ends at the last record) would be absent from
+    # true_gaps and therefore get no row at all after the assemble join — losing gap_missing_centroid
+    # even though the centroid computation doesn't depend on true_gaps.
+    all_pairs = (
+        gaps_df.select([id_col, "variable"]).unique().sort([id_col, "variable"])
+    )
 
     # --- Base stats: n_gaps, mean, std, q25, q75, max ---
     base = true_gaps.group_by([id_col, "variable"]).agg(
@@ -581,6 +592,38 @@ def compute_case_gap_metrics(
 
     entropy_result = case_entropy.select([id_col, "variable", "gap_normalized_entropy"])
 
+    # --- gap_missing_centroid: mean clock-position of missing ticks on the case-variable's
+    # normalized [0, 1] observation timeline. Each missing tick contributes its own clock,
+    # normalized by the (case, variable)'s observed [t_first, t_last] span.
+    # ~0 = front-loaded missingness, ~0.5 = symmetric, ~1 = back-loaded.
+    cols_in_mask = [c for c in mask_df.columns if c not in {id_col, clock_col} and not c.startswith("clock_no")]
+    mask_long = mask_df.unpivot(
+        index=[c for c in mask_df.columns if c in {id_col, clock_col}],
+        on=cols_in_mask,
+        variable_name="variable",
+        value_name="_is_missing",
+    )
+    obs_span = (
+        mask_long
+        .group_by([id_col, "variable"])
+        .agg(
+            pl.col(clock_col).min().alias("_t_first"),
+            pl.col(clock_col).max().alias("_t_last"),
+        )
+    )
+    centroid = (
+        mask_long.filter(pl.col("_is_missing") == 1)
+        .join(obs_span, on=[id_col, "variable"], how="inner")
+        .with_columns(
+            (pl.col(clock_col) - pl.col("_t_first")).dt.total_seconds().alias("_pos"),
+            (pl.col("_t_last") - pl.col("_t_first")).dt.total_seconds().alias("_span"),
+        )
+        .filter(pl.col("_span") > 0)
+        .with_columns((pl.col("_pos") / pl.col("_span")).alias("_norm"))
+        .group_by([id_col, "variable"])
+        .agg(pl.col("_norm").mean().alias("gap_missing_centroid"))
+    )
+
     # --- gap_onset_cv: CV of inter-onset intervals (gap start times) ---
     onset_cv = (
         true_gaps.sort([id_col, "variable", "run_start_clock"])
@@ -613,6 +656,7 @@ def compute_case_gap_metrics(
         .join(entropy_result, on=[id_col, "variable"], how="left")
         .join(adherence, on=[id_col, "variable"], how="left")
         .join(onset_cv, on=[id_col, "variable"], how="left")
+        .join(centroid, on=[id_col, "variable"], how="left")
         .select(
             [
                 id_col,
@@ -625,6 +669,7 @@ def compute_case_gap_metrics(
                 "gap_adherence_rate",
                 "max_gap_fraction",
                 "gap_onset_cv",
+                "gap_missing_centroid",
             ]
         )
         .sort([id_col, "variable"])

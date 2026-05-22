@@ -716,6 +716,8 @@ class IntravariableImperfection:
             gap_normalized_entropy: entropy of gap length distribution
             max_gap_fraction    : max gap / observation window
             gap_onset_cv        : CV of inter-onset intervals
+            gap_missing_centroid: tick-mean clock-position on normalized [0,1] timeline
+                                  (~0 front-loaded, ~0.5 symmetric, ~1 back-loaded)
             mc_p11              : Markov P(1→1) persistence probability
 
         Requires column_statistics() and gap_statistics() to have been run.
@@ -796,7 +798,8 @@ class IntravariableImperfection:
             "indicated_pct",
             "gap_adherence_rate",
             "gap_normalized_entropy",
-            "max_gap_fraction",
+          #  "max_gap_fraction",
+            "gap_missing_centroid",
         ]
 
         def _pair_corr(df: pl.DataFrame, col_x: str, col_y: str) -> tuple:
@@ -914,6 +917,7 @@ class IntravariableImperfection:
                     "gap_adherence_rate",
                     "max_gap_fraction",
                     "gap_onset_cv",
+                    "gap_missing_centroid",
                     "mc_p11",
                     "axis_x",
                     "axis_y",
