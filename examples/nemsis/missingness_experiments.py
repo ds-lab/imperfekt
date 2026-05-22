@@ -9,13 +9,22 @@ pl.Config.set_tbl_cols(8)
 pl.Config.set_tbl_rows(25)
 
 df = pl.read_parquet(Path("/workspaces/imperfekt/data/nemsis/destinations.parquet"))
-
+df = df.sort(["PcrKey", "clock"]).unique(subset=["PcrKey", "clock"], keep="first", maintain_order=True)
+# drop rows where all vitals are missing (these are likely to be "empty" rows that don't represent actual measurements)
+df = df.filter(
+    ~(
+        pl.col("sbp").is_null()
+        & pl.col("hr").is_null()
+        & pl.col("o2sat").is_null()
+        & pl.col("rr").is_null()
+    )
+)
 # %%
 df_filtered = df.with_columns(
     pl.col("clock").min().over("PcrKey").alias("_start_clock")
 ).with_columns(
     ((pl.col("clock") - pl.col("_start_clock")).dt.total_minutes()).alias("_minutes_from_start")
-).filter(pl.col("_minutes_from_start") <= 120).drop(["_start_clock", "_minutes_from_start"])
+).filter(pl.col("_minutes_from_start") <= 30).drop(["_start_clock", "_minutes_from_start"])
 
 valid_keys = (
     df_filtered.group_by("PcrKey")
@@ -28,6 +37,12 @@ df_filtered = df_filtered.join(valid_keys, on="PcrKey", how="inner")
 
 # label per PcrKey (constant within a case)
 labels = df_filtered.select(["PcrKey", "label"]).unique("PcrKey")
+
+print("=== Label prevalence per PcrKey ===")
+print(df_filtered.select(["PcrKey", "label"]).unique("PcrKey").group_by("label").agg(pl.len().alias("n_cases")).with_columns(
+    (pl.col("n_cases") / pl.col("n_cases").sum() * 100).round(1).alias("pct_cases")
+).sort("label"))
+print(df_filtered["PcrKey"].n_unique(), "unique PcrKeys")
 
 # %%
 imp = Imperfekt(
@@ -66,27 +81,28 @@ for var, corr_tbl in imp.intravariable.results.iv_pairwise_correlations.items():
 
 intra_scores = intra_scores.join(labels, on="PcrKey", how="left")
 
-def intra_dist(df: pl.DataFrame, title: str) -> None:
+def intra_dist(df: pl.DataFrame) -> None:
     df = df.filter(pl.col("imperfection_stratum").is_not_null())
     dist = (
         df.group_by(["variable", "imperfection_stratum"])
-        .agg(pl.len().alias("n"))
+        .agg(
+            pl.len().alias("n"),
+            (pl.col("label").sum() / pl.len() * 100).round(1).alias("label1_pct"),
+        )
         .with_columns(
             (pl.col("n") / pl.col("n").sum().over("variable") * 100)
             .round(1)
-            .alias("pct")
+            .alias("stratum_pct")
         )
         .sort(["variable", "imperfection_stratum"])
     )
     for var, var_df in dist.group_by("variable", maintain_order=True):
         var_total = var_df["n"].sum()
-        print(f"\n=== Intravariable — {title} | variable={var[0]} (n={var_total}) ===")
+        print(f"\n=== Intravariable | variable={var[0]} (n={var_total}) ===")
         print(var_df.drop("variable"))
 
 # %%
-intra_dist(intra_scores, "Full cohort")
-intra_dist(intra_scores.filter(pl.col("label") == 0), "Label = 0")
-intra_dist(intra_scores.filter(pl.col("label") == 1), "Label = 1")
+intra_dist(intra_scores)
 
 # ── Intervariable ────────────────────────────────────────────────────────────
 
@@ -112,19 +128,20 @@ if inter_pair_corrs is not None:
 
 inter_scores = inter_scores.join(labels, on="PcrKey", how="left")
 
-def inter_dist(df: pl.DataFrame, title: str) -> None:
-    total = len(df.filter(pl.col("intervariable_stratum").is_not_null()))
+def inter_dist(df: pl.DataFrame) -> None:
+    df = df.filter(pl.col("intervariable_stratum").is_not_null())
+    total = len(df)
     dist = (
-        df.filter(pl.col("intervariable_stratum").is_not_null())
-        .group_by("intervariable_stratum")
-        .agg(pl.len().alias("n"))
-        .with_columns((pl.col("n") / total * 100).round(1).alias("pct"))
+        df.group_by("intervariable_stratum")
+        .agg(
+            pl.len().alias("n"),
+            (pl.col("label").sum() / pl.len() * 100).round(1).alias("label1_pct"),
+        )
+        .with_columns((pl.col("n") / total * 100).round(1).alias("stratum_pct"))
         .sort("intervariable_stratum")
     )
-    print(f"\n=== Intervariable — {title} (n={total} cases) ===")
+    print(f"\n=== Intervariable (n={total} cases) ===")
     print(dist)
 
 # %%
-inter_dist(inter_scores, "Full cohort")
-inter_dist(inter_scores.filter(pl.col("label") == 0), "Label = 0")
-inter_dist(inter_scores.filter(pl.col("label") == 1), "Label = 1")
+inter_dist(inter_scores)

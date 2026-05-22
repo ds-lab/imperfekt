@@ -821,9 +821,23 @@ class IntravariableImperfection:
             # assignment and would bias the median thresholds if included.
             imperfect_df = var_df.filter(pl.col("indicated_pct") > 0)
 
-            # Build pairwise correlation table for this variable
+            # Build pairwise correlation table for this variable.
+            # Drop axes that are near-constant (std < 0.05) — they cannot meaningfully
+            # bisect the population and produce degenerate single-quadrant assignments.
             corr_rows = []
-            present_axes = [a for a in candidate_axes if a in imperfect_df.columns]
+            def _is_discriminating(df: pl.DataFrame, col: str, max_at_median: float = 0.5) -> bool:
+                s = df[col].cast(pl.Float64).drop_nulls()
+                if len(s) < 3:
+                    return False
+                median = s.median()
+                # reject axis if more than max_at_median fraction of values equal the median
+                frac_at_median = (s == median).sum() / len(s)
+                return float(frac_at_median) <= max_at_median
+
+            present_axes = [
+                a for a in candidate_axes
+                if a in imperfect_df.columns and _is_discriminating(imperfect_df, a)
+            ]
             for i, ax_x in enumerate(present_axes):
                 for ax_y in present_axes[i + 1 :]:
                     corr, n_complete = _pair_corr(imperfect_df, ax_x, ax_y)

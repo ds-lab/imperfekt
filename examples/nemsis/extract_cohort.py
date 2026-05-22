@@ -107,6 +107,9 @@ else:
 
     date_df.write_parquet(Path("/workspaces/imperfekt/data/nemsis/destinations.parquet"))
     df = date_df
+# %% deduplicate: keep first row per (PcrKey, clock) — must happen before any filtering
+df = df.sort(["PcrKey", "clock"]).unique(subset=["PcrKey", "clock"], keep="first", maintain_order=True)
+
 # %% cohort size summary (always runs; per-step counts print only on fresh build)
 print(f"  {df['PcrKey'].n_unique():>9,}  PcrKeys  │  final cohort (loaded from cache or built fresh)")
 print(df.group_by("label").agg(pl.col("PcrKey").n_unique().alias("n_PcrKeys")).sort("label"))
