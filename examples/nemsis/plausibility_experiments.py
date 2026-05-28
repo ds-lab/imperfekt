@@ -19,19 +19,19 @@ df = pl.read_parquet(Path(COHORT_PATH))
 
 # %%
 df_filtered = df.with_columns(
-    pl.col("clock").min().over("PcrKey").alias("_start_clock")
+    pl.col("clock").min().over("id").alias("_start_clock")
 ).with_columns(
     ((pl.col("clock") - pl.col("_start_clock")).dt.total_minutes()).alias("_minutes_from_start")
 ).filter(pl.col("_minutes_from_start") <= COHORT_WINDOW_MINUTES).drop(["_start_clock", "_minutes_from_start"])
 
 valid_keys = (
-    df_filtered.group_by("PcrKey")
+    df_filtered.group_by("id")
     .agg(pl.col("clock").count().alias("_num_vitals"))
     .filter(pl.col("_num_vitals") >= COHORT_MIN_READINGS)
-    .select("PcrKey")
+    .select("id")
 )
 
-df_filtered = df_filtered.join(valid_keys, on="PcrKey", how="inner")
+df_filtered = df_filtered.join(valid_keys, on="id", how="inner")
 
 # %%
 # Sanity check: actual value ranges in the filtered cohort
@@ -69,7 +69,7 @@ for modus in MODI:
     imp = Imperfekt(
         imperfection="plausibility",
         df=df_filtered,
-        id_col="PcrKey",
+        id_col="id",
         clock_col="clock",
         cols=["sbp", "hr", "o2sat", "rr"],
         save_path=None,

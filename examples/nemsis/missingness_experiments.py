@@ -12,34 +12,34 @@ pl.Config.set_tbl_rows(25)
 df = pl.read_parquet(Path(COHORT_PATH))
 # %%
 df_filtered = df.with_columns(
-    pl.col("clock").min().over("PcrKey").alias("_start_clock")
+    pl.col("clock").min().over("id").alias("_start_clock")
 ).with_columns(
     ((pl.col("clock") - pl.col("_start_clock")).dt.total_minutes()).alias("_minutes_from_start")
 ).filter(pl.col("_minutes_from_start") <= COHORT_WINDOW_MINUTES).drop(["_start_clock", "_minutes_from_start"])
 
 valid_keys = (
-    df_filtered.group_by("PcrKey")
+    df_filtered.group_by("id")
     .agg(pl.col("clock").count().alias("_num_vitals"))
     .filter(pl.col("_num_vitals") >= COHORT_MIN_READINGS)
-    .select("PcrKey")
+    .select("id")
 )
 
-df_filtered = df_filtered.join(valid_keys, on="PcrKey", how="inner")
+df_filtered = df_filtered.join(valid_keys, on="id", how="inner")
 
-# label per PcrKey (constant within a case)
-labels = df_filtered.select(["PcrKey", "label"]).unique("PcrKey")
+# label per id (constant within a case)
+labels = df_filtered.select(["id", "label"]).unique("id")
 
-print("=== Label prevalence per PcrKey ===")
-print(df_filtered.select(["PcrKey", "label"]).unique("PcrKey").group_by("label").agg(pl.len().alias("n_cases")).with_columns(
+print("=== Label prevalence per id ===")
+print(df_filtered.select(["id", "label"]).unique("id").group_by("label").agg(pl.len().alias("n_cases")).with_columns(
     (pl.col("n_cases") / pl.col("n_cases").sum() * 100).round(1).alias("pct_cases")
 ).sort("label"))
-print(df_filtered["PcrKey"].n_unique(), "unique PcrKeys")
+print(df_filtered["id"].n_unique(), "unique IDs")
 
 # %%
 imp = Imperfekt(
     imperfection="missingness",
     df=df_filtered,
-    id_col="PcrKey",
+    id_col="id",
     clock_col="clock",
     cols=["sbp", "hr", "o2sat", "rr"],
     save_path=None,
@@ -77,13 +77,13 @@ null_strata = intra_scores.filter(
 print(f"Imperfect cases with null stratum: {null_strata.height}")
 if null_strata.height > 0:
     print(null_strata.select([
-        "PcrKey", "variable", "indicated_pct",
+        "id", "variable", "indicated_pct",
         "max_gap_fraction", "gap_missing_centroid",
         "gap_normalized_entropy", "gap_adherence_rate",
         "axis_x", "axis_y", "imperfection_stratum",
     ]).head(20))
 
-intra_scores = intra_scores.join(labels, on="PcrKey", how="left")
+intra_scores = intra_scores.join(labels, on="id", how="left")
 
 def intra_dist(df: pl.DataFrame) -> None:
     df = df.filter(pl.col("imperfection_stratum").is_not_null())
@@ -135,7 +135,7 @@ inter_pair_corrs = imp.intervariable.results.iv_pairwise_correlations
 if inter_pair_corrs is not None:
     print(inter_pair_corrs.sort("abs_corr"))
 
-inter_scores = inter_scores.join(labels, on="PcrKey", how="left")
+inter_scores = inter_scores.join(labels, on="id", how="left")
 
 def inter_dist(df: pl.DataFrame) -> None:
     df = df.filter(pl.col("intervariable_stratum").is_not_null())

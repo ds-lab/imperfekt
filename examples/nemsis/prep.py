@@ -28,7 +28,7 @@ CONFIGS: dict[str, dict[str, str]] = {
 def filter_cohort(df: pl.DataFrame) -> pl.DataFrame:
     """Keep rows within the configured window and minimum reading count."""
     df_win = (
-        df.with_columns(pl.col("clock").min().over("PcrKey").alias("_start_clock"))
+        df.with_columns(pl.col("clock").min().over("id").alias("_start_clock"))
         .with_columns(
             ((pl.col("clock") - pl.col("_start_clock")).dt.total_minutes())
             .alias("_minutes_from_start")
@@ -37,25 +37,25 @@ def filter_cohort(df: pl.DataFrame) -> pl.DataFrame:
         .drop(["_start_clock", "_minutes_from_start"])
     )
     valid_keys = (
-        df_win.group_by("PcrKey")
+        df_win.group_by("id")
         .agg(pl.col("clock").len().alias("_n"))
         .filter(pl.col("_n") >= COHORT_MIN_READINGS)
-        .select("PcrKey")
+        .select("id")
     )
-    return df_win.join(valid_keys, on="PcrKey", how="inner")
+    return df_win.join(valid_keys, on="id", how="inner")
 
 
 def make_plausibility_mask(df: pl.DataFrame, method: str) -> pl.DataFrame:
     """Compute a frozen plausibility mask (IQR or MAD, pure statistical, no reference ranges).
 
-    Returns a DataFrame with columns PcrKey, clock, sbp, hr, o2sat, rr (Int8: 1=implausible).
+    Returns a DataFrame with columns id, clock, sbp, hr, o2sat, rr (Int8: 1=implausible).
     """
     if method not in ("iqr", "mad"):
         raise ValueError(f"method must be 'iqr' or 'mad', got {method!r}")
     threshold = 1.5 if method == "iqr" else 3.5
     return create_plausibility_mask(
         df,
-        id_col="PcrKey",
+        id_col="id",
         clock_col="clock",
         cols=VITAL_COLS,
         method=method,
@@ -92,7 +92,7 @@ def _apply_plausibility(df: pl.DataFrame, mask: pl.DataFrame, plaus: str) -> pl.
     # plaus == "remove": null out vitals where mask flag == 1
     mask_renamed = mask.rename({v: f"_m_{v}" for v in VITAL_COLS})
     return (
-        df.join(mask_renamed, on=["PcrKey", "clock"], how="left")
+        df.join(mask_renamed, on=["id", "clock"], how="left")
         .with_columns([
             pl.when(pl.col(f"_m_{v}") == 1).then(None).otherwise(pl.col(v)).alias(v)
             for v in VITAL_COLS
@@ -105,5 +105,5 @@ def _apply_imputation(df: pl.DataFrame, imp: str) -> pl.DataFrame:
     if imp == "none":
         return df
     # imp == "locf": forward-fill within patient, fall back to per-patient mean for leading nulls
-    df_out, _ = impute(df, cols=VITAL_COLS, strategy="locf", id_col="PcrKey", time_col="clock")
+    df_out, _ = impute(df, cols=VITAL_COLS, strategy="locf", id_col="id", time_col="clock")
     return df_out
