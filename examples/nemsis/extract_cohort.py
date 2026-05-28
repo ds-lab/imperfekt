@@ -4,7 +4,7 @@ from pathlib import Path
 import polars as pl
 import s3fs
 
-from config import S3_BASE, DATASET_NAME, NEMSIS_YEAR, COHORT_PATH, CLINICAL_ENDPOINT
+from config import S3_BASE, PATH, DATASET_NAME, NEMSIS_YEAR, COHORT_PATH, CLINICAL_ENDPOINT, COHORT_WINDOW_MINUTES, COHORT_MIN_READINGS
 from prep import filter_cohort
 
 pl.Config.set_tbl_cols(100)
@@ -16,7 +16,10 @@ fs = s3fs.S3FileSystem(
     profile="seaweedfs",
 )
 
-local = True
+local = False
+
+COHORT_PATH = Path(COHORT_PATH)
+COHORT_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 while(True):
     if Path(COHORT_PATH).exists():
@@ -37,8 +40,8 @@ while(True):
                 diagnosis_file_name = "FactPcreOutcomeHospDiag.parquet"
             elif NEMSIS_YEAR == "2024+2025":
                 # Check if COHORT_PATH exists for 2024 abd 2025, if not tell user to build those first since we need them both to build the combo.
-                path_2024 = f"/workspaces/imperfekt/data/nemsis/{CLINICAL_ENDPOINT}_2024.parquet"
-                path_2025 = f"/workspaces/imperfekt/data/nemsis/{CLINICAL_ENDPOINT}_2025.parquet"
+                path_2024 = f"{COHORT_PATH.parent}/{CLINICAL_ENDPOINT}_2024_{COHORT_WINDOW_MINUTES}_{COHORT_MIN_READINGS}.parquet"
+                path_2025 = f"{COHORT_PATH.parent}/{CLINICAL_ENDPOINT}_2025_{COHORT_WINDOW_MINUTES}_{COHORT_MIN_READINGS}.parquet"
                 if not Path(path_2024).exists():
                     raise FileNotFoundError(f"{path_2024} not found. Please build the 2024 cohort first.")
                 if not Path(path_2025).exists():
@@ -55,7 +58,7 @@ while(True):
                 print(f"Combined 2024 and 2025 cohorts and saved to {COHORT_PATH}")
                 break
             if local:
-                events_df = pl.read_parquet(f"/workspaces/imperfekt/data/nemsis/{NEMSIS_YEAR}/{events_file_name}", columns=["PcrKey", "eResponse_05", "eDisposition_22", "ePatient_15"])
+                events_df = pl.read_parquet(f"{PATH}/data/nemsis/{NEMSIS_YEAR}/{events_file_name}", columns=["PcrKey", "eResponse_05", "eDisposition_22", "ePatient_15"])
             else:
                 with fs.open(f"{S3_BASE}/{events_file_name}") as f:
                     events_df = pl.read_parquet(f).select(["PcrKey", "eResponse_05", "eDisposition_22", "ePatient_15"])
@@ -71,7 +74,7 @@ while(True):
             _log("after 911/emergency response filter (eResponse_05)", call_df, "PcrKey")
             if CLINICAL_ENDPOINT == "sepsis":
                 if local: 
-                    diagnosis_df = pl.read_parquet(f"/workspaces/imperfekt/data/nemsis/{NEMSIS_YEAR}/{diagnosis_file_name}")
+                    diagnosis_df = pl.read_parquet(f"{PATH}/data/nemsis/{NEMSIS_YEAR}/{diagnosis_file_name}")
                 else: 
                     with fs.open(f"{S3_BASE}/{diagnosis_file_name}") as f:
                         diagnosis_df = pl.read_parquet(f).select(["PcrKey", "eOutcome_13"]) 
@@ -124,7 +127,7 @@ while(True):
             binary_df = binary_df.select(["PcrKey", "label"])
 
             if local:
-                vitals_scan = pl.scan_parquet(f"/workspaces/imperfekt/data/nemsis/{NEMSIS_YEAR}/{vitals_file_name}")
+                vitals_scan = pl.scan_parquet(f"{PATH}/data/nemsis/{NEMSIS_YEAR}/{vitals_file_name}")
             else:
                 with fs.open(f"{S3_BASE}/{vitals_file_name}") as f:
                     vitals_scan = pl.scan_parquet(f)
@@ -229,5 +232,6 @@ for t in thresholds:
         cohort = patient_stats.filter(pl.col("num_vitals") >= min_v)
         dist = cohort.group_by("label").agg(pl.len().alias("n")).sort("label")
         print(f"window <= {t}min, vitals >= {min_v}: {dist.to_dicts()}")
+
 
 # %%
