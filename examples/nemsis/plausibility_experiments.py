@@ -5,7 +5,7 @@ from typing import TypedDict
 import polars as pl
 
 from imperfekt import Imperfekt
-from config import COHORT_PATH
+from config import COHORT_PATH, COHORT_MIN_READINGS, COHORT_WINDOW_MINUTES
 
 pl.Config.set_tbl_cols(8)
 
@@ -22,12 +22,12 @@ df_filtered = df.with_columns(
     pl.col("clock").min().over("PcrKey").alias("_start_clock")
 ).with_columns(
     ((pl.col("clock") - pl.col("_start_clock")).dt.total_minutes()).alias("_minutes_from_start")
-).filter(pl.col("_minutes_from_start") <= 30).drop(["_start_clock", "_minutes_from_start"])
+).filter(pl.col("_minutes_from_start") <= COHORT_WINDOW_MINUTES).drop(["_start_clock", "_minutes_from_start"])
 
 valid_keys = (
     df_filtered.group_by("PcrKey")
     .agg(pl.col("clock").count().alias("_num_vitals"))
-    .filter(pl.col("_num_vitals") >= 5)
+    .filter(pl.col("_num_vitals") >= COHORT_MIN_READINGS)
     .select("PcrKey")
 )
 
