@@ -10,9 +10,12 @@ from config import (
     COHORT_PATH,
     COHORT_WINDOW_MINUTES,
     DATASET_NAME,
+    FILTER_ALWAYS_NULL_VITALS,
     NEMSIS_YEAR,
     PATH,
+    REQUIRED_VITAL_COLS,
     S3_BASE,
+    VITAL_COLS,
 )
 from prep import filter_cohort
 
@@ -21,7 +24,6 @@ pl.Config.set_tbl_rows(100)
 
 LOCAL = False
 PERTINENT_NEGATIVE_CODES = [8801019, 8801023, 7701001, 7701003, 8801005]
-VITAL_COLS = ["sbp", "hr", "o2sat", "rr"]
 
 NEMSIS_FILES = {
     "2024": {
@@ -55,25 +57,40 @@ def _log(label: str, df: pl.DataFrame, id_key: str) -> None:
     print(f"  {df[id_key].n_unique():>9,}  {id_key}  │  {label}")
 
 
-def _read_parquet(file_name: str, columns: list[str] | None = None) -> pl.DataFrame:
-    if LOCAL:
-        return pl.read_parquet(f"{PATH}/data/{DATASET_NAME}/{NEMSIS_YEAR}/{file_name}", columns=columns)
+def _read_s3_parquet(file_name: str, columns: list[str] | None = None) -> pl.DataFrame:
     with fs.open(f"{S3_BASE}/{file_name}") as f:
         df = pl.read_parquet(f)
         return df.select(columns) if columns else df
 
 
-def _scan_parquet_vitals(file_name: str) -> pl.LazyFrame:
-    if LOCAL:
-        return pl.scan_parquet(f"{PATH}/data/{DATASET_NAME}/{NEMSIS_YEAR}/{file_name}")
+def _scan_s3_parquet(file_name: str) -> pl.LazyFrame:
     with fs.open(f"{S3_BASE}/{file_name}") as f:
         return pl.scan_parquet(f)
 
 
-def _build_combined_years() -> pl.DataFrame:
+def _nemsis_read_parquet(file_name: str, columns: list[str] | None = None) -> pl.DataFrame:
+    if LOCAL:
+        return pl.read_parquet(f"{PATH}/data/{DATASET_NAME}/{NEMSIS_YEAR}/{file_name}", columns=columns)
+    return _read_s3_parquet(file_name, columns=columns)
+
+
+def _nemsis_scan_vitals(file_name: str) -> pl.LazyFrame:
+    if LOCAL:
+        return pl.scan_parquet(f"{PATH}/data/{DATASET_NAME}/{NEMSIS_YEAR}/{file_name}")
+    return _scan_s3_parquet(file_name)
+
+
+def _apply_binary_label(df: pl.DataFrame, id_col: str, positive_ids: pl.DataFrame) -> pl.DataFrame:
+    """Left-join positive_ids (with a `label=1` column) onto df and fill missing labels with 0."""
+    return df.join(positive_ids, on=id_col, how="left").with_columns(
+        pl.col("label").fill_null(0).cast(pl.Int8)
+    )
+
+
+def _nemsis_build_combined_years() -> pl.DataFrame:
     """Concatenate prebuilt 2024 and 2025 cohorts with year-suffixed IDs."""
-    path_2024 = COHORT_PATH.parent / f"{CLINICAL_ENDPOINT}_2024_{COHORT_WINDOW_MINUTES}_{COHORT_MIN_READINGS}.parquet"
-    path_2025 = COHORT_PATH.parent / f"{CLINICAL_ENDPOINT}_2025_{COHORT_WINDOW_MINUTES}_{COHORT_MIN_READINGS}.parquet"
+    path_2024 = COHORT_PATH.parent / f"{CLINICAL_ENDPOINT}_2024_{COHORT_WINDOW_MINUTES}_{COHORT_MIN_READINGS}_{FILTER_ALWAYS_NULL_VITALS}.parquet"
+    path_2025 = COHORT_PATH.parent / f"{CLINICAL_ENDPOINT}_2025_{COHORT_WINDOW_MINUTES}_{COHORT_MIN_READINGS}_{FILTER_ALWAYS_NULL_VITALS}.parquet"
     for p in (path_2024, path_2025):
         if not p.exists():
             raise FileNotFoundError(f"{p} not found. Please build the {p.stem.split('_')[1]} cohort first.")
@@ -87,20 +104,18 @@ def _build_combined_years() -> pl.DataFrame:
     return pl.concat([df_2024, df_2025], how="vertical")
 
 
-def _label_sepsis(call_df: pl.DataFrame, diagnosis_file_name: str) -> pl.DataFrame:
-    diagnosis_df = _read_parquet(diagnosis_file_name, columns=["PcrKey", "eOutcome_13"])
+def _nemsis_label_sepsis(call_df: pl.DataFrame, diagnosis_file_name: str) -> pl.DataFrame:
+    diagnosis_df = _nemsis_read_parquet(diagnosis_file_name, columns=["PcrKey", "eOutcome_13"])
     sepsis_ids = (
         diagnosis_df.filter(pl.col("eOutcome_13").str.contains(r"^A41|^R65"))
         .select("PcrKey")
         .unique()
         .with_columns(pl.lit(1).alias("label"))
     )
-    return call_df.join(sepsis_ids, on="PcrKey", how="left").with_columns(
-        pl.col("label").fill_null(0).cast(pl.Int8)
-    )
+    return _apply_binary_label(call_df, "PcrKey", sepsis_ids)
 
 
-def _label_destination(call_df: pl.DataFrame) -> pl.DataFrame:
+def _nemsis_label_destination(call_df: pl.DataFrame) -> pl.DataFrame:
     # Class 1: critically ill / ICU-level destinations.
     icu_codes = [
         "4222013",  # ICU
@@ -125,9 +140,20 @@ def _label_destination(call_df: pl.DataFrame) -> pl.DataFrame:
     )
 
 
-def _load_vitals(vitals_file_name: str, keys: pl.DataFrame) -> pl.DataFrame:
+def _filter_always_null_vitals(df: pl.DataFrame, id_key: str) -> pl.DataFrame:
+    """Drop IDs where any one of REQUIRED_VITAL_COLS is null for every row of that ID."""
+    keep_ids = (
+        df.group_by(id_key)
+        .agg([pl.col(c).is_not_null().any().alias(c) for c in REQUIRED_VITAL_COLS])
+        .filter(pl.all_horizontal([pl.col(c) for c in REQUIRED_VITAL_COLS]))
+        .select(id_key)
+    )
+    return df.join(keep_ids, on=id_key, how="semi")
+
+
+def _nemsis_load_vitals(vitals_file_name: str, keys: pl.DataFrame) -> pl.DataFrame:
     return (
-        _scan_parquet_vitals(vitals_file_name)
+        _nemsis_scan_vitals(vitals_file_name)
         .select(["PcrKey", "eVitals_01", "eVitals_06", "eVitals_10", "eVitals_12", "eVitals_14"])
         .join(keys.lazy().select("PcrKey"), on="PcrKey", how="semi")
         .rename({
@@ -155,13 +181,13 @@ def _load_vitals(vitals_file_name: str, keys: pl.DataFrame) -> pl.DataFrame:
 
 def _build_nemsis_cohort() -> pl.DataFrame:
     if NEMSIS_YEAR == "2024+2025":
-        return _build_combined_years()
+        return _nemsis_build_combined_years()
 
     if NEMSIS_YEAR not in NEMSIS_FILES:
         raise ValueError(f"Unsupported NEMSIS_YEAR: {NEMSIS_YEAR}")
     files = NEMSIS_FILES[NEMSIS_YEAR]
 
-    events_df = _read_parquet(
+    events_df = _nemsis_read_parquet(
         files["events"],
         columns=["PcrKey", "eResponse_05", "eDisposition_22", "ePatient_15"],
     )
@@ -172,10 +198,10 @@ def _build_nemsis_cohort() -> pl.DataFrame:
     _log("after 911/emergency response filter (eResponse_05)", call_df, "PcrKey")
 
     if CLINICAL_ENDPOINT == "sepsis":
-        binary_df = _label_sepsis(call_df, files["diagnosis"])
+        binary_df = _nemsis_label_sepsis(call_df, files["diagnosis"])
         _log("after sepsis label join", binary_df, "PcrKey")
     elif CLINICAL_ENDPOINT == "destination":
-        binary_df = _label_destination(call_df)
+        binary_df = _nemsis_label_destination(call_df)
         _log("after destination filter (ICU or ward codes)", binary_df, "PcrKey")
     else:
         raise ValueError(f"Unsupported CLINICAL_ENDPOINT: {CLINICAL_ENDPOINT}")
@@ -185,10 +211,14 @@ def _build_nemsis_cohort() -> pl.DataFrame:
 
     binary_df = binary_df.select(["PcrKey", "label"])
 
-    vitals_df = _load_vitals(files["vitals"], binary_df)
+    vitals_df = _nemsis_load_vitals(files["vitals"], binary_df)
     _log("after clock parse + pertinent-negative recode + dedup + null row filtering", vitals_df, "PcrKey")
     vitals_df = vitals_df.rename({"PcrKey": "id"})
     binary_df = binary_df.rename({"PcrKey": "id"})
+
+    if FILTER_ALWAYS_NULL_VITALS:
+        vitals_df = _filter_always_null_vitals(vitals_df, "id")
+        _log("after dropping IDs with any always-null required vital column", vitals_df, "id")
 
     vitals_df = filter_cohort(vitals_df)
     _log("after filtering to cohort window and min readings", vitals_df, "id")
@@ -200,33 +230,33 @@ def _build_nemsis_cohort() -> pl.DataFrame:
     _log("final cohort (after inner join with vitals)", df, "id")
     return df
 
+
 def _build_mcmed_cohort() -> pl.DataFrame:
-    files = MCMED_FILES
     if LOCAL:
         raise NotImplementedError("Local loading not implemented for MCMED yet.")
-    else:
-        with fs.open(f"{S3_BASE}/{files['visits']}") as f:
-            visits_df = pl.read_parquet(f)
-            _log("all visits loaded", visits_df, "CSN")
-        with fs.open(f"{S3_BASE}/{files['vitals']}") as f:
-            measures = ["SpO2", "Perf", "SBP", "DBP", "MAP", "HR", "RR", "1min_HRV", "5min_HRV"]
-            vitals_df = (
-                pl.scan_parquet(f)
-                .filter((pl.col("Source") == "Monitor") & pl.col("Measure").is_in(measures))
-                .collect()
-                .pivot(
-                    on="Measure",
-                    index=["CSN", "Time"],
-                    values="Value",
-                    aggregate_function="max",
-                )
-                .sort(["CSN", "Time"])
-            )
-            _log("all vitals loaded", vitals_df, "CSN")
-            
+    files = MCMED_FILES
+
+    visits_df = _read_s3_parquet(files["visits"])
+    _log("all visits loaded", visits_df, "CSN")
+
+    measures = ["SpO2", "Perf", "SBP", "DBP", "MAP", "HR", "RR", "1min_HRV", "5min_HRV"]
+    vitals_df = (
+        _scan_s3_parquet(files["vitals"])
+        .filter((pl.col("Source") == "Monitor") & pl.col("Measure").is_in(measures))
+        .collect()
+        .pivot(
+            on="Measure",
+            index=["CSN", "Time"],
+            values="Value",
+            aggregate_function="max",
+        )
+        .sort(["CSN", "Time"])
+    )
+    _log("all vitals loaded", vitals_df, "CSN")
+
     visits_df = visits_df.filter(pl.col("Age") >= 18)
     _log("after age >= 18 filter", visits_df, "CSN")
-    
+
     if CLINICAL_ENDPOINT == "sepsis":
         def _parse_icd_cell(value: str | None) -> list[str]:
             if not value or not value.strip():
@@ -240,50 +270,49 @@ def _build_mcmed_cohort() -> pl.DataFrame:
                 for p in ["A41", "R65"]
             )
 
-        matched_ids = (
+        positive_ids = (
             visits_df.filter(pl.col("Dx_ICD10").map_elements(matches, return_dtype=pl.Boolean))
             .select("CSN")
             .unique()
             .with_columns(pl.lit(1).alias("label"))
         )
-        visits_df = visits_df.join(matched_ids, on="CSN", how="left").with_columns(
-            pl.col("label").fill_null(0).cast(pl.Int8)
-        )
+        visits_df = _apply_binary_label(visits_df, "CSN", positive_ids)
         _log("after sepsis label join", visits_df, "CSN")
 
     elif CLINICAL_ENDPOINT == "destination":
-        icu_admission_ids = (
+        positive_ids = (
             visits_df.filter(pl.col("ED_dispo") == "ICU")
             .select("CSN")
             .unique()
             .with_columns(pl.lit(1).alias("label"))
         )
-        visits_df = visits_df.join(icu_admission_ids, on="CSN", how="left").with_columns(
-            pl.col("label").fill_null(0).cast(pl.Int8)
-        )
+        visits_df = _apply_binary_label(visits_df, "CSN", positive_ids)
         _log("after destination label join", visits_df, "CSN")
     else:
         raise ValueError(f"Unsupported CLINICAL_ENDPOINT: {CLINICAL_ENDPOINT}")
 
-    vitals_df = vitals_df.rename({"CSN": "id", "Time": "clock", "SBP": "sbp", "HR": "hr", "SpO2": "o2sat", "RR": "rr"})    
-    
-    vitals_df = vitals_df.with_columns(pl.col("clock").str.to_datetime("%Y-%m-%dT%H:%M:%SZ", strict=False))
-    vitals_df = vitals_df.filter(pl.col("clock").is_not_null())
-    # remove rows that are all null across the vital sign columns
-    vitals_df = vitals_df.filter(~pl.all_horizontal(pl.col(c).is_null() for c in VITAL_COLS))
-    _log("after clock parse", vitals_df, "id")
-    
+    vitals_df = (
+        vitals_df.rename({"CSN": "id", "Time": "clock", "SBP": "sbp", "HR": "hr", "SpO2": "o2sat", "RR": "rr"})
+        .with_columns(pl.col("clock").str.to_datetime("%Y-%m-%dT%H:%M:%SZ", strict=False))
+        .filter(pl.col("clock").is_not_null())
+        .filter(~pl.all_horizontal(pl.col(c).is_null() for c in VITAL_COLS))
+    )
+    _log("after clock parse + null row filtering", vitals_df, "id")
+
+    if FILTER_ALWAYS_NULL_VITALS:
+        vitals_df = _filter_always_null_vitals(vitals_df, "id")
+        _log("after dropping IDs with any always-null required vital column", vitals_df, "id")
+
     vitals_df = filter_cohort(vitals_df)
     _log("after filtering to cohort window and min readings", vitals_df, "id")
-    
+
     df = (
         visits_df.select(["CSN", "label"])
         .rename({"CSN": "id"})
         .join(vitals_df, on="id", how="inner")
-        .select(["id", "clock", "sbp", "hr", "o2sat", "rr", "label"])
+        .select(["id", "clock", "label", *VITAL_COLS])
     )
     _log("after inner join with vitals", df, "id")
-    
     return df
 
 

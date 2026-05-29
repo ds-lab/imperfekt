@@ -39,7 +39,6 @@ from examples.mimic_iv_ed.cv import (  # noqa: E402
     run_cv,
     save_cv_results,
     save_feature_distribution_by_outcome,
-    save_feature_distribution_by_quadrant_cv,
     summarise_cv,
 )
 from examples.mimic_iv_ed.extract_cohort import build_cohort  # noqa: E402
@@ -104,7 +103,11 @@ def main() -> None:
 
     print(f"\nRunning {CV_N_SPLITS}×{CV_N_REPEATS} repeated stratified k-fold CV — Pipeline B…")
     folds_b, last_model_b, last_X_test_b, last_test_df_b, feat_cols_b, last_test_strata_b = run_cv(
-        stay_b, case_metrics, axes, "PipelineB"
+        stay_b,
+        case_metrics,
+        axes,
+        "PipelineB",
+        feature_distribution_save_path=RESULTS_DIR / "feature_distribution_by_quadrant_cv.csv",
     )
     summary_b = summarise_cv(folds_b, "PipelineB")
 
@@ -136,16 +139,6 @@ def main() -> None:
     save_feature_distribution_by_outcome(
         stay_b,
         RESULTS_DIR / "feature_distribution_by_outcome.csv",
-    )
-
-    print(
-        "\nSaving feature distribution table split by irregularity quadrant (Pipeline B feature space)…"
-    )
-    save_feature_distribution_by_quadrant_cv(
-        stay_b,
-        case_metrics,
-        axes,
-        RESULTS_DIR / "feature_distribution_by_quadrant_cv.csv",
     )
 
     print("\nPlotting AUPRC by stratum…")

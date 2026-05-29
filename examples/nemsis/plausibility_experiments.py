@@ -5,7 +5,7 @@ from typing import TypedDict
 import polars as pl
 
 from imperfekt import Imperfekt
-from config import COHORT_PATH, COHORT_MIN_READINGS, COHORT_WINDOW_MINUTES
+from config import COHORT_PATH, COHORT_MIN_READINGS, COHORT_WINDOW_MINUTES, VITAL_COLS
 
 pl.Config.set_tbl_cols(8)
 
@@ -35,7 +35,7 @@ df_filtered = df_filtered.join(valid_keys, on="id", how="inner")
 
 # %%
 # Sanity check: actual value ranges in the filtered cohort
-print(df_filtered.select(["sbp", "hr", "o2sat", "rr"]).describe())
+print(df_filtered.select(VITAL_COLS).describe())
 
 # %%
 REFERENCE_RANGES = {
@@ -71,7 +71,7 @@ for modus in MODI:
         df=df_filtered,
         id_col="id",
         clock_col="clock",
-        cols=["sbp", "hr", "o2sat", "rr"],
+        cols=VITAL_COLS,
         save_path=None,
         renderer=None,
         plot_library="matplotlib",

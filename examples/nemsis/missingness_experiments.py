@@ -4,7 +4,7 @@ from pathlib import Path
 import polars as pl
 
 from imperfekt import Imperfekt
-from config import COHORT_PATH, COHORT_MIN_READINGS, COHORT_WINDOW_MINUTES
+from config import COHORT_PATH, COHORT_MIN_READINGS, COHORT_WINDOW_MINUTES, VITAL_COLS
 
 pl.Config.set_tbl_cols(8)
 pl.Config.set_tbl_rows(25)
@@ -41,7 +41,7 @@ imp = Imperfekt(
     df=df_filtered,
     id_col="id",
     clock_col="clock",
-    cols=["sbp", "hr", "o2sat", "rr"],
+    cols=VITAL_COLS,
     save_path=None,
     renderer=None,
     plot_library="matplotlib",

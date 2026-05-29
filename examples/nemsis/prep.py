@@ -4,25 +4,12 @@ from pathlib import Path
 import polars as pl
 
 from imperfekt.analysis.utils.masking import create_plausibility_mask
-from config import COHORT_MIN_READINGS, COHORT_WINDOW_MINUTES
+from config import COHORT_MIN_READINGS, COHORT_WINDOW_MINUTES, STAGE_3_CONFIGS, VITAL_COLS
 
 _SEP_DIR = Path(__file__).resolve().parent.parent / "sepsis_prediction"
 if str(_SEP_DIR) not in sys.path:
     sys.path.insert(0, str(_SEP_DIR))
 from imputation import impute  # noqa: E402
-
-VITAL_COLS = ["sbp", "hr", "o2sat", "rr"]
-
-CONFIGS: dict[str, dict[str, str]] = {
-    "iq_pk_in": {"method": "iqr", "plaus": "keep",   "imp": "none"},
-    "iq_pk_il": {"method": "iqr", "plaus": "keep",   "imp": "locf"},
-    "iq_pr_in": {"method": "iqr", "plaus": "remove", "imp": "none"},
-    "iq_pr_il": {"method": "iqr", "plaus": "remove", "imp": "locf"},
-    "ma_pk_in": {"method": "mad", "plaus": "keep",   "imp": "none"},
-    "ma_pk_il": {"method": "mad", "plaus": "keep",   "imp": "locf"},
-    "ma_pr_in": {"method": "mad", "plaus": "remove", "imp": "none"},
-    "ma_pr_il": {"method": "mad", "plaus": "remove", "imp": "locf"},
-}
 
 
 def filter_cohort(df: pl.DataFrame) -> pl.DataFrame:
@@ -77,7 +64,7 @@ def make_configs(
     masks = {"iqr": mask_iqr, "mad": mask_mad}
     results: dict[str, pl.DataFrame] = {}
 
-    for config_id, cfg in CONFIGS.items():
+    for config_id, cfg in STAGE_3_CONFIGS.items():
         mask = masks[cfg["method"]]
         df_out = _apply_plausibility(df, mask, cfg["plaus"])
         df_out = _apply_imputation(df_out, cfg["imp"])

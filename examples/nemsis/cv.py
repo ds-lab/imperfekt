@@ -1,56 +1,91 @@
-from __future__ import annotations
-
-import sys
-from collections import defaultdict
+import json
 from pathlib import Path
+
+from imperfekt.analysis.intervariable.intervariable import IntervariableImperfection
+import polars as pl
 
 import numpy as np
 import polars as pl
+from collections import defaultdict
 from sklearn.metrics import average_precision_score, brier_score_loss, roc_auc_score
 from sklearn.model_selection import RepeatedStratifiedKFold
 
-ROOT = Path(__file__).parents[2]
-sys.path.insert(0, str(ROOT))
-
-from examples.mimic_iv_ed.config import (  # noqa: E402
-    CV_N_REPEATS,
-    CV_N_SPLITS,
-    IREG_FEATURE_COLS,
-    OUTCOME_COL,
-    RANDOM_STATE,
-    RESULTS_DIR,
-    VITAL_COLS,
-)
+from config import RESULTS_DIR, VITAL_COLS, RANDOM_STATE, CV_N_SPLITS, CV_N_REPEATS, STRUCTURAL_FEATURE_COLS
+from imperfekt import IntravariableImperfection
 from examples.utils.models import XGBoostModel  # noqa: E402
-from imperfekt.analysis.irregularity.irregularity import Irregularity  # noqa: E402
+
+_STRATA_CACHE_DIR = RESULTS_DIR / "intravariable_strata_cache"
+_STRATA_CACHE_VERSION = 1
 
 
-def compute_irregularity_strata(
-    ts_df: pl.DataFrame,
+def _strata_cache_key(cohort_path: Path) -> dict:
+    st = cohort_path.stat()
+    return {
+        "version": _STRATA_CACHE_VERSION,
+        "cohort_path": str(cohort_path),
+        "cohort_mtime_ns": st.st_mtime_ns,
+        "cohort_size": st.st_size,
+        "vital_cols": list(VITAL_COLS),
+    }
+
+def compute_intervariable_missingness_strata(
+    df: pl.DataFrame,
+    cohort_path: Path | None = None,
 ) -> tuple[pl.DataFrame, tuple[str, str]]:
     """
     Run Irregularity on the full dataset to extract per-stay raw metrics and
     the dynamically selected orthogonal axis names.
 
+    If cohort_path is given, the result is cached at RESULTS_DIR/
+    intravariable_strata_cache/ keyed by (cohort mtime, cohort size,
+    VITAL_COLS). Subsequent calls with a matching key load from disk instead
+    of rerunning the (expensive) library computation.
+
     Returns:
-      case_metrics  - full cs_case_scores DataFrame (stay_id, cv,
+      case_metrics  - full iv_composite_scores DataFrame (id, cv,
                       adherence_rate, burstiness_coeff, axis_x, axis_y, …)
                       The library-generated irregularity_stratum column is
                       present but must NOT be used for CV evaluation — it was
                       computed from global medians and would leak test data.
       axes          - (axis_x_name, axis_y_name) selected by the library
     """
-    strata_dir = RESULTS_DIR / "irregularity_strata"
-    ireg = Irregularity(
-        ts_df.select(["stay_id", "charttime"]),
-        id_col="stay_id",
-        clock_col="charttime",
+    cache_meta_path = _STRATA_CACHE_DIR / "meta.json"
+    cache_metrics_path = _STRATA_CACHE_DIR / "case_metrics.parquet"
+
+    if cohort_path is not None and cache_meta_path.exists() and cache_metrics_path.exists():
+        expected_key = _strata_cache_key(cohort_path)
+        cached_meta = json.loads(cache_meta_path.read_text())
+        if cached_meta.get("key") == expected_key:
+            case_metrics = pl.read_parquet(cache_metrics_path)
+            axes = tuple(cached_meta["axes"])
+            print(f"Loaded intravariable strata from cache: {_STRATA_CACHE_DIR}")
+            return case_metrics, axes
+
+    strata_dir = RESULTS_DIR / "intravariable_strata"
+    imp = IntravariableImperfection(
+        df,
+        imperfection="missingness",
+        id_col="id",
+        clock_col="clock",
+        cols=VITAL_COLS,
         save_path=strata_dir,
     )
-    ireg.run(save_results=True)
-    case_metrics = ireg.results.cs_case_scores
+    imp.composite_score(save_results=True)
+    case_metrics = imp.results.iv_composite_scores
     axis_x = case_metrics["axis_x"][0]
     axis_y = case_metrics["axis_y"][0]
+
+    if cohort_path is not None:
+        _STRATA_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        case_metrics.write_parquet(cache_metrics_path)
+        cache_meta_path.write_text(
+            json.dumps(
+                {"key": _strata_cache_key(cohort_path), "axes": [axis_x, axis_y]},
+                indent=2,
+            )
+        )
+        print(f"Cached intravariable strata to {_STRATA_CACHE_DIR}")
+
     return case_metrics, (axis_x, axis_y)
 
 
@@ -78,7 +113,7 @@ _STRATUM_ORDER = ["overall", "Q_alpha", "Q_beta", "Q_gamma", "Q_delta"]
 
 
 def _is_structural_feature(col: str) -> bool:
-    return any(col == base or col.startswith(f"{base}_") for base in IREG_FEATURE_COLS)
+    return any(col == base or col.startswith(f"{base}_") for base in STRUCTURAL_FEATURE_COLS)
 
 
 def _feature_group(col: str) -> str:
@@ -90,7 +125,7 @@ def _feature_group(col: str) -> str:
 
 
 def _select_feature_columns(stay_df: pl.DataFrame) -> list[str]:
-    return [c for c in stay_df.columns if c not in ("stay_id", OUTCOME_COL, "subject_id")]
+    return [c for c in stay_df.columns if c not in ("id", "label")]
 
 
 def run_cv(
@@ -109,7 +144,7 @@ def run_cv(
 ]:
     """
     Repeated stratified k-fold CV (CV_N_SPLITS x CV_N_REPEATS).
-    Splits are on subject_id to prevent patient-level leakage across folds.
+    Splits are on id to prevent patient-level leakage across folds.
 
     Irregularity quadrant thresholds (Q_alpha/Q_beta/Q_gamma/Q_delta) are derived strictly from
     the *train* fold on each iteration, then applied to test stays, so no
@@ -126,22 +161,22 @@ def run_cv(
       last_X_test      - test features from the final fold
       last_test_df     - exact test DataFrame from the final fold
       feature_cols     - ordered list of feature column names
-      last_test_strata - stay_id/irregularity_stratum for the final fold's
+      last_test_strata - id/intervariable_stratum for the final fold's
                          test set (train-derived thresholds)
     """
-    feature_cols = [c for c in stay_df.columns if c not in ("stay_id", OUTCOME_COL, "subject_id")]
+    feature_cols = [c for c in stay_df.columns if c not in ("id", "label")]
     collect_feature_dist = feature_distribution_save_path is not None
     fold_feature_means: dict[tuple[str, str], list[float]] = defaultdict(list)
     fold_outcome_prevalence: dict[str, list[float]] = defaultdict(list)
 
     subject_labels = (
-        stay_df.select(["subject_id", OUTCOME_COL])
-        .group_by("subject_id")
-        .agg(pl.col(OUTCOME_COL).any().alias("any_outcome"))
-        .sort("subject_id")
+        stay_df.select(["id", "label"])
+        .group_by("id")
+        .agg(pl.col("label").any().alias("any_outcome"))
+        .sort("id")
     )
 
-    subjects = subject_labels["subject_id"].to_numpy()
+    subjects = subject_labels["id"].to_numpy()
     subject_outcomes = subject_labels["any_outcome"].cast(pl.Int8).to_numpy()
 
     rskf = RepeatedStratifiedKFold(
@@ -165,13 +200,13 @@ def run_cv(
         train_subjects = set(subjects[train_idx].tolist())
         test_subjects = set(subjects[test_idx].tolist())
 
-        train = stay_df.filter(pl.col("subject_id").is_in(train_subjects))
-        test = stay_df.filter(pl.col("subject_id").is_in(test_subjects))
+        train = stay_df.filter(pl.col("id").is_in(train_subjects))
+        test = stay_df.filter(pl.col("id").is_in(test_subjects))
 
         X_train = train.select(feature_cols).to_numpy().astype(np.float32)
-        y_train = train[OUTCOME_COL].cast(pl.Int8).to_numpy()
+        y_train = train["label"].cast(pl.Int8).to_numpy()
         X_test = test.select(feature_cols).to_numpy().astype(np.float32)
-        y_test = test[OUTCOME_COL].cast(pl.Int8).to_numpy()
+        y_test = test["label"].cast(pl.Int8).to_numpy()
 
         model = XGBoostModel(feature_mode=pipeline_name, random_state=RANDOM_STATE + fold_idx)
         model._train_model(X_train, y_train)
@@ -182,49 +217,55 @@ def run_cv(
             fold_metrics["overall"].append(m)
 
         # Medians from train only; thresholds applied to test — no leakage.
-        train_metrics = case_metrics.filter(pl.col("stay_id").is_in(train["stay_id"].to_list()))
+        train_metrics = case_metrics.filter(pl.col("id").is_in(train["id"].to_list()))
         med_x = train_metrics[axis_x].median()
         med_y = train_metrics[axis_y].median()
 
-        test_stay_ids = test["stay_id"]
-        test_strata = Irregularity.assign_strata(
-            case_metrics.filter(pl.col("stay_id").is_in(test_stay_ids.to_list()))
-            .select(["stay_id", axis_x, axis_y])
+        test_ids = test["id"]
+        test_strata = IntervariableImperfection.assign_strata(
+            case_metrics.filter(pl.col("id").is_in(test_ids.to_list()))
+            .select(["id", axis_x, axis_y])
             .drop_nulls([axis_x, axis_y]),
             axis_x,
             axis_y,
             med_x,
             med_y,
-        ).select(["stay_id", "irregularity_stratum"])
+        ).select(["id", "intervariable_stratum"])
 
         # Join test strata onto test rows to get a per-row stratum label aligned
         # with y_test/y_proba, then group by stratum without repeated is_in scans.
         # Also join cv/qcod/adherence_rate for irregularity characterisation per stratum.
-        ireg_cols = ["stay_id", "cv", "qcod", "adherence_rate"]
-        available_ireg = [c for c in ireg_cols if c in case_metrics.columns]
-        test_strata_ireg = test_strata.join(
-            case_metrics.select(available_ireg),
-            on="stay_id",
+        imperfekt_cols = [
+            "avg_indicated_vars_pct",
+            "co_missingness_concentration",
+            "missing_variable_breadth",
+            "pattern_entropy",
+            "max_pairwise_co_missingness",
+        ]
+        available_imperfekt = [c for c in imperfekt_cols if c in case_metrics.columns]
+        test_strata_imperfekt = test_strata.join(
+            case_metrics.select(available_imperfekt),
+            on="id",
             how="left",
         )
 
         strata_arr = (
-            test.select("stay_id")
+            test.select("id")
             .join(
-                test_strata_ireg.select(["stay_id", "irregularity_stratum"]),
-                on="stay_id",
+                test_strata_imperfekt.select(["id", "intervariable_stratum"]),
+                on="id",
                 how="left",
-            )["irregularity_stratum"]
+            )["intervariable_stratum"]
             .fill_null("")
             .to_numpy()
         )
 
-        ireg_lookup: dict[str, dict[str, float]] = {}
-        for row in test_strata_ireg.iter_rows(named=True):
-            sid = row["stay_id"]
-            ireg_lookup[sid] = {c: row[c] for c in ("cv", "qcod", "adherence_rate") if c in row}
+        imperfekt_lookup: dict[str, dict[str, float]] = {}
+        for row in test_strata_imperfekt.iter_rows(named=True):
+            sid = row["id"]
+            imperfekt_lookup[sid] = {c: row[c] for c in imperfekt_cols if c in row}
 
-        stay_ids_arr = test["stay_id"].to_numpy()
+        ids_arr = test["id"].to_numpy()
 
         for stratum_label in np.unique(strata_arr):
             if stratum_label == "":
@@ -232,19 +273,19 @@ def run_cv(
             mask = strata_arr == stratum_label
             m_s = _compute_metrics(y_test[mask], y_proba[mask])
             if m_s:
-                for ireg_metric in ("cv", "qcod", "adherence_rate"):
+                for imperfekt_metric in imperfekt_cols:
                     vals = [
-                        ireg_lookup[sid][ireg_metric]
-                        for sid in stay_ids_arr[mask]
-                        if sid in ireg_lookup
-                        and ireg_metric in ireg_lookup[sid]
-                        and ireg_lookup[sid][ireg_metric] is not None
+                        imperfekt_lookup[sid][imperfekt_metric]
+                        for sid in ids_arr[mask]
+                        if sid in imperfekt_lookup
+                        and imperfekt_metric in imperfekt_lookup[sid]
+                        and imperfekt_lookup[sid][imperfekt_metric] is not None
                     ]
-                    m_s[ireg_metric] = float(np.mean(vals)) if vals else float("nan")
+                    m_s[imperfekt_metric] = float(np.mean(vals)) if vals else float("nan")
                 fold_metrics[stratum_label].append(m_s)
 
         if collect_feature_dist:
-            overall_prevalence = test[OUTCOME_COL].mean()
+            overall_prevalence = test["label"].mean()
             if overall_prevalence is not None and not np.isnan(overall_prevalence):
                 fold_outcome_prevalence["overall"].append(float(overall_prevalence))
 
@@ -263,33 +304,33 @@ def run_cv(
                 fold_feature_means[("overall", row["feature"])].append(float(row["fold_mean"]))
 
             test_with_strata = (
-                test.select(["stay_id", OUTCOME_COL] + feature_cols)
-                .join(test_strata, on="stay_id", how="left")
-                .drop_nulls("irregularity_stratum")
+                test.select(["id", "label"] + feature_cols)
+                .join(test_strata, on="id", how="left")
+                .drop_nulls("intervariable_stratum")
             )
             if test_with_strata.height > 0:
-                stratum_prevalence = test_with_strata.group_by("irregularity_stratum").agg(
-                    pl.col(OUTCOME_COL).mean().alias("fold_prevalence")
+                stratum_prevalence = test_with_strata.group_by("intervariable_stratum").agg(
+                    pl.col("label").mean().alias("fold_prevalence")
                 )
                 for row in stratum_prevalence.iter_rows(named=True):
                     prev = row["fold_prevalence"]
                     if prev is None or np.isnan(prev):
                         continue
-                    fold_outcome_prevalence[row["irregularity_stratum"]].append(float(prev))
+                    fold_outcome_prevalence[row["intervariable_stratum"]].append(float(prev))
 
                 stratum_means = (
                     test_with_strata.unpivot(
-                        index=["irregularity_stratum"],
+                        index=["intervariable_stratum"],
                         on=feature_cols,
                         variable_name="feature",
                         value_name="value",
                     )
                     .drop_nulls("value")
-                    .group_by(["irregularity_stratum", "feature"])
+                    .group_by(["intervariable_stratum", "feature"])
                     .agg(pl.col("value").mean().alias("fold_mean"))
                 )
                 for row in stratum_means.iter_rows(named=True):
-                    fold_feature_means[(row["irregularity_stratum"], row["feature"])].append(
+                    fold_feature_means[(row["intervariable_stratum"], row["feature"])].append(
                         float(row["fold_mean"])
                     )
 
@@ -409,9 +450,9 @@ def save_feature_distribution_by_outcome(
         return
 
     long_df = (
-        stay_df.select([OUTCOME_COL] + feature_cols)
+        stay_df.select(["label"] + feature_cols)
         .unpivot(
-            index=[OUTCOME_COL],
+            index=["label"],
             on=feature_cols,
             variable_name="feature",
             value_name="value",
@@ -422,7 +463,7 @@ def save_feature_distribution_by_outcome(
         print("Skipping feature-by-outcome table: all selected feature values are null.")
         return
 
-    grouped = long_df.group_by([OUTCOME_COL, "feature"]).agg(
+    grouped = long_df.group_by(["label", "feature"]).agg(
         [
             pl.col("value").count().alias("n_non_null"),
             pl.col("value").mean().alias("mean"),
@@ -445,7 +486,7 @@ def save_feature_distribution_by_outcome(
         else:
             ci = float("nan")
 
-        outcome_val = row[OUTCOME_COL]
+        outcome_val = row["label"]
         outcome_int = int(outcome_val) if outcome_val is not None else None
 
         rows.append(
