@@ -14,13 +14,15 @@ from examples.mimic_iv_ed.config import (  # noqa: E402
     CV_N_REPEATS,
     CV_N_SPLITS,
     IREG_FEATURE_COLS,
+    PLOT_COLORS,
     RESULTS_DIR,
+    SHOW_LEGEND,
     SPEARMAN_TOP_K_PHYS,
     SPEARMAN_TOP_K_STRUCT,
 )
 from examples.utils.models import XGBoostModel  # noqa: E402
 
-_STRATUM_ORDER = ["Q_alpha", "Q_beta", "Q_gamma", "Q_delta"]
+_STRATUM_ORDER = ["Q_complete", "Q_alpha", "Q_beta", "Q_gamma", "Q_delta"]
 
 
 def _sort_strata(keys: set[str]) -> list[str]:
@@ -55,14 +57,22 @@ def _stratum_tick_labels(
 def plot_auprc_by_stratum(
     pipeline_summaries: list[tuple[str, dict[str, dict]]],
     save_path: Path,
-    show_legend: bool = True,
+    show_legend: bool | None = None,
+    colors: list[str] | None = None,
 ) -> None:
     """
     Line plot: mean AUPRC per irregularity stratum for all provided pipelines.
     95% CI shown as dashed lines above and below the mean.
     Overall AUPRC shown as horizontal dashed reference lines.
     Tick labels show mean ± CI outcome prevalence derived from CV test folds.
+
+    show_legend defaults to the config SHOW_LEGEND constant when None; colors
+    defaults to the config PLOT_COLORS palette when None.
     """
+    if show_legend is None:
+        show_legend = SHOW_LEGEND
+    if colors is None:
+        colors = PLOT_COLORS
     strata_keys = _sort_strata(
         {k for _, summary in pipeline_summaries for k in summary if k != "overall"}
     )
@@ -83,7 +93,6 @@ def plot_auprc_by_stratum(
 
     x = np.arange(len(strata_keys))
     fig, ax = plt.subplots(figsize=(8, 4.5))
-    colors = ["#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7"]
 
     for idx, (label, summary) in enumerate(pipeline_summaries):
         color = colors[idx % len(colors)]
@@ -115,14 +124,22 @@ def plot_auprc_by_stratum(
 def plot_auroc_by_stratum(
     pipeline_summaries: list[tuple[str, dict[str, dict]]],
     save_path: Path,
-    show_legend: bool = True,
+    show_legend: bool | None = None,
+    colors: list[str] | None = None,
 ) -> None:
     """
     Line plot: mean AUROC per irregularity stratum for all provided pipelines.
     95% CI shown as dashed lines above and below the mean.
     Overall AUROC shown as horizontal dashed reference lines.
     Tick labels show mean outcome prevalence derived from CV test folds.
+
+    show_legend defaults to the config SHOW_LEGEND constant when None; colors
+    defaults to the config PLOT_COLORS palette when None.
     """
+    if show_legend is None:
+        show_legend = SHOW_LEGEND
+    if colors is None:
+        colors = PLOT_COLORS
     strata_keys = _sort_strata(
         {k for _, summary in pipeline_summaries for k in summary if k != "overall"}
     )
@@ -143,7 +160,6 @@ def plot_auroc_by_stratum(
 
     x = np.arange(len(strata_keys))
     fig, ax = plt.subplots(figsize=(8, 4.5))
-    colors = ["#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7"]
 
     ax.axhline(0.5, color="black", linestyle="--", linewidth=0.8, label="Random baseline")
 
@@ -177,14 +193,22 @@ def plot_auroc_by_stratum(
 def plot_auprc_lift_by_stratum(
     pipeline_summaries: list[tuple[str, dict[str, dict]]],
     save_path: Path,
-    show_legend: bool = True,
+    show_legend: bool | None = None,
+    colors: list[str] | None = None,
 ) -> None:
     """
     Line plot: mean AUPRC lift (AUPRC / prevalence) per irregularity stratum.
     Lift > 1 means the model beats the no-skill baseline within that stratum.
     Reference line at lift = 1 (no-skill).
     Tick labels show mean ± CI outcome prevalence derived from CV test folds.
+
+    show_legend defaults to the config SHOW_LEGEND constant when None; colors
+    defaults to the config PLOT_COLORS palette when None.
     """
+    if show_legend is None:
+        show_legend = SHOW_LEGEND
+    if colors is None:
+        colors = PLOT_COLORS
     strata_keys = _sort_strata(
         {k for _, summary in pipeline_summaries for k in summary if k != "overall"}
     )
@@ -205,7 +229,6 @@ def plot_auprc_lift_by_stratum(
 
     x = np.arange(len(strata_keys))
     fig, ax = plt.subplots(figsize=(8, 4.5))
-    colors = ["#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7"]
 
     ax.axhline(1.0, color="black", linestyle="--", linewidth=0.8, label="No-skill baseline")
 
