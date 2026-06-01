@@ -66,6 +66,35 @@ def make_configs(
     return results
 
 
+class ConfigBuilder:
+    """Builds plausibility masks and config DataFrames lazily, on demand.
+
+    Masks (iqr/mad) and built configs are memoized, so building several configs
+    that share a mask only computes that mask once, and a single config feeding
+    many feature sets is built only once. Nothing is computed until ``config``
+    is actually called — which lets callers consult a downstream cache first and
+    skip mask/config work entirely on a hit.
+    """
+
+    def __init__(self, df: pl.DataFrame) -> None:
+        self.df = df
+        self._masks: dict[str, pl.DataFrame] = {}
+        self._configs: dict[str, pl.DataFrame] = {}
+
+    def mask(self, method: str) -> pl.DataFrame:
+        if method not in self._masks:
+            self._masks[method] = make_plausibility_mask(self.df, method=method)
+        return self._masks[method]
+
+    def config(self, config_id: str) -> pl.DataFrame:
+        if config_id not in self._configs:
+            cfg = STAGE_3_CONFIGS[config_id]
+            df_out = _apply_plausibility(self.df, self.mask(cfg["method"]), cfg["plaus"])
+            df_out = _apply_imputation(df_out, cfg["imp"])
+            self._configs[config_id] = df_out
+        return self._configs[config_id]
+
+
 def _apply_plausibility(df: pl.DataFrame, mask: pl.DataFrame, plaus: str) -> pl.DataFrame:
     if plaus == "keep":
         return df

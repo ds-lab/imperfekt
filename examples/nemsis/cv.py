@@ -10,7 +10,7 @@ from collections import defaultdict
 from sklearn.metrics import average_precision_score, brier_score_loss, roc_auc_score
 from sklearn.model_selection import RepeatedStratifiedKFold
 
-from config import RESULTS_DIR, VITAL_COLS, RANDOM_STATE, CV_N_SPLITS, CV_N_REPEATS
+from config import RESULTS_DIR, VITAL_COLS, RANDOM_STATE, CV_N_SPLITS, CV_N_REPEATS, data_fingerprint, data_fingerprint_tag
 from examples.nemsis.features import feature_group, is_structural_feature
 from examples.utils.models import XGBoostModel  # noqa: E402
 
@@ -19,16 +19,13 @@ _STRATA_CACHE_VERSION = 1
 
 
 def _strata_cache_dir(cohort_path: Path) -> Path:
-    return _STRATA_CACHE_ROOT / cohort_path.stem
+    return _STRATA_CACHE_ROOT / f"{cohort_path.stem}_{data_fingerprint_tag(cohort_path)}"
 
 
 def _strata_cache_key(cohort_path: Path) -> dict:
-    st = cohort_path.stat()
     return {
         "version": _STRATA_CACHE_VERSION,
-        "cohort_path": str(cohort_path),
-        "cohort_mtime_ns": st.st_mtime_ns,
-        "cohort_size": st.st_size,
+        "data": data_fingerprint(cohort_path),
         "vital_cols": list(VITAL_COLS),
     }
 
@@ -116,7 +113,7 @@ def _compute_metrics(y_true: np.ndarray, y_proba: np.ndarray) -> dict | None:
     }
 
 
-_STRATUM_ORDER = ["overall", "Q_alpha", "Q_beta", "Q_gamma", "Q_delta"]
+_STRATUM_ORDER = ["overall", "Q_complete", "Q_alpha", "Q_beta", "Q_gamma", "Q_delta"]
 
 
 _is_structural_feature = is_structural_feature
@@ -224,15 +221,24 @@ def run_cv(
         strata_input_cols = ["id", axis_x, axis_y]
         if "avg_indicated_vars_pct" not in strata_input_cols:
             strata_input_cols.append("avg_indicated_vars_pct")
-        test_strata = IntervariableImperfection.assign_strata(
-            case_metrics.filter(pl.col("id").is_in(test_ids.to_list()))
-            .select(strata_input_cols)
-            .drop_nulls([axis_x, axis_y]),
-            axis_x,
-            axis_y,
-            med_x,
-            med_y,
-        ).select(["id", "intervariable_stratum"])
+        # Do NOT drop null-axis rows before assign_strata: Q_complete cases (no
+        # missingness) have null co-missingness/entropy axes by construction, and
+        # assign_strata labels them Q_complete *before* its null-axis check. We
+        # instead drop unassignable rows (null intervariable_stratum) afterwards,
+        # which keeps Q_complete while still excluding genuinely null-axis cases.
+        test_strata = (
+            IntervariableImperfection.assign_strata(
+                case_metrics.filter(pl.col("id").is_in(test_ids.to_list())).select(
+                    strata_input_cols
+                ),
+                axis_x,
+                axis_y,
+                med_x,
+                med_y,
+            )
+            .select(["id", "intervariable_stratum"])
+            .drop_nulls("intervariable_stratum")
+        )
 
         # Join test strata onto test rows to get a per-row stratum label aligned
         # with y_test/y_proba, then group by stratum without repeated is_in scans.
@@ -246,7 +252,7 @@ def run_cv(
         ]
         available_imperfekt = [c for c in imperfekt_cols if c in case_metrics.columns]
         test_strata_imperfekt = test_strata.join(
-            case_metrics.select(available_imperfekt),
+            case_metrics.select(available_imperfekt + ["id"]),
             on="id",
             how="left",
         )

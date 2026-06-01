@@ -2,10 +2,18 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Callable
 
 import polars as pl
 
-from examples.nemsis.config import STAGE_4_CONFIGS, VITAL_COLS, RESULTS_DIR
+from config import (
+    STAGE_3_CONFIGS,
+    STAGE_4_CONFIGS,
+    VITAL_COLS,
+    RESULTS_DIR,
+    data_fingerprint,
+    data_fingerprint_tag,
+)
 from imperfekt.features.core import FeatureGenerator
 
 
@@ -156,13 +164,11 @@ def _feature_set_cache_key(
     setup_name: str,
     flags: dict,
 ) -> dict:
-    st = cohort_path.stat()
     return {
         "version": _FEATURE_CACHE_VERSION,
-        "cohort_path": str(cohort_path),
-        "cohort_mtime_ns": st.st_mtime_ns,
-        "cohort_size": st.st_size,
+        "data": data_fingerprint(cohort_path),
         "config_name": config_name,
+        "config_recipe": STAGE_3_CONFIGS.get(config_name),
         "setup_name": setup_name,
         "flags": flags,
         "vital_cols": list(VITAL_COLS),
@@ -172,7 +178,7 @@ def _feature_set_cache_key(
 
 
 def make_feature_sets(
-    ts_df: pl.DataFrame,
+    config_provider: Callable[[], pl.DataFrame],
     *,
     config_name: str,
     cohort_path: Path | None = None,
@@ -180,6 +186,12 @@ def make_feature_sets(
 ) -> dict[str, pl.DataFrame]:
     """
     Build one stay-level feature frame per STAGE_4_CONFIGS entry.
+
+    ``config_provider`` is a no-arg callable returning the per-observation config
+    DataFrame. It is invoked lazily — only the first time a setup is *not* served
+    from cache — so a fully cached run never builds the config (or its masks) at
+    all. Its result is memoized here, so multiple uncached setups sharing the
+    config build it once.
 
     For each setup, optional FeatureGenerator passes enrich the per-observation
     frame with missingness- and/or plausibility-derived columns (prefixed
@@ -193,6 +205,12 @@ def make_feature_sets(
     later does not invalidate existing ones.
     """
     setups: dict[str, pl.DataFrame] = {}
+    _config_df: list[pl.DataFrame] = []  # one-slot memo for the lazy config build
+
+    def get_config() -> pl.DataFrame:
+        if not _config_df:
+            _config_df.append(config_provider())
+        return _config_df[0]
 
     for setup_name, flags in STAGE_4_CONFIGS.items():
         cache_dir_paths = (
@@ -214,7 +232,7 @@ def make_feature_sets(
                 print(f"Loaded feature set [{config_name}/{setup_name}] from cache")
                 continue
 
-        enriched = ts_df
+        enriched = get_config()
         if flags.get("miss"):
             enriched = _run_fg(enriched, imperfection="missingness", prefix=STRUCTURAL_PREFIX_MISS)
         if flags.get("plaus"):

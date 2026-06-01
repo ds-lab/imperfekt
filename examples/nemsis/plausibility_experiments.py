@@ -1,11 +1,10 @@
 # %%
-from pathlib import Path
 from typing import TypedDict
 
 import polars as pl
 
 from imperfekt import Imperfekt
-from config import COHORT_PATH, COHORT_MIN_READINGS, COHORT_WINDOW_MINUTES, VITAL_COLS
+from config import COHORT_MIN_READINGS, COHORT_WINDOW_MINUTES, VITAL_COLS, load_cohort
 
 pl.Config.set_tbl_cols(8)
 
@@ -15,7 +14,7 @@ class Modus(TypedDict):
     missing_as: str
     ranges: bool
 
-df = pl.read_parquet(Path(COHORT_PATH))
+df = load_cohort()
 
 # %%
 df_filtered = df.with_columns(

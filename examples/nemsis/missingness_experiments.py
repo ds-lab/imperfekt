@@ -1,15 +1,13 @@
 # %%
-from pathlib import Path
-
 import polars as pl
 
 from imperfekt import Imperfekt
-from config import COHORT_PATH, COHORT_MIN_READINGS, COHORT_WINDOW_MINUTES, VITAL_COLS
+from config import COHORT_MIN_READINGS, COHORT_WINDOW_MINUTES, VITAL_COLS, load_cohort
 
 pl.Config.set_tbl_cols(8)
 pl.Config.set_tbl_rows(25)
 
-df = pl.read_parquet(Path(COHORT_PATH))
+df = load_cohort()
 # %%
 df_filtered = df.with_columns(
     pl.col("clock").min().over("id").alias("_start_clock")
