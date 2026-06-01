@@ -1,15 +1,8 @@
-import sys
-from pathlib import Path
-
 import polars as pl
 
 from imperfekt.analysis.utils.masking import create_plausibility_mask
 from config import COHORT_MIN_READINGS, COHORT_WINDOW_MINUTES, STAGE_3_CONFIGS, VITAL_COLS
-
-_SEP_DIR = Path(__file__).resolve().parent.parent / "sepsis_prediction"
-if str(_SEP_DIR) not in sys.path:
-    sys.path.insert(0, str(_SEP_DIR))
-from imputation import impute  # noqa: E402
+from imputation import impute
 
 
 def filter_cohort(df: pl.DataFrame) -> pl.DataFrame:

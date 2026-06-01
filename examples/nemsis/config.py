@@ -50,9 +50,9 @@ STAGE_3_CONFIGS: dict[str, dict[str, str]] = {
 
 STAGE_4_CONFIGS: dict[str, dict[str, bool]] = {
     "base": {"base": True, "miss": False, "plaus": False},
-    "base+miss": {"base": True, "miss": True,  "plaus": False},
-    "base+plaus": {"base": True, "miss": False, "plaus": True},
-    "base+miss+plaus": {"base": True, "miss": True,  "plaus": True},
+  #  "base+miss": {"base": True, "miss": True,  "plaus": False},
+  #  "base+plaus": {"base": True, "miss": False, "plaus": True},
+  #  "base+miss+plaus": {"base": True, "miss": True,  "plaus": True},
 }
 
 STRUCTURAL_FEATURE_COLS = []

@@ -187,15 +187,20 @@ def _build_nemsis_cohort() -> pl.DataFrame:
         raise ValueError(f"Unsupported NEMSIS_YEAR: {NEMSIS_YEAR}")
     files = NEMSIS_FILES[NEMSIS_YEAR]
 
+    # Note: NEMSIS sex/gender (ePatient_13 / ePatient_25) is not present in the 2024 or 2025 parquet
+    # exports, so it is omitted from the cohort.
     events_df = _nemsis_read_parquet(
         files["events"],
-        columns=["PcrKey", "eResponse_05", "eDisposition_22", "ePatient_15"],
+        columns=["PcrKey", "eResponse_05", "eDisposition_22", "ePatient_15", "ePatient_16"],
     )
     _log("all events loaded", events_df, "PcrKey")
 
     # Only 911 calls, emergency responses
     call_df = events_df.filter(pl.col("eResponse_05").is_in(["2205001", "2205003", "2205009"]))
     _log("after 911/emergency response filter (eResponse_05)", call_df, "PcrKey")
+    
+    call_df = call_df.filter((pl.col("ePatient_15") >= 18.0) & (pl.col("ePatient_16") == "2516009"))
+    _log("after age >= 18 filter", call_df, "PcrKey")
 
     if CLINICAL_ENDPOINT == "sepsis":
         binary_df = _nemsis_label_sepsis(call_df, files["diagnosis"])
@@ -206,15 +211,12 @@ def _build_nemsis_cohort() -> pl.DataFrame:
     else:
         raise ValueError(f"Unsupported CLINICAL_ENDPOINT: {CLINICAL_ENDPOINT}")
 
-    binary_df = binary_df.filter(pl.col("ePatient_15") >= 18.0)
-    _log("after age >= 18 filter", binary_df, "PcrKey")
-
-    binary_df = binary_df.select(["PcrKey", "label"])
+    binary_df = binary_df.select(["PcrKey", "label", "ePatient_15"])
 
     vitals_df = _nemsis_load_vitals(files["vitals"], binary_df)
     _log("after clock parse + pertinent-negative recode + dedup + null row filtering", vitals_df, "PcrKey")
-    vitals_df = vitals_df.rename({"PcrKey": "id"})
-    binary_df = binary_df.rename({"PcrKey": "id"})
+    vitals_df = vitals_df.rename({"PcrKey": "id", })
+    binary_df = binary_df.rename({"PcrKey": "id", "ePatient_15": "age"})
 
     if FILTER_ALWAYS_NULL_VITALS:
         vitals_df = _filter_always_null_vitals(vitals_df, "id")
@@ -225,7 +227,7 @@ def _build_nemsis_cohort() -> pl.DataFrame:
 
     df = (
         binary_df.join(vitals_df, on="id", how="inner")
-        .select(["id", "clock", "sbp", "hr", "o2sat", "rr", "label"])
+        .select(["id", "clock", "sbp", "hr", "o2sat", "rr", "label", "age"])
     )
     _log("final cohort (after inner join with vitals)", df, "id")
     return df
@@ -237,6 +239,7 @@ def _build_mcmed_cohort() -> pl.DataFrame:
     files = MCMED_FILES
 
     visits_df = _read_s3_parquet(files["visits"])
+    
     _log("all visits loaded", visits_df, "CSN")
 
     measures = ["SpO2", "Perf", "SBP", "DBP", "MAP", "HR", "RR", "1min_HRV", "5min_HRV"]
@@ -307,10 +310,10 @@ def _build_mcmed_cohort() -> pl.DataFrame:
     _log("after filtering to cohort window and min readings", vitals_df, "id")
 
     df = (
-        visits_df.select(["CSN", "label"])
-        .rename({"CSN": "id"})
+        visits_df.select(["CSN", "label", "Age"])
+        .rename({"CSN": "id", "Age": "age"})
         .join(vitals_df, on="id", how="inner")
-        .select(["id", "clock", "label", *VITAL_COLS])
+        .select(["id", "clock", "label", "age", *VITAL_COLS])
     )
     _log("after inner join with vitals", df, "id")
     return df
@@ -366,7 +369,4 @@ for t in thresholds:
         cohort = patient_stats.filter(pl.col("num_vitals") >= min_v)
         dist = cohort.group_by("label").agg(pl.len().alias("n")).sort("label")
         print(f"window <= {t}min, vitals >= {min_v}: {dist.to_dicts()}")
-
-
-# %%
 # %%

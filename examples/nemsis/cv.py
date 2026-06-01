@@ -10,12 +10,16 @@ from collections import defaultdict
 from sklearn.metrics import average_precision_score, brier_score_loss, roc_auc_score
 from sklearn.model_selection import RepeatedStratifiedKFold
 
-from config import RESULTS_DIR, VITAL_COLS, RANDOM_STATE, CV_N_SPLITS, CV_N_REPEATS, STRUCTURAL_FEATURE_COLS
-from imperfekt import IntravariableImperfection
+from config import RESULTS_DIR, VITAL_COLS, RANDOM_STATE, CV_N_SPLITS, CV_N_REPEATS
+from examples.nemsis.features import feature_group, is_structural_feature
 from examples.utils.models import XGBoostModel  # noqa: E402
 
-_STRATA_CACHE_DIR = RESULTS_DIR / "intravariable_strata_cache"
+_STRATA_CACHE_ROOT = RESULTS_DIR / "intervariable_strata_cache"
 _STRATA_CACHE_VERSION = 1
+
+
+def _strata_cache_dir(cohort_path: Path) -> Path:
+    return _STRATA_CACHE_ROOT / cohort_path.stem
 
 
 def _strata_cache_key(cohort_path: Path) -> dict:
@@ -37,9 +41,11 @@ def compute_intervariable_missingness_strata(
     the dynamically selected orthogonal axis names.
 
     If cohort_path is given, the result is cached at RESULTS_DIR/
-    intravariable_strata_cache/ keyed by (cohort mtime, cohort size,
-    VITAL_COLS). Subsequent calls with a matching key load from disk instead
-    of rerunning the (expensive) library computation.
+    intervariable_strata_cache/<cohort_stem>/ keyed by (cohort mtime, cohort
+    size, VITAL_COLS). The per-cohort subdirectory ensures different cohorts
+    (different dataset/endpoint/window/min-readings) don't overwrite each
+    other. Subsequent calls with a matching key load from disk instead of
+    rerunning the (expensive) library computation.
 
     Returns:
       case_metrics  - full iv_composite_scores DataFrame (id, cv,
@@ -49,8 +55,9 @@ def compute_intervariable_missingness_strata(
                       computed from global medians and would leak test data.
       axes          - (axis_x_name, axis_y_name) selected by the library
     """
-    cache_meta_path = _STRATA_CACHE_DIR / "meta.json"
-    cache_metrics_path = _STRATA_CACHE_DIR / "case_metrics.parquet"
+    cache_dir = _strata_cache_dir(cohort_path) if cohort_path is not None else None
+    cache_meta_path = cache_dir / "meta.json" if cache_dir is not None else None
+    cache_metrics_path = cache_dir / "case_metrics.parquet" if cache_dir is not None else None
 
     if cohort_path is not None and cache_meta_path.exists() and cache_metrics_path.exists():
         expected_key = _strata_cache_key(cohort_path)
@@ -58,11 +65,11 @@ def compute_intervariable_missingness_strata(
         if cached_meta.get("key") == expected_key:
             case_metrics = pl.read_parquet(cache_metrics_path)
             axes = tuple(cached_meta["axes"])
-            print(f"Loaded intravariable strata from cache: {_STRATA_CACHE_DIR}")
+            print(f"Loaded intervariable strata from cache: {cache_dir}")
             return case_metrics, axes
 
-    strata_dir = RESULTS_DIR / "intravariable_strata"
-    imp = IntravariableImperfection(
+    strata_dir = RESULTS_DIR / "intervariable_strata"
+    imp = IntervariableImperfection(
         df,
         imperfection="missingness",
         id_col="id",
@@ -76,7 +83,7 @@ def compute_intervariable_missingness_strata(
     axis_y = case_metrics["axis_y"][0]
 
     if cohort_path is not None:
-        _STRATA_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        cache_dir.mkdir(parents=True, exist_ok=True)
         case_metrics.write_parquet(cache_metrics_path)
         cache_meta_path.write_text(
             json.dumps(
@@ -84,7 +91,7 @@ def compute_intervariable_missingness_strata(
                 indent=2,
             )
         )
-        print(f"Cached intravariable strata to {_STRATA_CACHE_DIR}")
+        print(f"Cached intervariable strata to {cache_dir}")
 
     return case_metrics, (axis_x, axis_y)
 
@@ -112,16 +119,8 @@ def _compute_metrics(y_true: np.ndarray, y_proba: np.ndarray) -> dict | None:
 _STRATUM_ORDER = ["overall", "Q_alpha", "Q_beta", "Q_gamma", "Q_delta"]
 
 
-def _is_structural_feature(col: str) -> bool:
-    return any(col == base or col.startswith(f"{base}_") for base in STRUCTURAL_FEATURE_COLS)
-
-
-def _feature_group(col: str) -> str:
-    if _is_structural_feature(col):
-        return "structural"
-    if any(col.startswith(f"{vital}_") for vital in VITAL_COLS):
-        return "physiology"
-    return "metadata"
+_is_structural_feature = is_structural_feature
+_feature_group = feature_group
 
 
 def _select_feature_columns(stay_df: pl.DataFrame) -> list[str]:
@@ -172,7 +171,7 @@ def run_cv(
     subject_labels = (
         stay_df.select(["id", "label"])
         .group_by("id")
-        .agg(pl.col("label").any().alias("any_outcome"))
+        .agg(pl.col("label").max().alias("any_outcome"))
         .sort("id")
     )
 
@@ -222,9 +221,12 @@ def run_cv(
         med_y = train_metrics[axis_y].median()
 
         test_ids = test["id"]
+        strata_input_cols = ["id", axis_x, axis_y]
+        if "avg_indicated_vars_pct" not in strata_input_cols:
+            strata_input_cols.append("avg_indicated_vars_pct")
         test_strata = IntervariableImperfection.assign_strata(
             case_metrics.filter(pl.col("id").is_in(test_ids.to_list()))
-            .select(["id", axis_x, axis_y])
+            .select(strata_input_cols)
             .drop_nulls([axis_x, axis_y]),
             axis_x,
             axis_y,
