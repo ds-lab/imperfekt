@@ -11,8 +11,8 @@ NEMSIS_YEAR = "2024+2025" # "2024", "2025" or combo ("2024+2025")
 
 # Run full cohort or just a slice (with sure positives)
 DEBUG = False
-DEBUG_N_STAYS = 2000
-DEBUG_MIN_POS_FRAC = 0.01
+DEBUG_N_STAYS = 2000 * 10
+DEBUG_MIN_POS_FRAC = 0.1
 
 if DATASET_NAME == "nemsis":
     COHORT_WINDOW_MINUTES = 20
@@ -71,6 +71,17 @@ STRUCTURAL_FEATURE_COLS = []
 RANDOM_STATE = 42
 CV_N_SPLITS = 5
 CV_N_REPEATS = 10
+
+# Train-fold undersampling + Bayesian prior correction.
+# Within each CV fold we keep all positives and randomly subsample negatives
+# (without replacement) to a fixed pos:neg ratio before fitting XGBoost only.
+# The held-out validation fold is never undersampled, so it retains the natural
+# (~0.19%) prevalence; raw predict_proba is then rescaled in odds space back to
+# the true eligible-cohort prevalence (prior correction).
+APPLY_UNDERSAMPLING = True  # set False to train on the full (imbalanced) train fold
+TRAIN_NEG_POS_RATIO = 10  # target 1:10 pos:neg in the undersampled training set
+UNDERSAMPLE_RANDOM_STATE = 1234  # combined with the fold index for per-fold reproducibility
+APPLY_PRIOR_CORRECTION = True
 
 # Plotting
 SHOW_LEGEND = True

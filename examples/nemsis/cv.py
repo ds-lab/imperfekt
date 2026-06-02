@@ -10,7 +10,19 @@ from collections import defaultdict
 from sklearn.metrics import average_precision_score, brier_score_loss, roc_auc_score
 from sklearn.model_selection import RepeatedStratifiedKFold
 
-from config import RESULTS_DIR, VITAL_COLS, RANDOM_STATE, CV_N_SPLITS, CV_N_REPEATS, data_fingerprint, data_fingerprint_tag
+from config import (
+    RESULTS_DIR,
+    VITAL_COLS,
+    RANDOM_STATE,
+    CV_N_SPLITS,
+    CV_N_REPEATS,
+    APPLY_UNDERSAMPLING,
+    TRAIN_NEG_POS_RATIO,
+    UNDERSAMPLE_RANDOM_STATE,
+    APPLY_PRIOR_CORRECTION,
+    data_fingerprint,
+    data_fingerprint_tag,
+)
 from examples.nemsis.features import feature_group, is_structural_feature
 from examples.utils.models import XGBoostModel  # noqa: E402
 
@@ -124,6 +136,75 @@ def _select_feature_columns(stay_df: pl.DataFrame) -> list[str]:
     return [c for c in stay_df.columns if c not in ("id", "label")]
 
 
+def undersample_train(
+    X: np.ndarray,
+    y: np.ndarray,
+    ratio: int,
+    random_state: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Train-only negative undersampling to a fixed pos:neg ratio.
+
+    Keeps **all** positives and randomly draws negatives **without replacement**
+    until ``n_neg = ratio * n_pos`` (or all negatives, whichever is fewer). This
+    rebalances the *training* fold so XGBoost is not overwhelmed by the extreme
+    (~0.19%) class imbalance, while the held-out validation fold is left at its
+    natural prevalence. Because undersampling shifts the training prior away from
+    the population prior, predictions must be rescaled afterwards with
+    :func:`prior_correct_probs` (train-only undersampling + Bayesian prior
+    correction; cf. Dal Pozzolo et al. 2015, "Calibrating Probability with
+    Undersampling for Unbalanced Classification").
+
+    Must only ever be applied to a training subset, never to validation/test
+    data, to avoid optimistically distorting the evaluated prevalence.
+
+    Args:
+        X: Training feature matrix, shape (n, d).
+        y: Binary training labels, shape (n,).
+        ratio: Target number of negatives per positive after undersampling.
+        random_state: Seed for the negative draw (combine with the fold index
+            upstream for per-fold reproducibility).
+
+    Returns:
+        (X_under, y_under) with all positives and the sampled negatives, in a
+        shuffled order.
+    """
+    y = np.asarray(y)
+    pos_idx = np.flatnonzero(y == 1)
+    neg_idx = np.flatnonzero(y != 1)
+
+    n_neg_target = min(len(neg_idx), ratio * len(pos_idx))
+
+    rng = np.random.default_rng(random_state)
+    sampled_neg = rng.choice(neg_idx, size=n_neg_target, replace=False)
+
+    keep = np.concatenate([pos_idx, sampled_neg])
+    rng.shuffle(keep)
+    return X[keep], y[keep]
+
+
+def prior_correct_probs(
+    p: np.ndarray,
+    pi_true: float,
+    pi_train: float,
+) -> np.ndarray:
+    """Bayesian prior correction for probabilities from an undersampled model.
+
+    Args:
+        p: Raw ``predict_proba`` for the positive class, shape (n,).
+        pi_true: True population (eligible-cohort) prevalence π₀.
+        pi_train: Actual positive prevalence in the undersampled training set π_t.
+
+    Returns:
+        Prior-corrected probabilities, shape (n,).
+    """
+    # handle edge cases to avoid divide-by-zero or zero probabilities; clip to [1e-15, 1-1e-15]
+    p = np.clip(np.asarray(p, dtype=np.float64), 1e-15, 1 - 1e-15)
+    odds = p / (1 - p)
+    factor = (pi_true / (1 - pi_true)) / (pi_train / (1 - pi_train))
+    corrected_odds = odds * factor
+    return corrected_odds / (1 + corrected_odds)
+
+
 def run_cv(
     stay_df: pl.DataFrame,
     case_metrics: pl.DataFrame,
@@ -175,6 +256,12 @@ def run_cv(
     subjects = subject_labels["id"].to_numpy()
     subject_outcomes = subject_labels["any_outcome"].cast(pl.Int8).to_numpy()
 
+    TRUE_POPULATION_PREVALENCE = float(subject_outcomes.mean())
+    print(
+        f"  [{pipeline_name}] true population prevalence (π₀) = "
+        f"{TRUE_POPULATION_PREVALENCE:.5f}"
+    )
+
     rskf = RepeatedStratifiedKFold(
         n_splits=CV_N_SPLITS,
         n_repeats=CV_N_REPEATS,
@@ -204,9 +291,41 @@ def run_cv(
         X_test = test.select(feature_cols).to_numpy().astype(np.float32)
         y_test = test["label"].cast(pl.Int8).to_numpy()
 
+        # Train-only undersampling: keep all positives, subsample negatives to a
+        # fixed pos:neg ratio.
+        if APPLY_UNDERSAMPLING:
+            X_train_us, y_train_us = undersample_train(
+                X_train,
+                y_train,
+                ratio=TRAIN_NEG_POS_RATIO,
+                random_state=UNDERSAMPLE_RANDOM_STATE + fold_idx,
+            )
+        else:
+            X_train_us, y_train_us = X_train, y_train
+        n_train_pos = int((y_train_us == 1).sum())
+        n_train_neg = int((y_train_us != 1).sum())
+        pi_train_art = float(y_train_us.mean())
+
         model = XGBoostModel(feature_mode=pipeline_name, random_state=RANDOM_STATE + fold_idx)
-        model._train_model(X_train, y_train)
+        model._train_model(X_train_us, y_train_us)
         _, y_proba = model._predict(X_test)
+
+        # Prior correction
+        if APPLY_PRIOR_CORRECTION:
+            y_proba = prior_correct_probs(
+                y_proba,
+                pi_true=TRUE_POPULATION_PREVALENCE,
+                pi_train=pi_train_art,
+            )
+
+        n_val = len(y_test)
+        val_prevalence = float(y_test.mean()) if n_val else float("nan")
+        print(
+            f"  [{pipeline_name}] fold {fold_idx + 1}/{total_folds} "
+            f"n_train_pos={n_train_pos} n_train_neg={n_train_neg} "
+            f"pi_train_art={pi_train_art:.4f} n_val={n_val} "
+            f"val_prevalence={val_prevalence:.5f}"
+        )
 
         m = _compute_metrics(y_test, y_proba)
         if m:

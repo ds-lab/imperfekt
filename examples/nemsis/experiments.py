@@ -46,6 +46,11 @@ for config_name, config in STAGE_3_CONFIGS.items():
         folds, _, _, _, _, _ = run_cv(stay_df, case_metrics, axes, run_name)
         summary = summarise_cv(folds, run_name)
         pipeline_summaries.append((f"Setup {run_name}", summary))
+        
+        plot_auprc_lift_by_stratum(
+            pipeline_summaries,
+            RESULTS_DIR / "figures" / "auprc_lift_by_stratum.svg",
+        )
 # %%
 save_cv_results(pipeline_summaries, RESULTS_DIR / "cv_results.csv")
 
