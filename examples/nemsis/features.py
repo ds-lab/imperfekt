@@ -154,7 +154,8 @@ def _stay_level_aggregate(
 
 
 def _feature_set_cache_paths(cohort_path: Path, config_name: str, setup_name: str) -> tuple[Path, Path]:
-    base_dir = _FEATURE_CACHE_ROOT / cohort_path.stem / config_name
+    tag = data_fingerprint_tag(cohort_path)
+    base_dir = _FEATURE_CACHE_ROOT / f"{cohort_path.stem}_{tag}" / config_name
     return base_dir / f"{setup_name}.parquet", base_dir / f"{setup_name}.meta.json"
 
 
@@ -200,9 +201,12 @@ def make_feature_sets(
     in (also prefixed iv_miss_).
 
     If cohort_path is given, each setup is cached per
-    (cohort, config_name, setup_name) at RESULTS_DIR/feature_sets_cache/
-    <cohort_stem>/<config_name>/<setup_name>.parquet. Adding a new setup
-    later does not invalidate existing ones.
+    (cohort, data fingerprint, config_name, setup_name) at
+    RESULTS_DIR/feature_sets_cache/<cohort_stem>_<data_tag>/<config_name>/
+    <setup_name>.parquet. Each distinct data setting (file or DEBUG sampling)
+    gets its own slot, so switching back and forth reuses prior slices instead
+    of overwriting them. Adding a new setup later does not invalidate existing
+    ones.
     """
     setups: dict[str, pl.DataFrame] = {}
     _config_df: list[pl.DataFrame] = []  # one-slot memo for the lazy config build
