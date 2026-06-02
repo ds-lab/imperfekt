@@ -55,7 +55,7 @@ def plot_auprc_by_stratum(
     colors: list[str] | None = None,
 ) -> None:
     """
-    Line plot: mean AUPRC per irregularity stratum for all provided pipelines.
+    Line plot: mean AUPRC per stratum for all provided pipelines.
     95% CI shown as dashed lines above and below the mean.
     Overall AUPRC shown as horizontal dashed reference lines.
     Tick labels show mean ± CI outcome prevalence derived from CV test folds.
@@ -102,12 +102,12 @@ def plot_auprc_by_stratum(
 
     ax.set_xticks(x)
     ax.set_xticklabels(_stratum_tick_labels(strata_keys, pipeline_summaries))
-    ax.set_xlabel("Irregularity stratum (mean outcome prevalence from CV test folds)")
+    ax.set_xlabel("Stratum (mean outcome prevalence from CV test folds)")
     ax.set_ylabel("AUPRC (mean ± 95% CI)")
     ax.set_ylim(0, 1)
     if show_legend:
         ax.legend(loc="upper left", bbox_to_anchor=(1, 1), borderaxespad=0)
-    ax.set_title(f"AUPRC by irregularity stratum ({CV_N_SPLITS}×{CV_N_REPEATS} CV)")
+    ax.set_title(f"AUPRC by stratum ({CV_N_SPLITS}×{CV_N_REPEATS} CV)")
     fig.tight_layout(rect=[0, 0, 0.78 if show_legend else 1, 1])
     save_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(save_path, format="svg")
@@ -122,7 +122,7 @@ def plot_auroc_by_stratum(
     colors: list[str] | None = None,
 ) -> None:
     """
-    Line plot: mean AUROC per irregularity stratum for all provided pipelines.
+    Line plot: mean AUROC per stratum for all provided pipelines.
     95% CI shown as dashed lines above and below the mean.
     Overall AUROC shown as horizontal dashed reference lines.
     Tick labels show mean outcome prevalence derived from CV test folds.
@@ -171,12 +171,12 @@ def plot_auroc_by_stratum(
 
     ax.set_xticks(x)
     ax.set_xticklabels(_stratum_tick_labels(strata_keys, pipeline_summaries))
-    ax.set_xlabel("Irregularity stratum (mean outcome prevalence from CV test folds)")
+    ax.set_xlabel("Stratum (mean outcome prevalence from CV test folds)")
     ax.set_ylabel("AUROC (mean ± 95% CI)")
     ax.set_ylim(0.5, 1)
     if show_legend:
         ax.legend(loc="upper left", bbox_to_anchor=(1, 1), borderaxespad=0)
-    ax.set_title(f"AUROC by irregularity stratum ({CV_N_SPLITS}×{CV_N_REPEATS} CV)")
+    ax.set_title(f"AUROC by stratum ({CV_N_SPLITS}×{CV_N_REPEATS} CV)")
     fig.tight_layout(rect=[0, 0, 0.78 if show_legend else 1, 1])
     save_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(save_path, format="svg")
@@ -191,7 +191,7 @@ def plot_auprc_lift_by_stratum(
     colors: list[str] | None = None,
 ) -> None:
     """
-    Line plot: mean AUPRC lift (AUPRC / prevalence) per irregularity stratum.
+    Line plot: mean AUPRC lift (AUPRC / prevalence) per stratum.
     Lift > 1 means the model beats the no-skill baseline within that stratum.
     Reference line at lift = 1 (no-skill).
     Tick labels show mean ± CI outcome prevalence derived from CV test folds.
@@ -236,11 +236,11 @@ def plot_auprc_lift_by_stratum(
 
     ax.set_xticks(x)
     ax.set_xticklabels(_stratum_tick_labels(strata_keys, pipeline_summaries))
-    ax.set_xlabel("Irregularity stratum (mean outcome prevalence from CV test folds)")
+    ax.set_xlabel("Stratum (mean outcome prevalence from CV test folds)")
     ax.set_ylabel("AUPRC lift = AUPRC / prevalence (mean ± 95% CI)")
     if show_legend:
         ax.legend(loc="upper left", bbox_to_anchor=(1, 1), borderaxespad=0)
-    ax.set_title(f"AUPRC lift by irregularity stratum ({CV_N_SPLITS}×{CV_N_REPEATS} CV)")
+    ax.set_title(f"AUPRC lift by stratum ({CV_N_SPLITS}×{CV_N_REPEATS} CV)")
     fig.tight_layout(rect=[0, 0, 0.78 if show_legend else 1, 1])
     save_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(save_path, format="svg")
