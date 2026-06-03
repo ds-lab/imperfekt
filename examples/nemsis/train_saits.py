@@ -22,7 +22,7 @@ from config import (
     COHORT_WINDOW_MINUTES,
     DATASET_NAME,
     RANDOM_STATE,
-    VITAL_COLS,
+    REQUIRED_VITAL_COLS,
     data_fingerprint,
     saits_model_path,
 )
@@ -534,7 +534,7 @@ def main() -> None:
         train_branch(
             branch_df,
             branch=f"plaus_{plaus}",
-            cols=list(VITAL_COLS),
+            cols=list(REQUIRED_VITAL_COLS),
             model_path=model_path,
             provenance=provenance,
         )
