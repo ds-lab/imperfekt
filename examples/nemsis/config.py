@@ -17,10 +17,12 @@ DEBUG_MIN_POS_FRAC = 0.1
 if DATASET_NAME == "nemsis":
     COHORT_WINDOW_MINUTES = 20
     COHORT_MIN_READINGS = 5
+    COHORT_MAX_READINGS = 40
 elif DATASET_NAME == "mcmed":
     COHORT_WINDOW_MINUTES = 60
     COHORT_MIN_READINGS = 15
-    
+    COHORT_MAX_READINGS = None
+
 FILTER_ALWAYS_NULL_VITALS = False
 
 CLINICAL_ENDPOINT = "sepsis" # "destination" or "sepsis"
@@ -28,7 +30,7 @@ if DATASET_NAME == "nemsis":
     S3_BASE = f"ewai/data/nemsis/{NEMSIS_YEAR}/raw_parquet"
     COHORT_PATH = (
         f"{PATH}/data/{DATASET_NAME}/"
-        f"{CLINICAL_ENDPOINT}_{NEMSIS_YEAR}_{COHORT_WINDOW_MINUTES}_{COHORT_MIN_READINGS}_{FILTER_ALWAYS_NULL_VITALS}.parquet"
+        f"{CLINICAL_ENDPOINT}_{NEMSIS_YEAR}_{COHORT_WINDOW_MINUTES}_{COHORT_MIN_READINGS}_{COHORT_MAX_READINGS}_{FILTER_ALWAYS_NULL_VITALS}.parquet"
     )
     RESULTS_DIR = PATH / f"data/{DATASET_NAME}/post_publication_results"
     VITAL_COLS = ["sbp", "hr", "o2sat", "rr"]
@@ -46,6 +48,22 @@ else:
     raise ValueError(f"Unsupported DATASET_NAME: {DATASET_NAME}")
 
 
+# Pre-trained SAITS models live here, one per plausibility branch, written by
+# train_saits.py as ``<DATASET_NAME>_plaus_<keep|remove>.pypots``. Single source
+# of truth so the trainer and the experiment pipeline agree on the location.
+SAITS_MODEL_DIR = PATH / "models" / "saits"
+
+
+def saits_model_path(plaus: str) -> Path:
+    """Path to the pre-trained SAITS model for a plausibility branch.
+
+    ``plaus`` is "keep" or "remove" (as stored in STAGE_3_CONFIGS). The returned
+    path may not exist yet — callers that want to skip-when-missing should check
+    ``.exists()`` (see prep._apply_imputation).
+    """
+    return SAITS_MODEL_DIR / f"{DATASET_NAME}_plaus_{plaus}.pypots"
+
+
 STAGE_3_CONFIGS: dict[str, dict[str, str]] = {
     # "iq_pk_in": {"method": "iqr", "plaus": "keep",   "imp": "none"},
     # "iq_pk_il": {"method": "iqr", "plaus": "keep",   "imp": "locf"},
@@ -53,10 +71,10 @@ STAGE_3_CONFIGS: dict[str, dict[str, str]] = {
     # "iq_pr_il": {"method": "iqr", "plaus": "remove", "imp": "locf"},
     "ma_pk_in": {"method": "mad", "plaus": "keep",   "imp": "none"},
     "ma_pk_il": {"method": "mad", "plaus": "keep",   "imp": "locf"},
-  #  "ma_pk_is": {"method": "mad", "plaus": "keep",   "imp": "saits"},
+    "ma_pk_is": {"method": "mad", "plaus": "keep",   "imp": "saits"},
     "ma_pr_in": {"method": "mad", "plaus": "remove", "imp": "none"},
     "ma_pr_il": {"method": "mad", "plaus": "remove", "imp": "locf"},
-  #  "ma_pr_is": {"method": "mad", "plaus": "remove", "imp": "saits"},
+    "ma_pr_is": {"method": "mad", "plaus": "remove", "imp": "saits"},
 }
 
 STAGE_4_CONFIGS: dict[str, dict[str, bool]] = {

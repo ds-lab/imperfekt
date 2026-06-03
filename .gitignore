@@ -25,3 +25,5 @@ venv/
 Thumbs.db
 
 .devcontainer
+
+/examples/models/

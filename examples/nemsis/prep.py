@@ -1,8 +1,19 @@
+import logging
+
 import polars as pl
 
 from imperfekt.analysis.utils.masking import create_plausibility_mask
-from config import COHORT_MIN_READINGS, COHORT_WINDOW_MINUTES, STAGE_3_CONFIGS, VITAL_COLS
+from config import (
+    COHORT_MAX_READINGS,
+    COHORT_MIN_READINGS,
+    COHORT_WINDOW_MINUTES,
+    STAGE_3_CONFIGS,
+    VITAL_COLS,
+    saits_model_path,
+)
 from imputation import impute
+
+logger = logging.getLogger(__name__)
 
 
 def filter_cohort(df: pl.DataFrame) -> pl.DataFrame:
@@ -16,10 +27,13 @@ def filter_cohort(df: pl.DataFrame) -> pl.DataFrame:
         .filter(pl.col("_minutes_from_start") <= COHORT_WINDOW_MINUTES)
         .drop(["_start_clock", "_minutes_from_start"])
     )
+    count_filter = pl.col("_n") >= COHORT_MIN_READINGS
+    if COHORT_MAX_READINGS is not None:
+        count_filter = count_filter & (pl.col("_n") <= COHORT_MAX_READINGS)
     valid_keys = (
         df_win.group_by("id")
         .agg(pl.col("clock").len().alias("_n"))
-        .filter(pl.col("_n") >= COHORT_MIN_READINGS)
+        .filter(count_filter)
         .select("id")
     )
     return df_win.join(valid_keys, on="id", how="inner")
@@ -45,35 +59,12 @@ def make_plausibility_mask(df: pl.DataFrame, method: str) -> pl.DataFrame:
     )
 
 
-def make_configs(
-    df: pl.DataFrame,
-    mask_iqr: pl.DataFrame,
-    mask_mad: pl.DataFrame,
-) -> dict[str, pl.DataFrame]:
-    """Produce all 8 config DataFrames from a filtered cohort and frozen masks.
-
-    Returns a dict mapping config_id → DataFrame (same schema and row count as df).
-    """
-    masks = {"iqr": mask_iqr, "mad": mask_mad}
-    results: dict[str, pl.DataFrame] = {}
-
-    for config_id, cfg in STAGE_3_CONFIGS.items():
-        mask = masks[cfg["method"]]
-        df_out = _apply_plausibility(df, mask, cfg["plaus"])
-        df_out = _apply_imputation(df_out, cfg["imp"])
-        results[config_id] = df_out
-
-    return results
-
-
 class ConfigBuilder:
     """Builds plausibility masks and config DataFrames lazily, on demand.
 
     Masks (iqr/mad) and built configs are memoized, so building several configs
     that share a mask only computes that mask once, and a single config feeding
-    many feature sets is built only once. Nothing is computed until ``config``
-    is actually called — which lets callers consult a downstream cache first and
-    skip mask/config work entirely on a hit.
+    many feature sets is built only once.
     """
 
     def __init__(self, df: pl.DataFrame) -> None:
@@ -86,11 +77,13 @@ class ConfigBuilder:
             self._masks[method] = make_plausibility_mask(self.df, method=method)
         return self._masks[method]
 
-    def config(self, config_id: str) -> pl.DataFrame:
+    def config(self, config_id: str) -> pl.DataFrame | None:
+        """Build (and memoize) a config DataFrame, or None if it should be skipped.
+        """
         if config_id not in self._configs:
             cfg = STAGE_3_CONFIGS[config_id]
             df_out = _apply_plausibility(self.df, self.mask(cfg["method"]), cfg["plaus"])
-            df_out = _apply_imputation(df_out, cfg["imp"])
+            df_out = _apply_imputation(df_out, cfg["imp"], cfg["plaus"])
             self._configs[config_id] = df_out
         return self._configs[config_id]
 
@@ -110,9 +103,37 @@ def _apply_plausibility(df: pl.DataFrame, mask: pl.DataFrame, plaus: str) -> pl.
     )
 
 
-def _apply_imputation(df: pl.DataFrame, imp: str) -> pl.DataFrame:
+def _apply_imputation(df: pl.DataFrame, imp: str, plaus: str) -> pl.DataFrame | None:
+    """Apply the imputation strategy for a config.
+
+    Returns the imputed DataFrame, or ``None`` to signal the config should be
+    *skipped* (currently only when ``imp == "saits"`` but the pre-trained model
+    for this plausibility branch is missing). ``plaus`` ("keep"/"remove") selects
+    the per-branch SAITS model.
+    """
     if imp == "none":
         return df
-    # imp == "locf": forward-fill within patient, fall back to per-patient mean for leading nulls
-    df_out, _ = impute(df, cols=VITAL_COLS, strategy="locf", id_col="id", time_col="clock")
-    return df_out
+    if imp == "locf":
+        # forward-fill within patient, fall back to per-patient mean for leading nulls
+        df_out, _ = impute(df, cols=VITAL_COLS, strategy="locf", id_col="id", time_col="clock")
+        return df_out
+    if imp == "saits":
+        model_path = saits_model_path(plaus)
+        if not model_path.exists():
+            logger.warning(
+                "Skipping SAITS config (plaus=%s): no trained model at %s. "
+                "Run train_saits.py to enable it.",
+                plaus,
+                model_path,
+            )
+            return None
+        df_out, _ = impute(
+            df,
+            cols=VITAL_COLS,
+            strategy="saits",
+            id_col="id",
+            time_col="clock",
+            saits_model_path=str(model_path),
+        )
+        return df_out
+    raise ValueError(f"Unknown imputation strategy '{imp}' (expected none|locf|saits).")

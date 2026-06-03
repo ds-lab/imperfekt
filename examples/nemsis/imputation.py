@@ -6,6 +6,8 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 
+from seq_array import df_to_3d_array
+
 logger = logging.getLogger(__name__)
 
 
@@ -84,55 +86,6 @@ def export_imputation_elapsed_time(save_results_path: Path, imputation_times: di
     return None
 
 
-def _df_to_3d_array(
-    df: pl.DataFrame,
-    id_col: str,
-    time_col: str,
-    feature_cols: list[str],
-):
-    """
-    Convert a long-format Polars DF into a (N, T, D) numpy array and mask.
-
-    N: number of ids
-    T: max number of time steps across all ids (shorter sequences are padded with NaN)
-    D: number of features
-
-    Returns:
-        ids: list of unique ids in order
-        data: (N, T, D) numpy array with NaN for missing/padded values
-        mask: (N, T, D) boolean array, True = observed, False = missing/padded
-        seq_lengths: (N,) array of actual sequence lengths per id
-    """
-    # sort by id, time
-    df_sorted = df.sort([id_col, time_col])
-
-    # unique ids in deterministic order
-    ids = df_sorted.select(pl.col(id_col)).unique().sort(id_col)[id_col].to_list()
-    n_ids = len(ids)
-    n_features = len(feature_cols)
-
-    # Get the number of time steps per id
-    counts = df_sorted.group_by(id_col).agg(pl.len().alias("count")).sort(id_col)
-    seq_lengths = counts["count"].to_numpy()
-    n_steps = int(seq_lengths.max())  # use max length, pad shorter ones
-
-    # Initialize with NaN (will be treated as missing)
-    data = np.full((n_ids, n_steps, n_features), np.nan, dtype=np.float64)
-
-    # Fill in actual values per id
-    values_2d = df_sorted.select(feature_cols).with_columns([pl.all().cast(pl.Float64)]).to_numpy()
-
-    row_idx = 0
-    for i, length in enumerate(seq_lengths):
-        data[i, :length, :] = values_2d[row_idx : row_idx + length, :]
-        row_idx += length
-
-    # mask: True = observed, False = missing/padded
-    mask = ~np.isnan(data)
-
-    return ids, data, mask, seq_lengths
-
-
 def _impute_with_saits(
     df: pl.DataFrame,
     cols: list[str],
@@ -186,32 +139,67 @@ def _impute_with_saits(
             f"but impute() was called with {list(cols)}. Order must match."
         )
 
-    ids, data, mask, seq_lengths = _df_to_3d_array(
+    trained_n_steps = int(np.asarray(meta["n_steps"]).reshape(-1)[0])
+
+    ids, data, mask, seq_lengths = df_to_3d_array(
         df, id_col=id_col, time_col=time_col, feature_cols=cols
     )
     n_samples, n_steps, n_features = data.shape
 
-    # Per-patient fully-missing mask, computed BEFORE imputation.
-    # missing_all[i, d] == True  ->  feature d was never observed for patient i.
-    # `mask` is True where observed; collapse over the time axis within each
-    # sequence's real length (padded steps are already False in `mask`).
+    # SAITS is fixed-length: it cannot process a sequence longer than the T it was
+    # trained on. 
+    n_truncated = int((seq_lengths > trained_n_steps).sum())
+    if n_steps > trained_n_steps:
+        logger.warning(
+            "SAITS: %d/%d inference stay(s) longer than trained n_steps=%d; "
+            "truncating to the first %d readings (later readings left un-imputed).",
+            n_truncated,
+            n_samples,
+            trained_n_steps,
+            trained_n_steps,
+        )
+        data = data[:, :trained_n_steps, :]
+        mask = mask[:, :trained_n_steps, :]
+        n_steps = trained_n_steps
+
     observed_any = mask.any(axis=1)  # (N, D): True if observed at least once
     missing_all = ~observed_any  # (N, D): True if 100% missing for that patient
 
     # Normalize using the SAME stats the model was trained with.
     data_normalized = (data - feature_means) / feature_stds
+    
+    if n_steps < trained_n_steps:
+        pad = np.full((n_samples, trained_n_steps - n_steps, n_features), np.nan)
+        model_input = np.concatenate([data_normalized, pad], axis=1)
+    else:
+        model_input = data_normalized
 
-    # In pypots, `load` is an instance method that restores the saved model
-    # (architecture + weights) into the constructed shell. The placeholder
-    # n_steps/n_features are overwritten by the checkpoint on load.
-    saits = SAITS(n_steps=n_steps, n_features=n_features)
+    json_path = model_path.with_suffix(model_path.suffix + ".meta.json")
+    if not json_path.exists():
+        raise FileNotFoundError(
+            f"SAITS architecture meta not found at {json_path}. "
+            "Re-train with examples/nemsis/train_saits.py to regenerate it."
+        )
+    hp = json.loads(json_path.read_text())["hyperparameters"]
+    saits = SAITS(
+        n_steps=trained_n_steps,
+        n_features=n_features,
+        n_layers=hp["n_layers"],
+        d_model=hp["d_model"],
+        n_heads=hp["n_heads"],
+        d_k=hp["d_k"],
+        d_v=hp["d_v"],
+        d_ffn=hp["d_ffn"],
+        dropout=hp["dropout"],
+    )
     saits.load(str(model_path))
 
-    imputed_data_normalized = saits.impute({"X": data_normalized})
-    # pypots may return an extra leading dim depending on version; squeeze to (N, T, D).
+    imputed_data_normalized = saits.impute({"X": model_input})
     imputed_data_normalized = np.asarray(imputed_data_normalized)
     if imputed_data_normalized.ndim == 4:
         imputed_data_normalized = imputed_data_normalized.squeeze(1)
+    # Drop the padding steps so the array lines up with the (truncated) time axis.
+    imputed_data_normalized = imputed_data_normalized[:, :n_steps, :]
 
     # De-normalize back to original scale.
     imputed_data = imputed_data_normalized * feature_stds + feature_means
@@ -225,19 +213,32 @@ def _impute_with_saits(
                 imputed_data[i, :, d] = np.nan
     # ----------------------------------------------------------------------
 
-    # Extract only the actual (non-padded) values for each sequence (un-pad).
+    # Un-pad
     imputed_values_list = []
     for i, length in enumerate(seq_lengths):
-        imputed_values_list.append(imputed_data[i, :length, :])
-
+        n_imp = min(int(length), n_steps)  # rows the model actually imputed
+        imputed_values_list.append(imputed_data[i, :n_imp, :])
     imputed_flat = np.vstack(imputed_values_list)
 
     df_sorted = df.sort([id_col, time_col])
+    if n_truncated:
+        original_flat = (
+            df_sorted.select(cols).with_columns([pl.all().cast(pl.Float64)]).to_numpy()
+        )
+        keep = np.ones(original_flat.shape[0], dtype=bool)
+        row = 0
+        for length in seq_lengths:
+            n_imp = min(int(length), n_steps)
+            keep[row : row + n_imp] = False  # these get overwritten by SAITS
+            row += int(length)
+        merged = original_flat.copy()
+        merged[~keep] = imputed_flat
+        imputed_flat = merged
+
     imputed_cols = [pl.Series(name=col, values=imputed_flat[:, i]) for i, col in enumerate(cols)]
 
     df_imputed_sorted = df_sorted.with_columns(imputed_cols)
 
-    # Restore original row order
     return (
         df_imputed_sorted.join(
             df.select(id_col, time_col).with_row_index("row_idx"),

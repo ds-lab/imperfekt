@@ -6,6 +6,7 @@ import s3fs
 
 from config import (
     CLINICAL_ENDPOINT,
+    COHORT_MAX_READINGS,
     COHORT_MIN_READINGS,
     COHORT_PATH,
     COHORT_WINDOW_MINUTES,
@@ -89,8 +90,8 @@ def _apply_binary_label(df: pl.DataFrame, id_col: str, positive_ids: pl.DataFram
 
 def _nemsis_build_combined_years() -> pl.DataFrame:
     """Concatenate prebuilt 2024 and 2025 cohorts with year-suffixed IDs."""
-    path_2024 = COHORT_PATH.parent / f"{CLINICAL_ENDPOINT}_2024_{COHORT_WINDOW_MINUTES}_{COHORT_MIN_READINGS}_{FILTER_ALWAYS_NULL_VITALS}.parquet"
-    path_2025 = COHORT_PATH.parent / f"{CLINICAL_ENDPOINT}_2025_{COHORT_WINDOW_MINUTES}_{COHORT_MIN_READINGS}_{FILTER_ALWAYS_NULL_VITALS}.parquet"
+    path_2024 = COHORT_PATH.parent / f"{CLINICAL_ENDPOINT}_2024_{COHORT_WINDOW_MINUTES}_{COHORT_MIN_READINGS}_{COHORT_MAX_READINGS}_{FILTER_ALWAYS_NULL_VITALS}.parquet"
+    path_2025 = COHORT_PATH.parent / f"{CLINICAL_ENDPOINT}_2025_{COHORT_WINDOW_MINUTES}_{COHORT_MIN_READINGS}_{COHORT_MAX_READINGS}_{FILTER_ALWAYS_NULL_VITALS}.parquet"
     for p in (path_2024, path_2025):
         if not p.exists():
             raise FileNotFoundError(f"{p} not found. Please build the {p.stem.split('_')[1]} cohort first.")

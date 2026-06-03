@@ -5,13 +5,12 @@ from examples.nemsis.cv import compute_intervariable_missingness_strata, save_cv
 import polars as pl
 from pathlib import Path
 
-from config import COHORT_PATH, RESULTS_DIR, CV_N_REPEATS, CV_N_SPLITS, STAGE_3_CONFIGS, load_cohort
+from config import COHORT_PATH, RESULTS_DIR, CV_N_REPEATS, CV_N_SPLITS, STAGE_3_CONFIGS, load_cohort, saits_model_path
 from prep import ConfigBuilder
 
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 df = load_cohort()
-
 print(f"Cohort: {df['id'].n_unique()} stays, {len(df)} observations")
 outcome = df.group_by("id").agg(pl.col("label").max()).select("label")
 print(f"Outcome prevalence (stay-level): {outcome.mean()[0]['label'][0]} ({outcome.sum()[0]['label'][0]}/{len(outcome)})")
@@ -24,7 +23,6 @@ print(case_metrics.columns)
 # the provider, which builds only the requested config (and only the mask that
 # config needs), memoized for reuse across setups.
 builder = ConfigBuilder(df)
-CONFIG_NAME = "iq_pk_in"
 
 setups = dict()
 pipeline_summaries = []
@@ -32,6 +30,9 @@ pipeline_summaries = []
 # %% EXPERIMENTS
 for config_name, config in STAGE_3_CONFIGS.items():
     print(f"Config {config_name}: method={config['method']}, plaus={config['plaus']}, imp={config['imp']}")
+    if config["imp"] == "saits" and not saits_model_path(config["plaus"]).exists():
+        print(f"  -> skipped {config_name}: no SAITS model for plaus={config['plaus']}")
+        continue
     feature_sets = make_feature_sets(
         lambda config_name=config_name: builder.config(config_name),
         config_name=config_name,
