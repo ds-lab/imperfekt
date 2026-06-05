@@ -10,7 +10,7 @@ DATASET_NAME = "nemsis" # "nemsis" or "mcmed"
 NEMSIS_YEAR = "2024+2025" # "2024", "2025" or combo ("2024+2025")
 
 # Run full cohort or just a slice (with sure positives)
-DEBUG = False
+DEBUG = True
 DEBUG_N_STAYS = 2000 * 10
 DEBUG_MIN_POS_FRAC = 0.1
 
@@ -80,8 +80,8 @@ STAGE_3_CONFIGS: dict[str, dict[str, str]] = {
 STAGE_4_CONFIGS: dict[str, dict[str, bool]] = {
     "base": {"base": True, "miss": False, "plaus": False},
     "base+miss": {"base": True, "miss": True,  "plaus": False},
-    "base+plaus": {"base": True, "miss": False, "plaus": True},
-    "base+miss+plaus": {"base": True, "miss": True,  "plaus": True},
+   # "base+plaus": {"base": True, "miss": False, "plaus": True},
+   # "base+miss+plaus": {"base": True, "miss": True,  "plaus": True},
 }
 
 STRUCTURAL_FEATURE_COLS = []

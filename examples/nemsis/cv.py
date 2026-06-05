@@ -211,6 +211,8 @@ def run_cv(
     axes: tuple[str, str],
     pipeline_name: str,
     feature_distribution_save_path: Path | None = None,
+    shap_save_path: Path | None = None,
+    shap_full: bool = True,
 ) -> tuple[
     dict[str, list],
     XGBoostModel | None,
@@ -245,6 +247,11 @@ def run_cv(
     collect_feature_dist = feature_distribution_save_path is not None
     fold_feature_means: dict[tuple[str, str], list[float]] = defaultdict(list)
     fold_outcome_prevalence: dict[str, list[float]] = defaultdict(list)
+    collect_shap = shap_save_path is not None
+    fold_shap_abs: dict[str, list[np.ndarray]] = defaultdict(list)
+    last_shap_interactions: dict[str, np.ndarray] = {}
+    last_X_test_raw: np.ndarray | None = None
+    last_y_test_raw: np.ndarray | None = None
 
     subject_labels = (
         stay_df.select(["id", "label"])
@@ -463,6 +470,55 @@ def run_cv(
                         float(row["fold_mean"])
                     )
 
+        if collect_shap:
+            try:
+                import shap as _shap
+                import shap.explainers._tree as _shap_tree
+                import shap.explainers.other._ubjson as _shap_ubj
+                # XGBoost ≥2.0 stores base_score as '[5E-1]' in UBJ; SHAP 0.49
+                # calls float() on it directly and crashes. Patch the UBJ decoder
+                # in-place to strip brackets before the float conversion.
+                if not getattr(_shap_ubj, "_bracket_fix_applied", False):
+                    _orig_decode = _shap_ubj.decode_ubjson_buffer
+                    def _fixed_decode(fd, _orig=_orig_decode):
+                        result = _orig(fd)
+                        try:
+                            lmp = result["learner"]["learner_model_param"]
+                            bs = lmp.get("base_score", "")
+                            if isinstance(bs, str) and bs.startswith("[") and bs.endswith("]"):
+                                lmp["base_score"] = bs[1:-1]
+                        except Exception:
+                            pass
+                        return result
+                    _shap_ubj.decode_ubjson_buffer = _fixed_decode
+                    _shap_tree.decode_ubjson_buffer = _fixed_decode
+                    _shap_ubj._bracket_fix_applied = True
+
+                _explainer = _shap.TreeExplainer(model.model.get_booster())
+                _shap_vals = _explainer.shap_values(X_test)  # (n_test, n_features)
+                fold_shap_abs["overall"].append(np.abs(_shap_vals).mean(axis=0))
+                if shap_full:
+                    for _sl in np.unique(strata_arr):
+                        if _sl == "":
+                            continue
+                        _mask = strata_arr == _sl
+                        if _mask.sum() > 0:
+                            fold_shap_abs[_sl].append(np.abs(_shap_vals[_mask]).mean(axis=0))
+                if shap_full and fold_idx == total_folds - 1:
+                    _ivals = _explainer.shap_interaction_values(X_test)  # (n_test, n_feat, n_feat)
+                    last_shap_interactions["overall"] = _ivals.mean(axis=0)
+                    for _sl in np.unique(strata_arr):
+                        if _sl == "":
+                            continue
+                        _mask = strata_arr == _sl
+                        if _mask.sum() > 0:
+                            last_shap_interactions[_sl] = _ivals[_mask].mean(axis=0)
+                    last_X_test_raw = X_test
+                    last_y_test_raw = y_test
+            except Exception as _e:
+                print(f"  [{pipeline_name}] SHAP skipped (fold {fold_idx + 1}): {_e}")
+                collect_shap = False
+
         last_model = model
         last_test_df = test
         last_X_test = X_test
@@ -476,6 +532,22 @@ def run_cv(
             fold_outcome_prevalence,
             feature_distribution_save_path,
         )
+
+    if shap_save_path is not None and fold_shap_abs:
+        shap_save_path.parent.mkdir(parents=True, exist_ok=True)
+        save_dict: dict[str, np.ndarray] = {
+            "feature_names": np.array(feature_cols),
+        }
+        for _sl, _arrs in fold_shap_abs.items():
+            save_dict[f"shap_{_sl}"] = np.stack(_arrs)
+        for _sl, _mat in last_shap_interactions.items():
+            save_dict[f"interact_{_sl}"] = _mat
+        if last_X_test_raw is not None:
+            save_dict["last_X_test_raw"] = last_X_test_raw
+        if last_y_test_raw is not None:
+            save_dict["last_y_test_raw"] = last_y_test_raw
+        np.savez_compressed(shap_save_path, **save_dict)
+        print(f"  [{pipeline_name}] SHAP saved to {shap_save_path}")
 
     return dict(fold_metrics), last_model, last_X_test, last_test_df, feature_cols, last_test_strata
 
@@ -787,3 +859,53 @@ def print_information_gain_ratio(
         f"Information gain ratio ({metric.upper()}) {baseline_name} -> {candidate_name}: "
         f"{igr:.3f} ({igr * 100:+.1f}%) [{candidate:.3f} vs {baseline:.3f}]"
     )
+
+
+def summarise_shap(npz_path: Path) -> pl.DataFrame:
+    """Read a SHAP .npz and return mean ± std of mean |SHAP| per stratum × feature."""
+    data = np.load(npz_path, allow_pickle=True)
+    feature_names: list[str] = data["feature_names"].tolist()
+    rows: list[dict] = []
+    for key in data.files:
+        if not key.startswith("shap_"):
+            continue
+        stratum = key[len("shap_"):]
+        mat = data[key]  # (n_folds, n_features)
+        for i, feat in enumerate(feature_names):
+            col = mat[:, i]
+            rows.append(
+                {
+                    "stratum": stratum,
+                    "feature": feat,
+                    "feature_group": feature_group(feat),
+                    "mean_abs_shap_mean": float(col.mean()),
+                    "mean_abs_shap_std": float(col.std(ddof=1)) if len(col) > 1 else 0.0,
+                }
+            )
+    return pl.DataFrame(rows)
+
+
+def save_shap_importance_csv(
+    npz_paths: list[tuple[str, Path]],
+    save_path: Path,
+) -> None:
+    """Merge per-pipeline SHAP summaries into a tidy CSV.
+
+    Columns: pipeline, stratum, feature, feature_group, mean_abs_shap_mean, mean_abs_shap_std
+    """
+    frames = []
+    for pipeline_name, path in npz_paths:
+        if not path.exists():
+            print(f"  SHAP .npz not found, skipping: {path}")
+            continue
+        df = summarise_shap(path).with_columns(pl.lit(pipeline_name).alias("pipeline"))
+        frames.append(df)
+    if not frames:
+        print("save_shap_importance_csv: no valid .npz files found.")
+        return
+    out = pl.concat(frames).select(
+        ["pipeline", "stratum", "feature", "feature_group", "mean_abs_shap_mean", "mean_abs_shap_std"]
+    )
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    out.write_csv(save_path)
+    print(f"SHAP importance CSV saved to {save_path}")

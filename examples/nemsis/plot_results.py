@@ -15,11 +15,21 @@ ROOT = Path(__file__).parents[2]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).parent))
 
-from plotting import plot_auprc_by_stratum, plot_auprc_lift_by_stratum, plot_auroc_by_stratum
-from examples.nemsis.cv import load_cv_results
-from config import RESULTS_DIR
+from plotting import (
+    plot_auprc_by_stratum,
+    plot_auprc_lift_by_stratum,
+    plot_auroc_by_stratum,
+    plot_shap_importance_bar,
+    plot_shap_stability_scatter,
+    plot_spearman_orthogonality,
+)
+from examples.nemsis.cv import load_cv_results, save_shap_importance_csv
+from config import RESULTS_DIR, data_fingerprint_tag, COHORT_PATH
+import polars as pl
 
-csv_path = Path(sys.argv[1]) if len(sys.argv) > 1 else RESULTS_DIR / "cv_results.csv"
+_fp_tag = data_fingerprint_tag(COHORT_PATH)
+_RUN_DIR = RESULTS_DIR / _fp_tag
+csv_path = Path(sys.argv[1]) if len(sys.argv) > 1 else _RUN_DIR / "cv_results.csv"
 
 # ── Filter ────────────────────────────────────────────────────────────────────
 # Comment out any pipelines you don't want plotted.
@@ -89,11 +99,9 @@ plot_auroc_by_stratum(pipeline_summaries, figures_dir / "auroc_by_stratum.svg")
 # %%
 # ── Stratum characterisation table (missingness axes) ────────────────────────
 # Find the most recently written case_metrics.parquet under the strata cache.
-import polars as pl
-
 _STRATUM_ORDER = ["Q_complete", "Q_alpha", "Q_beta", "Q_gamma", "Q_delta"]
 
-cache_root = csv_path.parent / "intervariable_strata_cache"
+cache_root = RESULTS_DIR / "intervariable_strata_cache"
 parquet_candidates = sorted(
     glob.glob(str(cache_root / "*" / "case_metrics.parquet")),
     key=lambda p: Path(p).stat().st_mtime,
@@ -217,4 +225,63 @@ if feat_quad_path.exists() and cm is not None:
 else:
     if not feat_quad_path.exists():
         print(f"\nNo feature_distribution_by_quadrant.csv found — re-run experiments.py to generate it.")
+
+# %%
+# ── Feature distribution by outcome ──────────────────────────────────────────
+feat_outcome_path = csv_path.parent / "feature_distribution_by_outcome.csv"
+if feat_outcome_path.exists():
+    print(f"\nFeature distribution by outcome from {feat_outcome_path}")
+    fo = pl.read_csv(feat_outcome_path)
+    # Show mean ± std for each feature grouped by outcome, sorted by feature_group then feature
+    fo_wide = (
+        fo.with_columns(
+            pl.concat_str(
+                pl.col("mean").round(3).cast(pl.Utf8),
+                pl.lit(" ± "),
+                pl.col("ci").round(3).cast(pl.Utf8),
+            ).alias("mean_ci")
+        )
+        .select(["feature_group", "feature", "outcome", "mean_ci"])
+        .pivot(index=["feature_group", "feature"], on="outcome", values="mean_ci")
+        .sort(["feature_group", "feature"])
+    )
+    fo_wide_path = csv_path.parent / "feature_distribution_by_outcome_wide.csv"
+    fo_wide.write_csv(fo_wide_path)
+    print(f"Feature-by-outcome wide table saved to {fo_wide_path}")
+    print(fo_wide.head(10))
+else:
+    print(f"\nNo feature_distribution_by_outcome.csv found — re-run experiments.py to generate it.")
+
+# %%
+# ── SHAP Interpretability & Stability ─────────────────────────────────────────
+# SHAP files always live in _RUN_DIR/shap/, independent of where csv_path came from.
+shap_dir = _RUN_DIR / "shap"
+npz_paths = [
+    (label, shap_dir / f"{label.removeprefix('Setup ').replace('/', '__')}.npz")
+    for label, _ in pipeline_summaries
+]
+npz_paths_found = [(label, p) for label, p in npz_paths if p.exists()]
+
+if npz_paths_found:
+    shap_csv_path = csv_path.parent / "shap_importance.csv"
+    save_shap_importance_csv(npz_paths_found, shap_csv_path)
+    shap_df = pl.read_csv(shap_csv_path)
+
+    strata_in_shap = shap_df["stratum"].unique().to_list()
+    for stratum in ["overall"] + [s for s in _STRATUM_ORDER if s in strata_in_shap]:
+        tag = stratum.lower().replace("_", "")
+        plot_shap_importance_bar(
+            shap_df, figures_dir / f"shap_importance_bar_{tag}.svg", stratum=stratum
+        )
+        plot_shap_stability_scatter(
+            shap_df, figures_dir / f"shap_stability_scatter_{tag}.svg", stratum=stratum
+        )
+
+    for label, npz_path in npz_paths_found:
+        pipeline_shap_df = shap_df.filter(
+            (pl.col("pipeline") == label) & (pl.col("stratum") == "overall")
+        )
+        plot_spearman_orthogonality(pipeline_shap_df, npz_path, label, figures_dir)
+else:
+    print("\nNo SHAP .npz files found — re-run experiments.py to generate them.")
 # %%
