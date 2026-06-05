@@ -248,7 +248,6 @@ def run_cv(
     collect_feature_dist = feature_distribution_save_path is not None
     fold_feature_means: dict[tuple[str, str], list[float]] = defaultdict(list)
     fold_outcome_prevalence: dict[str, list[float]] = defaultdict(list)
-    collect_shap = shap_save_path is not None
     fold_shap_abs: dict[str, list[np.ndarray]] = defaultdict(list)
     last_shap_interactions: dict[str, np.ndarray] = {}
     last_X_test_raw: np.ndarray | None = None
@@ -471,7 +470,7 @@ def run_cv(
                         float(row["fold_mean"])
                     )
 
-        if collect_shap:
+        if shap_full:
             try:
                 import shap as _shap
                 import shap.explainers._tree as _shap_tree
@@ -498,14 +497,13 @@ def run_cv(
                 _explainer = _shap.TreeExplainer(model.model.get_booster())
                 _shap_vals = _explainer.shap_values(X_test)  # (n_test, n_features)
                 fold_shap_abs["overall"].append(np.abs(_shap_vals).mean(axis=0))
-                if shap_full:
-                    for _sl in np.unique(strata_arr):
-                        if _sl == "":
-                            continue
-                        _mask = strata_arr == _sl
-                        if _mask.sum() > 0:
-                            fold_shap_abs[_sl].append(np.abs(_shap_vals[_mask]).mean(axis=0))
-                if shap_full and shap_interactions and fold_idx == total_folds - 1:
+                for _sl in np.unique(strata_arr):
+                    if _sl == "":
+                        continue
+                    _mask = strata_arr == _sl
+                    if _mask.sum() > 0:
+                        fold_shap_abs[_sl].append(np.abs(_shap_vals[_mask]).mean(axis=0))
+                if shap_interactions and fold_idx == total_folds - 1:
                     _ivals = _explainer.shap_interaction_values(X_test)  # (n_test, n_feat, n_feat)
                     last_shap_interactions["overall"] = _ivals.mean(axis=0)
                     for _sl in np.unique(strata_arr):
@@ -518,7 +516,6 @@ def run_cv(
                     last_y_test_raw = y_test
             except Exception as _e:
                 print(f"  [{pipeline_name}] SHAP skipped (fold {fold_idx + 1}): {_e}")
-                collect_shap = False
 
         last_model = model
         last_test_df = test
@@ -534,7 +531,7 @@ def run_cv(
             feature_distribution_save_path,
         )
 
-    if shap_save_path is not None and fold_shap_abs:
+    if shap_full and shap_save_path is not None and fold_shap_abs:
         shap_save_path.parent.mkdir(parents=True, exist_ok=True)
         save_dict: dict[str, np.ndarray] = {
             "feature_names": np.array(feature_cols),

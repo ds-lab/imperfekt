@@ -32,7 +32,7 @@ setups = dict()
 pipeline_summaries = []
 _feature_dist_saved = False
 _feat_dist_outcome_df: pl.DataFrame | None = None
-_SHAP_FULL_RUNS = {"ma_pk_in/base+miss", "ma_pk_in/base+miss+plaus"}
+_SHAP_FULL_RUNS = {"ma_pk_in/base+miss"}
 _FEAT_DIST_OUTCOME_RUN = "ma_pk_in/base+miss"
 
 # %% EXPERIMENTS
