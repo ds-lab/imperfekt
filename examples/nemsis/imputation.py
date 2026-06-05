@@ -180,7 +180,10 @@ def _impute_with_saits(
             f"SAITS architecture meta not found at {json_path}. "
             "Re-train with examples/nemsis/train_saits.py to regenerate it."
         )
+    import torch
+
     hp = json.loads(json_path.read_text())["hyperparameters"]
+    inference_batch_size = 131072
     saits = SAITS(
         n_steps=trained_n_steps,
         n_features=n_features,
@@ -191,11 +194,32 @@ def _impute_with_saits(
         d_v=hp["d_v"],
         d_ffn=hp["d_ffn"],
         dropout=hp["dropout"],
+        batch_size=inference_batch_size,
     )
     saits.load(str(model_path))
+    saits.model.eval()
 
-    imputed_data_normalized = saits.impute({"X": model_input})
-    imputed_data_normalized = np.asarray(imputed_data_normalized)
+    n_batches = (n_samples + inference_batch_size - 1) // inference_batch_size
+    print(f"SAITS inference: {n_samples} samples in {n_batches} batches of {inference_batch_size}")
+    batch_results = []
+    with torch.no_grad():
+        for i, start in enumerate(range(0, n_samples, inference_batch_size)):
+            batch_np = model_input[start : start + inference_batch_size]
+            batch_tensor = torch.tensor(batch_np, dtype=torch.float32, device=saits.device)
+            missing_mask = (~torch.isnan(batch_tensor)).float()
+            batch_tensor = torch.nan_to_num(batch_tensor, nan=0.0)
+            inputs = {"X": batch_tensor, "missing_mask": missing_mask}
+            result = saits.model(inputs)
+            batch_results.append(result["imputation"].cpu().numpy())
+            del batch_tensor, missing_mask, inputs, result
+            torch.cuda.empty_cache()
+            print(f"SAITS inference: batch {i+1}/{n_batches}")
+
+    del saits
+    torch.cuda.empty_cache()
+
+    print("SAITS inference complete; post-processing results…")
+    imputed_data_normalized = np.concatenate(batch_results, axis=0)
     if imputed_data_normalized.ndim == 4:
         imputed_data_normalized = imputed_data_normalized.squeeze(1)
     # Drop the padding steps so the array lines up with the (truncated) time axis.
@@ -238,6 +262,8 @@ def _impute_with_saits(
     imputed_cols = [pl.Series(name=col, values=imputed_flat[:, i]) for i, col in enumerate(cols)]
 
     df_imputed_sorted = df_sorted.with_columns(imputed_cols)
+    
+    print(f"SAITS imputation applied to {len(cols)} columns: {cols}")
 
     return (
         df_imputed_sorted.join(

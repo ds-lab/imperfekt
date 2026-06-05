@@ -637,7 +637,7 @@ class XGBoostModel(BaseModel):
             "subsample": 0.8,
             "colsample_bytree": 0.8,
             "n_estimators": 300,
-            "scale_pos_weight": 1.0,
+            "scale_pos_weight": None,  # set automatically in _train_model from class ratio
             "random_state": random_state,
             "tree_method": "hist",
             "n_jobs": 1,  # single-thread for strict determinism
@@ -658,11 +658,8 @@ class XGBoostModel(BaseModel):
         """Train an XGBoost model and optionally calibrate its probabilities."""
         pos = float(y_train.sum())
         neg = float(y_train.shape[0] - pos)
-        if pos > 0:
-            self.params["scale_pos_weight"] = neg / pos
-        else:
-            # degenerate case: no positives in the training fold
-            self.params["scale_pos_weight"] = 1.0
+        if self.params.get("scale_pos_weight") is None:
+            self.params["scale_pos_weight"] = neg / pos if pos > 0 else 1.0
 
         base_estimator = xgb.XGBClassifier(**self.params)
 

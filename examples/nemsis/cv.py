@@ -307,6 +307,8 @@ def run_cv(
         pi_train_art = float(y_train_us.mean())
 
         model = XGBoostModel(feature_mode=pipeline_name, random_state=RANDOM_STATE + fold_idx)
+        if APPLY_UNDERSAMPLING:
+            model.params["scale_pos_weight"] = 1.0
         model._train_model(X_train_us, y_train_us)
         _, y_proba = model._predict(X_test)
 
@@ -493,9 +495,11 @@ def summarise_cv(fold_metrics: dict[str, list], pipeline_name: str) -> dict[str,
             "auroc",
             "brier_skill_score",
             "n_pos_pct",
-            "cv",
-            "qcod",
-            "adherence_rate",
+            "avg_indicated_vars_pct",
+            "co_missingness_concentration",
+            "missing_variable_breadth",
+            "pattern_entropy",
+            "max_pairwise_co_missingness",
         ):
             vals = np.array([f[metric] for f in folds if metric in f and not np.isnan(f[metric])])
             if len(vals) == 0:
@@ -525,9 +529,9 @@ def save_cv_results(
 ) -> None:
     """
     Write a tidy CSV with one row per pipeline × stratum, columns:
-      pipeline, stratum, auprc_mean, auprc_ci, auprc_lift_mean, auprc_lift_ci,
+      pipeline, run_timestamp, stratum, auprc_mean, auprc_ci, auprc_lift_mean, auprc_lift_ci,
       auroc_mean, auroc_ci, brier_skill_score_mean, brier_skill_score_ci,
-      n_pos_pct_mean, n_pos_pct_ci
+      n_pos_pct_mean, n_pos_pct_ci, avg_indicated_vars_pct_mean, …
     """
     metrics = (
         "auprc",
@@ -535,18 +539,21 @@ def save_cv_results(
         "auroc",
         "brier_skill_score",
         "n_pos_pct",
-        "cv",
-        "qcod",
-        "adherence_rate",
+        "avg_indicated_vars_pct",
+        "co_missingness_concentration",
+        "missing_variable_breadth",
+        "pattern_entropy",
+        "max_pairwise_co_missingness",
     )
 
     rows = []
     for pipeline_name, summary in pipeline_summaries:
+        run_ts = summary.get("_run_timestamp", "")
         strata = [s for s in _STRATUM_ORDER if s in summary] + sorted(
-            s for s in summary if s not in _STRATUM_ORDER
+            s for s in summary if s not in _STRATUM_ORDER and not s.startswith("_")
         )
         for stratum in strata:
-            row: dict = {"pipeline": pipeline_name, "stratum": stratum}
+            row: dict = {"pipeline": pipeline_name, "run_timestamp": run_ts, "stratum": stratum}
             for m in metrics:
                 v = summary.get(stratum, {}).get(m)
                 row[f"{m}_mean"] = v["mean"] if v else float("nan")
@@ -557,6 +564,50 @@ def save_cv_results(
     save_path.parent.mkdir(parents=True, exist_ok=True)
     df.write_csv(save_path)
     print(f"CV results saved to {save_path}")
+
+
+def load_cv_results(
+    load_path: Path,
+) -> list[tuple[str, dict[str, dict]]]:
+    """
+    Reconstruct pipeline_summaries from a CSV written by save_cv_results.
+
+    Returns a list of (pipeline_name, summary) tuples in the same format
+    consumed by plot_auprc_by_stratum / plot_auroc_by_stratum /
+    plot_auprc_lift_by_stratum, so plots can be rebuilt from disk without
+    re-running CV.
+
+    _run_timestamp (if present in the CSV) is restored as summary["_run_timestamp"].
+    """
+    df = pl.read_csv(load_path)
+
+    metric_cols = [
+        c[: -len("_mean")]
+        for c in df.columns
+        if c.endswith("_mean") and c not in ("pipeline", "run_timestamp", "stratum")
+    ]
+
+    pipelines: dict[str, dict] = {}
+    pipeline_order: list[str] = []
+
+    for row in df.iter_rows(named=True):
+        name = row["pipeline"]
+        if name not in pipelines:
+            pipelines[name] = {}
+            pipeline_order.append(name)
+            ts = row.get("run_timestamp")
+            if ts:
+                pipelines[name]["_run_timestamp"] = ts
+
+        stratum = row["stratum"]
+        pipelines[name][stratum] = {}
+        for m in metric_cols:
+            mean_val = row.get(f"{m}_mean")
+            ci_val = row.get(f"{m}_ci")
+            if mean_val is not None and not (isinstance(mean_val, float) and mean_val != mean_val):
+                pipelines[name][stratum][m] = {"mean": mean_val, "ci": ci_val}
+
+    return [(name, pipelines[name]) for name in pipeline_order]
 
 
 def save_feature_distribution_by_outcome(

@@ -1,4 +1,5 @@
 # %%
+from datetime import datetime
 from plotting import plot_auprc_by_stratum, plot_auprc_lift_by_stratum, plot_auroc_by_stratum
 from examples.nemsis.features import make_feature_sets
 from examples.nemsis.cv import compute_intervariable_missingness_strata, save_cv_results, save_feature_distribution_by_outcome, summarise_cv, run_cv
@@ -26,6 +27,7 @@ builder = ConfigBuilder(df)
 
 setups = dict()
 pipeline_summaries = []
+_feature_dist_saved = False
 
 # %% EXPERIMENTS
 for config_name, config in STAGE_3_CONFIGS.items():
@@ -44,14 +46,26 @@ for config_name, config in STAGE_3_CONFIGS.items():
         run_name = f"{config_name}/{setup_name}"
         setups[run_name] = stay_df
         print(f"\nRunning {CV_N_SPLITS}×{CV_N_REPEATS} repeated stratified k-fold CV — Setup {run_name}…")
-        folds, _, _, _, _, _ = run_cv(stay_df, case_metrics, axes, run_name)
+        # Collect feature distributions for the first pipeline only (used for the
+        # stratum characterisation table in plot_results.py).
+        feat_dist_path = (
+            RESULTS_DIR / "feature_distribution_by_quadrant.csv"
+            if not _feature_dist_saved
+            else None
+        )
+        folds, _, _, _, _, _ = run_cv(stay_df, case_metrics, axes, run_name,
+                                       feature_distribution_save_path=feat_dist_path)
+        if feat_dist_path is not None:
+            _feature_dist_saved = True
         summary = summarise_cv(folds, run_name)
+        summary["_run_timestamp"] = datetime.now().isoformat(timespec="seconds")
         pipeline_summaries.append((f"Setup {run_name}", summary))
         
         plot_auprc_lift_by_stratum(
             pipeline_summaries,
             RESULTS_DIR / "figures" / "auprc_lift_by_stratum.svg",
         )
+        save_cv_results(pipeline_summaries, RESULTS_DIR / "cv_results_temp.csv")
 # %%
 save_cv_results(pipeline_summaries, RESULTS_DIR / "cv_results.csv")
 
