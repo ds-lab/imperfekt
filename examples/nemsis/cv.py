@@ -213,6 +213,7 @@ def run_cv(
     feature_distribution_save_path: Path | None = None,
     shap_save_path: Path | None = None,
     shap_full: bool = True,
+    shap_interactions: bool = False,
 ) -> tuple[
     dict[str, list],
     XGBoostModel | None,
@@ -504,7 +505,7 @@ def run_cv(
                         _mask = strata_arr == _sl
                         if _mask.sum() > 0:
                             fold_shap_abs[_sl].append(np.abs(_shap_vals[_mask]).mean(axis=0))
-                if shap_full and fold_idx == total_folds - 1:
+                if shap_full and shap_interactions and fold_idx == total_folds - 1:
                     _ivals = _explainer.shap_interaction_values(X_test)  # (n_test, n_feat, n_feat)
                     last_shap_interactions["overall"] = _ivals.mean(axis=0)
                     for _sl in np.unique(strata_arr):
