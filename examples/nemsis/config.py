@@ -6,11 +6,11 @@ import polars as pl
 
 PATH = Path(__file__).parent.parent
 
-DATASET_NAME = "nemsis" # "nemsis" or "mcmed"
+DATASET_NAME = "mcmed" # "nemsis" or "mcmed"
 NEMSIS_YEAR = "2024+2025" # "2024", "2025" or combo ("2024+2025")
 
 # Run full cohort or just a slice (with sure positives)
-DEBUG = True
+DEBUG = False
 DEBUG_N_STAYS = 2000 * 10
 DEBUG_MIN_POS_FRAC = 0.1
 
@@ -42,7 +42,7 @@ elif DATASET_NAME == "mcmed":
         f"{CLINICAL_ENDPOINT}_{COHORT_WINDOW_MINUTES}_{COHORT_MIN_READINGS}_{FILTER_ALWAYS_NULL_VITALS}.parquet"
     )
     RESULTS_DIR = PATH / f"data/{DATASET_NAME}/post_publication_results"
-    VITAL_COLS = ["sbp", "hr", "o2sat", "rr", "1min_HRV", "5min_HRV"]
+    VITAL_COLS = ["sbp", "hr", "o2sat", "rr"] #"1min_HRV", "5min_HRV"
     REQUIRED_VITAL_COLS = ["sbp", "hr", "o2sat", "rr"] # for cohort inclusion; HRV columns may be missing for some cases
 else:
     raise ValueError(f"Unsupported DATASET_NAME: {DATASET_NAME}")
@@ -70,18 +70,18 @@ STAGE_3_CONFIGS: dict[str, dict[str, str]] = {
     # "iq_pr_in": {"method": "iqr", "plaus": "remove", "imp": "none"},
     # "iq_pr_il": {"method": "iqr", "plaus": "remove", "imp": "locf"},
     "ma_pk_in": {"method": "mad", "plaus": "keep",   "imp": "none"},
-    "ma_pk_il": {"method": "mad", "plaus": "keep",   "imp": "locf"},
-    "ma_pk_is": {"method": "mad", "plaus": "keep",   "imp": "saits"},
-    "ma_pr_in": {"method": "mad", "plaus": "remove", "imp": "none"},
-    "ma_pr_il": {"method": "mad", "plaus": "remove", "imp": "locf"},
-    "ma_pr_is": {"method": "mad", "plaus": "remove", "imp": "saits"},
+ #   "ma_pk_il": {"method": "mad", "plaus": "keep",   "imp": "locf"},
+ #   "ma_pk_is": {"method": "mad", "plaus": "keep",   "imp": "saits"},
+ #   "ma_pr_in": {"method": "mad", "plaus": "remove", "imp": "none"},
+ #   "ma_pr_il": {"method": "mad", "plaus": "remove", "imp": "locf"},
+#    "ma_pr_is": {"method": "mad", "plaus": "remove", "imp": "saits"},
 }
 
 STAGE_4_CONFIGS: dict[str, dict[str, bool]] = {
-    "base": {"base": True, "miss": False, "plaus": False},
+  #  "base": {"base": True, "miss": False, "plaus": False},
     "base+miss": {"base": True, "miss": True,  "plaus": False},
-   # "base+plaus": {"base": True, "miss": False, "plaus": True},
-   # "base+miss+plaus": {"base": True, "miss": True,  "plaus": True},
+ #   "base+plaus": {"base": True, "miss": False, "plaus": True},
+  #  "base+miss+plaus": {"base": True, "miss": True,  "plaus": True},
 }
 
 STRUCTURAL_FEATURE_COLS = []
@@ -89,6 +89,8 @@ STRUCTURAL_FEATURE_COLS = []
 RANDOM_STATE = 42
 CV_N_SPLITS = 5
 CV_N_REPEATS = 10
+
+AXES = ("avg_indicated_vars_pct", "pattern_entropy")
 
 # Train-fold undersampling + Bayesian prior correction.
 # Within each CV fold we keep all positives and randomly subsample negatives

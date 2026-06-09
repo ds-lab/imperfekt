@@ -125,7 +125,7 @@ def plot_auprc_by_stratum(
     ax.set_title(f"AUPRC by stratum ({CV_N_SPLITS}×{CV_N_REPEATS} CV)")
     fig.tight_layout()
     save_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(save_path, format="svg")
+    fig.savefig(save_path, format="png", dpi=150)
     plt.close(fig)
     print(f"Plot saved to {save_path}")
 
@@ -193,7 +193,7 @@ def plot_auroc_by_stratum(
     ax.set_title(f"AUROC by stratum ({CV_N_SPLITS}×{CV_N_REPEATS} CV)")
     fig.tight_layout()
     save_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(save_path, format="svg")
+    fig.savefig(save_path, format="png", dpi=150)
     plt.close(fig)
     print(f"Plot saved to {save_path}")
 
@@ -253,7 +253,7 @@ def plot_auprc_lift_by_stratum(
     ax.set_title(f"AUPRC lift by stratum ({CV_N_SPLITS}×{CV_N_REPEATS} CV)")
     fig.tight_layout()
     save_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(save_path, format="svg")
+    fig.savefig(save_path, format="png", dpi=150)
     plt.close(fig)
     print(f"Plot saved to {save_path}")
 
@@ -285,7 +285,7 @@ def plot_shap_importance_bar(
 
     fig, axes = plt.subplots(
         len(pipelines), 1,
-        figsize=(10, max(4, 1.0 * top_n) * len(pipelines)),
+        figsize=(10, max(4, 0.2 * top_n) * len(pipelines)),
         squeeze=False,
     )
 
@@ -302,7 +302,7 @@ def plot_shap_importance_bar(
         colors = [_SHAP_GROUP_COLORS.get(g, "#999999") for g in groups]
 
         y = np.arange(len(features))
-        ax.barh(y, means, xerr=stds, color=colors, alpha=0.85, error_kw={"linewidth": 0.8})
+        ax.barh(y, means, height=0.4, xerr=stds, color=colors, alpha=0.85, error_kw={"linewidth": 0.8})
         ax.set_yticks(y)
         ax.set_yticklabels(features, fontsize=7)
         ax.set_xlabel("Mean |SHAP| (mean ± std across folds)")
@@ -317,7 +317,7 @@ def plot_shap_importance_bar(
 
     fig.tight_layout()
     save_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(save_path, format="svg")
+    fig.savefig(save_path, format="png", dpi=150)
     plt.close(fig)
     print(f"Plot saved to {save_path}")
 
@@ -382,14 +382,14 @@ def plot_shap_stability_scatter(
 
     fig.tight_layout()
     save_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(save_path, format="svg")
+    fig.savefig(save_path, format="png", dpi=150)
     plt.close(fig)
     print(f"Plot saved to {save_path}")
 
 
 def plot_spearman_orthogonality(
-    shap_df: pl.DataFrame,
-    npz_path: Path,
+    shap_npz_path: Path,
+    features_npz_path: Path,
     pipeline_name: str,
     figures_dir: Path,
     top_k_struct: int = 10,
@@ -397,31 +397,46 @@ def plot_spearman_orthogonality(
 ) -> None:
     """Pairwise Spearman rho between top structural and physiology features.
 
-    Feature ranking is by 50-fold mean |SHAP| from shap_df (stratum='overall').
-    Raw feature values for correlation come from last_X_test_raw stored in the .npz.
-    Saves a heatmap SVG and a pairwise CSV to figures_dir.
+    Feature selection: top-k by mean |SHAP| from shap_npz_path (shap_overall,
+    n_folds × n_features).
+    Correlation: computed on actual feature values from features_npz_path
+    (X_test_all, all folds concatenated), so rho reflects true co-variation
+    in the test population.
+    Saves a heatmap PNG and a pairwise CSV to figures_dir.
     """
     from scipy.stats import spearmanr
 
-    data = np.load(npz_path, allow_pickle=True)
-    if "last_X_test_raw" not in data.files or "feature_names" not in data.files:
-        print(f"[{pipeline_name}] Skipping Spearman: last_X_test_raw not in {npz_path}")
+    if not shap_npz_path.exists():
+        print(f"[{pipeline_name}] Skipping Spearman: {shap_npz_path} not found")
+        return
+    if not features_npz_path.exists():
+        print(f"[{pipeline_name}] Skipping Spearman: {features_npz_path} not found — re-run experiments.py")
         return
 
-    raw_features = data["last_X_test_raw"]
-    feature_names: list[str] = data["feature_names"].tolist()
+    shap_data = np.load(shap_npz_path, allow_pickle=True)
+    feat_data = np.load(features_npz_path, allow_pickle=True)
 
-    # mean |SHAP| per feature from shap_df (already filtered to pipeline/overall by caller)
-    shap_lookup = {
-        row["feature"]: row["mean_abs_shap_mean"]
-        for row in shap_df.iter_rows(named=True)
-    }
-    mean_abs = np.array([shap_lookup.get(f, 0.0) for f in feature_names])
+    if "shap_overall" not in shap_data.files:
+        print(f"[{pipeline_name}] Skipping Spearman: shap_overall not in {shap_npz_path}")
+        return
+    for key in ("X_test_all", "feature_names"):
+        if key not in feat_data.files:
+            print(f"[{pipeline_name}] Skipping Spearman: {key} not in {features_npz_path} — re-run experiments.py")
+            return
+
+    shap_mat: np.ndarray = shap_data["shap_overall"].astype(float)  # (n_folds, n_features)
+    X_all: np.ndarray = feat_data["X_test_all"].astype(float)        # (n_cases, n_features)
+    feature_names: list[str] = feat_data["feature_names"].tolist()
+
+    mean_abs = shap_mat.mean(axis=0)  # (n_features,) — used for ranking only
 
     phys_idx_map = {f: i for i, f in enumerate(feature_names) if feature_group(f) == "physiology"}
+    struct_groups = {"structural_miss"} | (
+        {"structural_plaus"} if any(feature_group(f) == "structural_plaus" for f in feature_names) else set()
+    )
     struct_idx_map = {
         f: i for i, f in enumerate(feature_names)
-        if feature_group(f) in ("structural_miss", "structural_plaus")
+        if feature_group(f) in struct_groups
     }
 
     if not phys_idx_map or not struct_idx_map:
@@ -433,34 +448,34 @@ def plot_spearman_orthogonality(
 
     rows: list[dict] = []
     for sf in top_struct:
-        sv = raw_features[:, struct_idx_map[sf]]
+        sv = X_all[:, struct_idx_map[sf]]
         for pf in top_phys:
-            pv = raw_features[:, phys_idx_map[pf]]
+            pv = X_all[:, phys_idx_map[pf]]
             valid = np.isfinite(pv) & np.isfinite(sv)
             n = int(valid.sum())
-            if n < 3 or np.nanstd(sv[valid]) == 0 or np.nanstd(pv[valid]) == 0:
+            if n < 3 or np.std(sv[valid]) == 0 or np.std(pv[valid]) == 0:
                 rho, pval = float("nan"), float("nan")
             else:
                 rho, pval = spearmanr(sv[valid], pv[valid])
-            if np.isnan(pval):
-                sig = "undefined"
-            elif pval < 0.001:
-                sig = "*** (p<0.001)"
-            elif pval < 0.01:
-                sig = "** (p<0.01)"
-            elif pval < 0.05:
-                sig = "* (p<0.05)"
+            abs_rho = float(abs(rho)) if not np.isnan(rho) else float("nan")
+            if np.isnan(abs_rho):
+                effect = "undefined"
+            elif abs_rho < 0.1:
+                effect = "negligible_overlap"
+            elif abs_rho < 0.3:
+                effect = "small_overlap"
+            elif abs_rho < 0.5:
+                effect = "moderate_overlap"
             else:
-                sig = "ns"
+                effect = "high_overlap"
             rows.append({
                 "structural_feature": sf,
                 "physiology_feature": pf,
                 "structural_mean_abs_shap": float(mean_abs[struct_idx_map[sf]]),
                 "physiology_mean_abs_shap": float(mean_abs[phys_idx_map[pf]]),
                 "rho": float(rho) if not np.isnan(rho) else float("nan"),
-                "abs_rho": float(abs(rho)) if not np.isnan(rho) else float("nan"),
-                "p_value": float(pval) if not np.isnan(pval) else float("nan"),
-                "significance": sig,
+                "abs_rho": abs_rho,
+                "effect_size": effect,
                 "valid_n": n,
             })
 
@@ -468,7 +483,7 @@ def plot_spearman_orthogonality(
         print(f"[{pipeline_name}] Spearman: no valid pairs computed.")
         return
 
-    sp_df = pl.DataFrame(rows).sort(["abs_rho", "p_value"], descending=[True, False])
+    sp_df = pl.DataFrame(rows).sort("abs_rho", descending=True)
 
     safe = pipeline_name.replace(" ", "_").replace("/", "__")
     csv_path = figures_dir / f"spearman_pairwise_{safe}.csv"
@@ -476,9 +491,43 @@ def plot_spearman_orthogonality(
     sp_df.write_csv(csv_path)
     print(f"[{pipeline_name}] Spearman pairwise CSV saved to {csv_path}")
 
+    # ── Interpretation summary ────────────────────────────────────────────────
+    valid_rows = [r for r in sp_df.iter_rows(named=True) if not np.isnan(r["rho"])]
+    n_pairs = len(valid_rows)
+    abs_rhos = [r["abs_rho"] for r in valid_rows]
+    mean_abs_rho = float(np.mean(abs_rhos)) if abs_rhos else float("nan")
+    n_small    = sum(1 for v in abs_rhos if 0.1 <= v < 0.3)
+    n_moderate = sum(1 for v in abs_rhos if 0.3 <= v < 0.5)
+    n_high     = sum(1 for v in abs_rhos if v >= 0.5)
+    top5 = valid_rows[:5]
+
+    print(f"\n[{pipeline_name}] Spearman orthogonality interpretation")
+    print(f"  {n_pairs} pairs · mean |rho| = {mean_abs_rho:.3f}")
+    print(f"  Overlap with physiology: negligible (<0.1): {n_pairs - n_small - n_moderate - n_high} · "
+          f"small (0.1–0.3): {n_small} · moderate (0.3–0.5): {n_moderate} · high (≥0.5): {n_high}")
+    if mean_abs_rho < 0.1:
+        verdict = "structural features are largely orthogonal to physiology — they provide independent information"
+    elif mean_abs_rho < 0.3:
+        verdict = "small average co-variation — structural features are mostly independent, with some overlap"
+    elif mean_abs_rho < 0.5:
+        verdict = "moderate co-variation — structural features partially overlap with physiology signal"
+    else:
+        verdict = "strong co-variation — structural features are highly correlated with physiology, suggesting redundancy"
+    print(f"  Interpretation: {verdict}")
+    if top5:
+        print(f"  Top {len(top5)} pairs by |rho|:")
+        for r in top5:
+            direction = "positive" if r["rho"] > 0 else "negative"
+            print(f"    {r['structural_feature']} × {r['physiology_feature']}: "
+                  f"rho={r['rho']:+.3f} ({direction}, {r['effect_size']}) — "
+                  f"when {r['structural_feature']} is high, "
+                  f"{r['physiology_feature']} tends to be "
+                  f"{'higher' if r['rho'] > 0 else 'lower'}")
+    print()
+
     # heatmap
     rho_lookup = {(r["structural_feature"], r["physiology_feature"]): r["rho"] for r in sp_df.iter_rows(named=True)}
-    sig_lookup = {(r["structural_feature"], r["physiology_feature"]): r["significance"] for r in sp_df.iter_rows(named=True)}
+    effect_lookup = {(r["structural_feature"], r["physiology_feature"]): r["effect_size"] for r in sp_df.iter_rows(named=True)}
     struct_order = (
         sp_df.select(["structural_feature", "structural_mean_abs_shap"])
         .unique(subset=["structural_feature"], keep="first")
@@ -509,17 +558,17 @@ def plot_spearman_orthogonality(
     ax.set_yticklabels(struct_order, fontsize=7)
     ax.set_xlabel("Physiology features (SHAP-ranked)")
     ax.set_ylabel("Structural features (SHAP-ranked)")
-    ax.set_title(f"{pipeline_name}: Spearman orthogonality heatmap")
+    ax.set_title(f"{pipeline_name}: Spearman orthogonality heatmap\n^ moderate overlap |rho|≥0.3  ^^ high overlap |rho|≥0.5", fontsize=9)
     for i, sf in enumerate(struct_order):
         for j, pf in enumerate(phys_order):
             v = rho_mat[i, j]
-            s = sig_lookup.get((sf, pf), "")
-            star = "" if s in ("", "ns", "undefined") else "*"
-            ax.text(j, i, "NA" if np.isnan(v) else f"{v:.2f}{star}",
+            e = effect_lookup.get((sf, pf), "")
+            marker = {"moderate_overlap": "^", "high_overlap": "^^"}.get(e, "")
+            ax.text(j, i, "NA" if np.isnan(v) else f"{v:.2f}{marker}",
                     ha="center", va="center", fontsize=7, color="black")
 
-    heatmap_path = figures_dir / f"spearman_heatmap_{safe}.svg"
+    heatmap_path = figures_dir / f"spearman_heatmap_{safe}.png"
     fig.tight_layout()
-    fig.savefig(heatmap_path, format="svg")
+    fig.savefig(heatmap_path, format="png", dpi=150)
     plt.close(fig)
     print(f"[{pipeline_name}] Spearman heatmap saved to {heatmap_path}")

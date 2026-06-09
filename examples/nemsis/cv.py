@@ -210,8 +210,8 @@ def run_cv(
     case_metrics: pl.DataFrame,
     axes: tuple[str, str],
     pipeline_name: str,
-    feature_distribution_save_path: Path | None = None,
     shap_save_path: Path | None = None,
+    features_save_path: Path | None = None,
     shap_full: bool = True,
     shap_interactions: bool = False,
 ) -> tuple[
@@ -245,13 +245,13 @@ def run_cv(
                          test set (train-derived thresholds)
     """
     feature_cols = [c for c in stay_df.columns if c not in ("id", "label")]
-    collect_feature_dist = feature_distribution_save_path is not None
-    fold_feature_means: dict[tuple[str, str], list[float]] = defaultdict(list)
-    fold_outcome_prevalence: dict[str, list[float]] = defaultdict(list)
     fold_shap_abs: dict[str, list[np.ndarray]] = defaultdict(list)
     last_shap_interactions: dict[str, np.ndarray] = {}
     last_X_test_raw: np.ndarray | None = None
     last_y_test_raw: np.ndarray | None = None
+    all_X_test_chunks: list[np.ndarray] = []
+    all_y_test_chunks: list[np.ndarray] = []
+    all_strata_chunks: list[np.ndarray] = []
 
     subject_labels = (
         stay_df.select(["id", "label"])
@@ -420,56 +420,6 @@ def run_cv(
                     m_s[imperfekt_metric] = float(np.mean(vals)) if vals else float("nan")
                 fold_metrics[stratum_label].append(m_s)
 
-        if collect_feature_dist:
-            overall_prevalence = test["label"].mean()
-            if overall_prevalence is not None and not np.isnan(overall_prevalence):
-                fold_outcome_prevalence["overall"].append(float(overall_prevalence))
-
-            overall_means = (
-                test.select(feature_cols)
-                .unpivot(
-                    on=feature_cols,
-                    variable_name="feature",
-                    value_name="value",
-                )
-                .drop_nulls("value")
-                .group_by("feature")
-                .agg(pl.col("value").mean().alias("fold_mean"))
-            )
-            for row in overall_means.iter_rows(named=True):
-                fold_feature_means[("overall", row["feature"])].append(float(row["fold_mean"]))
-
-            test_with_strata = (
-                test.select(["id", "label"] + feature_cols)
-                .join(test_strata, on="id", how="left")
-                .drop_nulls("intervariable_stratum")
-            )
-            if test_with_strata.height > 0:
-                stratum_prevalence = test_with_strata.group_by("intervariable_stratum").agg(
-                    pl.col("label").mean().alias("fold_prevalence")
-                )
-                for row in stratum_prevalence.iter_rows(named=True):
-                    prev = row["fold_prevalence"]
-                    if prev is None or np.isnan(prev):
-                        continue
-                    fold_outcome_prevalence[row["intervariable_stratum"]].append(float(prev))
-
-                stratum_means = (
-                    test_with_strata.unpivot(
-                        index=["intervariable_stratum"],
-                        on=feature_cols,
-                        variable_name="feature",
-                        value_name="value",
-                    )
-                    .drop_nulls("value")
-                    .group_by(["intervariable_stratum", "feature"])
-                    .agg(pl.col("value").mean().alias("fold_mean"))
-                )
-                for row in stratum_means.iter_rows(named=True):
-                    fold_feature_means[(row["intervariable_stratum"], row["feature"])].append(
-                        float(row["fold_mean"])
-                    )
-
         if shap_full:
             try:
                 import shap as _shap
@@ -517,19 +467,17 @@ def run_cv(
             except Exception as _e:
                 print(f"  [{pipeline_name}] SHAP skipped (fold {fold_idx + 1}): {_e}")
 
+        if features_save_path is not None:
+            all_X_test_chunks.append(X_test)
+            all_y_test_chunks.append(y_test)
+            all_strata_chunks.append(strata_arr)
+
         last_model = model
         last_test_df = test
         last_X_test = X_test
         last_test_strata = test_strata
 
     print()
-
-    if collect_feature_dist:
-        _write_feature_distribution_by_quadrant(
-            fold_feature_means,
-            fold_outcome_prevalence,
-            feature_distribution_save_path,
-        )
 
     if shap_full and shap_save_path is not None and fold_shap_abs:
         shap_save_path.parent.mkdir(parents=True, exist_ok=True)
@@ -546,6 +494,17 @@ def run_cv(
             save_dict["last_y_test_raw"] = last_y_test_raw
         np.savez_compressed(shap_save_path, **save_dict)
         print(f"  [{pipeline_name}] SHAP saved to {shap_save_path}")
+
+    if features_save_path is not None and all_X_test_chunks:
+        features_save_path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(
+            features_save_path,
+            feature_names=np.array(feature_cols),
+            X_test_all=np.concatenate(all_X_test_chunks, axis=0),
+            y_test_all=np.concatenate(all_y_test_chunks, axis=0),
+            strata_all=np.concatenate(all_strata_chunks, axis=0),
+        )
+        print(f"  [{pipeline_name}] Feature values saved to {features_save_path}")
 
     return dict(fold_metrics), last_model, last_X_test, last_test_df, feature_cols, last_test_strata
 
@@ -760,80 +719,182 @@ def save_feature_distribution_by_outcome(
     print(f"Feature-by-outcome table saved to {save_path}")
 
 
-def _write_feature_distribution_by_quadrant(
-    fold_feature_means: dict[tuple[str, str], list[float]],
-    fold_outcome_prevalence: dict[str, list[float]],
+def compute_feature_distribution_by_quadrant(
+    features_npz_path: Path,
     save_path: Path,
-) -> None:
-    """
-    Aggregate per-fold feature means and outcome prevalence (collected during
-    run_cv) into a tidy CSV of mean ± 95% CI per (feature, stratum).
+) -> pl.DataFrame | None:
+    """Compute per-stratum feature distribution table from a features .npz file.
+
+    The .npz must contain feature_names, X_test_all, y_test_all, strata_all
+    (as saved by run_cv when features_save_path is provided).
+
+    For each (feature, stratum) pair computes mean ± 95% CI across all held-out
+    test rows in that stratum (pooled across folds), plus outcome_prevalence_mean
+    / outcome_prevalence_ci columns consumed by plot_results.py's wide table.
+
+    Returns the tidy DataFrame and writes it as CSV to save_path.
+    Returns None if the .npz is missing or lacks required keys.
     """
     from scipy import stats
 
-    prevalence_summary: dict[str, dict[str, float]] = {}
-    for stratum, vals in fold_outcome_prevalence.items():
-        arr = np.asarray(vals, dtype=float)
-        if arr.size == 0:
-            continue
-        prev_mean = float(arr.mean())
-        if arr.size > 1:
-            prev_se = float(arr.std(ddof=1) / np.sqrt(arr.size))
-            prev_ci = float(stats.t.ppf(0.975, df=arr.size - 1) * prev_se)
-        else:
-            prev_ci = float("nan")
-        prevalence_summary[stratum] = {
-            "mean": prev_mean,
-            "ci": prev_ci,
-            "n_folds": int(arr.size),
-        }
+    if not features_npz_path.exists():
+        print(f"compute_feature_distribution_by_quadrant: {features_npz_path} not found")
+        return None
+
+    data = np.load(features_npz_path, allow_pickle=True)
+    for key in ("feature_names", "X_test_all", "y_test_all", "strata_all"):
+        if key not in data.files:
+            print(f"compute_feature_distribution_by_quadrant: key {key!r} missing in {features_npz_path}")
+            return None
+
+    feature_names: list[str] = data["feature_names"].tolist()
+    X_all: np.ndarray = data["X_test_all"].astype(np.float64)
+    y_all: np.ndarray = data["y_test_all"].astype(np.int8)
+    strata_all: np.ndarray = data["strata_all"]
+
+    unique_strata = [s for s in np.unique(strata_all) if s != ""]
 
     rows: list[dict] = []
-    for (stratum, feature), vals in fold_feature_means.items():
-        arr = np.asarray(vals, dtype=float)
-        if arr.size == 0:
-            continue
+    for stratum in unique_strata:
+        mask = strata_all == stratum
+        X_s = X_all[mask]
+        y_s = y_all[mask]
+        n_s = mask.sum()
 
-        mean = float(arr.mean())
-        if arr.size > 1:
-            se = float(arr.std(ddof=1) / np.sqrt(arr.size))
-            ci = float(stats.t.ppf(0.975, df=arr.size - 1) * se)
+        # outcome prevalence for this stratum
+        if n_s > 1:
+            prev_mean = float(y_s.mean())
+            prev_se = float(np.std(y_s, ddof=1)) / np.sqrt(n_s)
+            prev_ci = float(stats.t.ppf(0.975, df=n_s - 1) * prev_se)
         else:
-            ci = float("nan")
+            prev_mean = float(y_s.mean()) if n_s == 1 else float("nan")
+            prev_ci = float("nan")
 
-        prev = prevalence_summary.get(stratum)
-
-        rows.append(
-            {
-                "feature": feature,
-                "feature_group": _feature_group(feature),
+        for fi, feat in enumerate(feature_names):
+            vals = X_s[:, fi]
+            valid = vals[np.isfinite(vals)]
+            n = len(valid)
+            if n == 0:
+                rows.append({
+                    "stratum": stratum,
+                    "feature": feat,
+                    "feature_group": _feature_group(feat),
+                    "n": 0,
+                    "mean": float("nan"),
+                    "ci": float("nan"),
+                    "outcome_prevalence_mean": prev_mean,
+                    "outcome_prevalence_ci": prev_ci,
+                })
+                continue
+            mean = float(valid.mean())
+            se = float(valid.std(ddof=1)) / np.sqrt(n) if n > 1 else float("nan")
+            ci = float(stats.t.ppf(0.975, df=n - 1) * se) if n > 1 else float("nan")
+            rows.append({
                 "stratum": stratum,
-                "n_folds": int(arr.size),
+                "feature": feat,
+                "feature_group": _feature_group(feat),
+                "n": n,
                 "mean": mean,
                 "ci": ci,
-                "outcome_prevalence_mean": prev["mean"] if prev else float("nan"),
-                "outcome_prevalence_ci": prev["ci"] if prev else float("nan"),
-                "outcome_prevalence_n_folds": prev["n_folds"] if prev else 0,
-            }
-        )
+                "outcome_prevalence_mean": prev_mean,
+                "outcome_prevalence_ci": prev_ci,
+            })
 
     if not rows:
-        print("Skipping feature-by-quadrant table: no fold summaries were produced.")
-        return
+        print("compute_feature_distribution_by_quadrant: no rows produced")
+        return None
 
-    stratum_rank = {s: i for i, s in enumerate(_STRATUM_ORDER)}
-    rows.sort(
-        key=lambda r: (
-            r["feature"],
-            stratum_rank.get(r["stratum"], len(stratum_rank)),
-            r["stratum"],
-        )
-    )
-
-    out_df = pl.DataFrame(rows)
+    out_df = pl.DataFrame(rows).sort(["stratum", "feature"])
     save_path.parent.mkdir(parents=True, exist_ok=True)
     out_df.write_csv(save_path)
-    print(f"Feature-by-quadrant table saved to {save_path}")
+    print(f"Feature distribution by quadrant saved to {save_path}")
+    return out_df
+
+
+def compute_feature_distribution_by_outcome(
+    features_npz_path: Path,
+    save_path: Path,
+) -> pl.DataFrame | None:
+    """Compute per-outcome feature distribution table from a features .npz file.
+
+    The .npz must contain feature_names, X_test_all, y_test_all
+    (as saved by run_cv when features_save_path is provided).
+
+    For each (feature, outcome) pair computes mean ± 95% CI across all held-out
+    test rows pooled across folds, plus median/quantile summaries.
+
+    Returns the tidy DataFrame and writes it as CSV to save_path.
+    Returns None if the .npz is missing or lacks required keys.
+    """
+    from scipy import stats
+
+    if not features_npz_path.exists():
+        print(f"compute_feature_distribution_by_outcome: {features_npz_path} not found")
+        return None
+
+    data = np.load(features_npz_path, allow_pickle=True)
+    for key in ("feature_names", "X_test_all", "y_test_all"):
+        if key not in data.files:
+            print(f"compute_feature_distribution_by_outcome: key {key!r} missing in {features_npz_path}")
+            return None
+
+    feature_names: list[str] = data["feature_names"].tolist()
+    X_all: np.ndarray = data["X_test_all"].astype(np.float64)
+    y_all: np.ndarray = data["y_test_all"].astype(np.int8)
+
+    rows: list[dict] = []
+    for outcome_val in np.unique(y_all):
+        mask = y_all == outcome_val
+        X_o = X_all[mask]
+
+        for fi, feat in enumerate(feature_names):
+            vals = X_o[:, fi]
+            valid = vals[np.isfinite(vals)]
+            n = len(valid)
+            if n == 0:
+                rows.append({
+                    "feature": feat,
+                    "feature_group": _feature_group(feat),
+                    "outcome": int(outcome_val),
+                    "n_non_null": 0,
+                    "mean": float("nan"),
+                    "ci": float("nan"),
+                    "std": float("nan"),
+                    "median": float("nan"),
+                    "q25": float("nan"),
+                    "q75": float("nan"),
+                    "min": float("nan"),
+                    "max": float("nan"),
+                })
+                continue
+            mean = float(valid.mean())
+            std = float(valid.std(ddof=1)) if n > 1 else float("nan")
+            se = std / np.sqrt(n) if n > 1 else float("nan")
+            ci = float(stats.t.ppf(0.975, df=n - 1) * se) if n > 1 else float("nan")
+            rows.append({
+                "feature": feat,
+                "feature_group": _feature_group(feat),
+                "outcome": int(outcome_val),
+                "n_non_null": n,
+                "mean": mean,
+                "ci": ci,
+                "std": std,
+                "median": float(np.median(valid)),
+                "q25": float(np.quantile(valid, 0.25)),
+                "q75": float(np.quantile(valid, 0.75)),
+                "min": float(valid.min()),
+                "max": float(valid.max()),
+            })
+
+    if not rows:
+        print("compute_feature_distribution_by_outcome: no rows produced")
+        return None
+
+    out_df = pl.DataFrame(rows).sort(["feature", "outcome"])
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    out_df.write_csv(save_path)
+    print(f"Feature distribution by outcome saved to {save_path}")
+    return out_df
 
 
 def print_information_gain_ratio(

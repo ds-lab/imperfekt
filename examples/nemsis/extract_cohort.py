@@ -243,7 +243,7 @@ def _build_mcmed_cohort() -> pl.DataFrame:
     
     _log("all visits loaded", visits_df, "CSN")
 
-    measures = ["SpO2", "Perf", "SBP", "DBP", "MAP", "HR", "RR", "1min_HRV", "5min_HRV"]
+    measures = ["SpO2", "Perf", "SBP", "DBP", "MAP", "HR", "RR"] # "1min_HRV", "5min_HRV"
     vitals_df = (
         _scan_s3_parquet(files["vitals"])
         .filter((pl.col("Source") == "Monitor") & pl.col("Measure").is_in(measures))

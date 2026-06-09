@@ -23,7 +23,7 @@ from plotting import (
     plot_shap_stability_scatter,
     plot_spearman_orthogonality,
 )
-from examples.nemsis.cv import load_cv_results, save_shap_importance_csv
+from examples.nemsis.cv import load_cv_results, save_shap_importance_csv, compute_feature_distribution_by_quadrant, compute_feature_distribution_by_outcome
 from config import RESULTS_DIR, data_fingerprint_tag, COHORT_PATH
 import polars as pl
 
@@ -92,9 +92,9 @@ for stratum, vals in sorted(prevalence.items()):
     print(f"  {stratum}: mean={vals['mean']:.4%}  ci={vals['ci']:.4%}")
 
 # %%
-plot_auprc_by_stratum(pipeline_summaries, figures_dir / "auprc_by_stratum.svg")
-plot_auprc_lift_by_stratum(pipeline_summaries, figures_dir / "auprc_lift_by_stratum.svg")
-plot_auroc_by_stratum(pipeline_summaries, figures_dir / "auroc_by_stratum.svg")
+plot_auprc_by_stratum(pipeline_summaries, figures_dir / "auprc_by_stratum.png")
+plot_auprc_lift_by_stratum(pipeline_summaries, figures_dir / "auprc_lift_by_stratum.png")
+plot_auroc_by_stratum(pipeline_summaries, figures_dir / "auroc_by_stratum.png")
 
 # %%
 # ── Stratum characterisation table (missingness axes) ────────────────────────
@@ -143,8 +143,12 @@ else:
 
 # %%
 # ── Feature distribution by stratum (wide table) ─────────────────────────────
-# Requires feature_distribution_by_quadrant.csv produced by experiments.py.
+# Generated on demand from the features .npz saved by run_cv.
 feat_quad_path = csv_path.parent / "feature_distribution_by_quadrant.csv"
+_feat_dist_run = "ma_pk_in/base+miss"
+_feat_dist_npz = _RUN_DIR / "features" / f"{_feat_dist_run.replace('/', '__')}.npz"
+if not feat_quad_path.exists() and _feat_dist_npz.exists():
+    compute_feature_distribution_by_quadrant(_feat_dist_npz, feat_quad_path)
 if feat_quad_path.exists() and cm is not None:
     print(f"\nBuilding feature-by-stratum wide table from {feat_quad_path}")
     fq = pl.read_csv(feat_quad_path)
@@ -195,7 +199,9 @@ if feat_quad_path.exists() and cm is not None:
         )
         prev_pivot = (
             prev_row.select(["stratum", "mean_ci"])
-            .pivot(index=pl.lit("Outcome Prevalence (%)"), on="stratum", values="mean_ci")
+            .with_columns(pl.lit(0).alias("_row"))
+            .pivot(index="_row", on="stratum", values="mean_ci")
+            .drop("_row")
         )
         # Proportion of cases row
         prop_pivot = (
@@ -209,26 +215,29 @@ if feat_quad_path.exists() and cm is not None:
             )
             .select(["intervariable_stratum", "mean_ci"])
             .rename({"intervariable_stratum": "stratum"})
-            .pivot(index=pl.lit("N (% of stratified cases)"), on="stratum", values="mean_ci")
+            .with_columns(pl.lit(0).alias("_row"))
+            .pivot(index="_row", on="stratum", values="mean_ci")
+            .drop("_row")
         )
 
         header_rows = pl.concat([prop_pivot, prev_pivot], how="diagonal_relaxed").with_columns(
             pl.lit("").alias("feature_group"),
+            pl.lit("").alias("feature"),
         )
-        header_rows = header_rows.rename({header_rows.columns[0]: "feature"})
         wide = pl.concat([header_rows.select(wide.columns), wide], how="diagonal_relaxed")
 
-    wide_path = csv_path.parent / "feature_distribution_by_stratum_wide.csv"
+    wide_path = csv_path.parent / "feature_distribution_by_quadrant_wide.csv"
     wide.write_csv(wide_path)
-    print(f"Feature-by-stratum wide table saved to {wide_path}")
-    print(wide.head(10))
+    print(f"Feature-by-quadrant wide table saved to {wide_path}")
 else:
     if not feat_quad_path.exists():
-        print(f"\nNo feature_distribution_by_quadrant.csv found — re-run experiments.py to generate it.")
+        print(f"\nNo feature_distribution_by_quadrant.csv found — re-run experiments.py with features_save_path enabled for {_feat_dist_run!r}.")
 
 # %%
 # ── Feature distribution by outcome ──────────────────────────────────────────
 feat_outcome_path = csv_path.parent / "feature_distribution_by_outcome.csv"
+if _feat_dist_npz.exists():
+    compute_feature_distribution_by_outcome(_feat_dist_npz, feat_outcome_path)
 if feat_outcome_path.exists():
     print(f"\nFeature distribution by outcome from {feat_outcome_path}")
     fo = pl.read_csv(feat_outcome_path)
@@ -248,14 +257,14 @@ if feat_outcome_path.exists():
     fo_wide_path = csv_path.parent / "feature_distribution_by_outcome_wide.csv"
     fo_wide.write_csv(fo_wide_path)
     print(f"Feature-by-outcome wide table saved to {fo_wide_path}")
-    print(fo_wide.head(10))
 else:
-    print(f"\nNo feature_distribution_by_outcome.csv found — re-run experiments.py to generate it.")
+    print(f"\nNo feature_distribution_by_outcome.csv found and no features .npz at {_feat_dist_npz}.")
 
 # %%
 # ── SHAP Interpretability & Stability ─────────────────────────────────────────
 # SHAP files always live in _RUN_DIR/shap/, independent of where csv_path came from.
 shap_dir = _RUN_DIR / "shap"
+features_dir = _RUN_DIR / "features"
 npz_paths = [
     (label, shap_dir / f"{label.removeprefix('Setup ').replace('/', '__')}.npz")
     for label, _ in pipeline_summaries
@@ -271,17 +280,16 @@ if npz_paths_found:
     for stratum in ["overall"] + [s for s in _STRATUM_ORDER if s in strata_in_shap]:
         tag = stratum.lower().replace("_", "")
         plot_shap_importance_bar(
-            shap_df, figures_dir / f"shap_importance_bar_{tag}.svg", stratum=stratum
+            shap_df, figures_dir / f"shap_importance_bar_{tag}.png", stratum=stratum
         )
         plot_shap_stability_scatter(
-            shap_df, figures_dir / f"shap_stability_scatter_{tag}.svg", stratum=stratum
+            shap_df, figures_dir / f"shap_stability_scatter_{tag}.png", stratum=stratum
         )
 
-    for label, npz_path in npz_paths_found:
-        pipeline_shap_df = shap_df.filter(
-            (pl.col("pipeline") == label) & (pl.col("stratum") == "overall")
-        )
-        plot_spearman_orthogonality(pipeline_shap_df, npz_path, label, figures_dir)
+    for label, shap_npz_path in npz_paths_found:
+        run_name = label.removeprefix("Setup ").replace("/", "__")
+        features_npz_path = features_dir / f"{run_name}.npz"
+        plot_spearman_orthogonality(shap_npz_path, features_npz_path, label, figures_dir)
 else:
     print("\nNo SHAP .npz files found — re-run experiments.py to generate them.")
 # %%
