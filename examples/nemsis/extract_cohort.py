@@ -200,7 +200,9 @@ def _build_nemsis_cohort() -> pl.DataFrame:
     call_df = events_df.filter(pl.col("eResponse_05").is_in(["2205001", "2205003", "2205009"]))
     _log("after 911/emergency response filter (eResponse_05)", call_df, "PcrKey")
     
+    
     call_df = call_df.filter((pl.col("ePatient_15") >= 18.0) & (pl.col("ePatient_16") == "2516009"))
+    call_df = call_df.remove(pl.col("ePatient_15").is_in([7701001, 7701003]))
     _log("after age >= 18 filter", call_df, "PcrKey")
 
     if CLINICAL_ENDPOINT == "sepsis":
