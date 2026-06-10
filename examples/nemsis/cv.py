@@ -20,6 +20,8 @@ from config import (
     TRAIN_NEG_POS_RATIO,
     UNDERSAMPLE_RANDOM_STATE,
     APPLY_PRIOR_CORRECTION,
+    SHAP_MAX_ROWS_PER_STRATUM,
+    SHAP_SUBSAMPLE_RANDOM_STATE,
     data_fingerprint,
     data_fingerprint_tag,
 )
@@ -203,6 +205,38 @@ def prior_correct_probs(
     factor = (pi_true / (1 - pi_true)) / (pi_train / (1 - pi_train))
     corrected_odds = odds * factor
     return corrected_odds / (1 + corrected_odds)
+
+
+def _stratified_shap_subsample(
+    strata_arr: np.ndarray,
+    max_per_stratum: int | None,
+    random_state: int,
+) -> np.ndarray:
+    """Indices of a stratified row subsample for SHAP estimation.
+
+    Caps the number of rows explained *per intervariable stratum* (and within
+    the empty-label ``""`` group) at ``max_per_stratum``, drawing without
+    replacement. Capping per stratum rather than globally keeps the rare strata
+    (e.g. Q_delta) well-represented so their per-stratum mean |SHAP| stays a
+    usable estimate. Returns all indices unchanged if ``max_per_stratum`` is
+    None or no stratum exceeds the cap.
+
+    The returned indices are sorted, so any positional alignment with
+    ``X_test`` / ``strata_arr`` is preserved when the caller slices both by
+    these indices.
+    """
+    n = len(strata_arr)
+    if max_per_stratum is None or n <= max_per_stratum:
+        return np.arange(n)
+
+    rng = np.random.default_rng(random_state)
+    keep: list[np.ndarray] = []
+    for label in np.unique(strata_arr):
+        idx = np.flatnonzero(strata_arr == label)
+        if len(idx) > max_per_stratum:
+            idx = rng.choice(idx, size=max_per_stratum, replace=False)
+        keep.append(idx)
+    return np.sort(np.concatenate(keep))
 
 
 def run_cv(
@@ -444,26 +478,37 @@ def run_cv(
                     _shap_tree.decode_ubjson_buffer = _fixed_decode
                     _shap_ubj._bracket_fix_applied = True
 
+                # Stratified subsample of test rows to explain: mean |SHAP| per
+                # feature is a row average, so a per-stratum-capped subsample is
+                # an unbiased estimate at a fraction of the TreeExplainer cost.
+                _sub_idx = _stratified_shap_subsample(
+                    strata_arr,
+                    SHAP_MAX_ROWS_PER_STRATUM,
+                    SHAP_SUBSAMPLE_RANDOM_STATE + fold_idx,
+                )
+                _X_shap = X_test[_sub_idx]
+                _strata_shap = strata_arr[_sub_idx]
+
                 _explainer = _shap.TreeExplainer(model.model.get_booster())
-                _shap_vals = _explainer.shap_values(X_test)  # (n_test, n_features)
+                _shap_vals = _explainer.shap_values(_X_shap)  # (n_sub, n_features)
                 fold_shap_abs["overall"].append(np.abs(_shap_vals).mean(axis=0))
-                for _sl in np.unique(strata_arr):
+                for _sl in np.unique(_strata_shap):
                     if _sl == "":
                         continue
-                    _mask = strata_arr == _sl
+                    _mask = _strata_shap == _sl
                     if _mask.sum() > 0:
                         fold_shap_abs[_sl].append(np.abs(_shap_vals[_mask]).mean(axis=0))
                 if shap_interactions and fold_idx == total_folds - 1:
-                    _ivals = _explainer.shap_interaction_values(X_test)  # (n_test, n_feat, n_feat)
+                    _ivals = _explainer.shap_interaction_values(_X_shap)  # (n_sub, n_feat, n_feat)
                     last_shap_interactions["overall"] = _ivals.mean(axis=0)
-                    for _sl in np.unique(strata_arr):
+                    for _sl in np.unique(_strata_shap):
                         if _sl == "":
                             continue
-                        _mask = strata_arr == _sl
+                        _mask = _strata_shap == _sl
                         if _mask.sum() > 0:
                             last_shap_interactions[_sl] = _ivals[_mask].mean(axis=0)
-                    last_X_test_raw = X_test
-                    last_y_test_raw = y_test
+                    last_X_test_raw = _X_shap
+                    last_y_test_raw = y_test[_sub_idx]
             except Exception as _e:
                 print(f"  [{pipeline_name}] SHAP skipped (fold {fold_idx + 1}): {_e}")
 

@@ -32,7 +32,7 @@ builder = ConfigBuilder(df)
 
 setups = dict()
 pipeline_summaries = []
-_SHAP_FULL_RUNS = {"test"} # {"ma_pk_in/base+miss"}
+_SHAP_FULL_RUNS = {"ma_pk_in/base+miss"} # {"ma_pk_in/base+miss"}
 _FEAT_DIST_OUTCOME_RUN = "ma_pk_in/base+miss"
 
 # %% EXPERIMENTS

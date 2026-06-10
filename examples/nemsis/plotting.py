@@ -63,6 +63,103 @@ def _data_ylim(all_vals: list[np.ndarray], pad: float = 0.1) -> tuple[float, flo
     return round(max(lo - margin, 0.0), 4), round(hi + margin, 4)
 
 
+def plot_delta_auprc_heatmap(
+    pipeline_summaries: list[tuple[str, dict[str, dict]]],
+    save_path: Path,
+    *,
+    baseline: str = "Setup ma_pk_in/base",
+    swaps: list[tuple[str, str]] | None = None,
+    metric: str = "auprc",
+) -> None:
+    """
+    Heatmap of Δmetric (variant − baseline) for single-design-choice swaps.
+
+    Rows = swap variants, columns = quadrants (facet). Diverging colormap
+    centered at 0 so the "helps here / hurts there" pattern is legible.
+    ``metric`` is "auprc" or "auprc_lift". Skips (with a warning) any swap whose
+    pipeline is absent from ``pipeline_summaries``, and skips the whole figure if
+    the baseline is missing.
+    """
+    summ = dict(pipeline_summaries)
+    if baseline not in summ:
+        print(f"WARNING: baseline {baseline!r} not in CSV — skipping {save_path.name}")
+        return
+
+    if swaps is None:
+        swaps = [
+            ("F → base+miss", "Setup ma_pk_in/base+miss"),
+            ("imp → LOCF", "Setup ma_pk_il/base"),
+            ("imp → SAITS", "Setup ma_pk_is/base"),
+        ]
+
+    present_swaps = []
+    for row_label, pipe in swaps:
+        if pipe in summ:
+            present_swaps.append((row_label, pipe))
+        else:
+            print(f"WARNING: skipping swap {row_label!r} — pipeline {pipe!r} not in CSV")
+    if not present_swaps:
+        print(f"WARNING: no swap pipelines present — skipping {save_path.name}")
+        return
+
+    quad_keys = _sort_strata(
+        {k for k, v in summ[baseline].items()
+         if k != "overall" and not k.startswith("_") and isinstance(v, dict)}
+    )
+
+    def _mean(pipe: str, q: str) -> float:
+        cell = summ.get(pipe, {}).get(q, {}).get(metric)
+        return cell["mean"] if cell else float("nan")
+
+    delta = np.full((len(present_swaps), len(quad_keys)), np.nan)
+    for i, (_, pipe) in enumerate(present_swaps):
+        for j, q in enumerate(quad_keys):
+            base_v = _mean(baseline, q)
+            var_v = _mean(pipe, q)
+            if np.isfinite(base_v) and np.isfinite(var_v):
+                delta[i, j] = var_v - base_v
+
+    is_lift = metric == "auprc_lift"
+    metric_label = "AUPRC lift" if is_lift else "AUPRC"
+    fmt = "{:+.2f}" if is_lift else "{:+.4f}"
+
+    fig_w = max(7.0, 1.3 * len(quad_keys) + 3.0)
+    fig_h = max(2.5, 0.7 * len(present_swaps) + 2.0)
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    cmap = plt.get_cmap("RdBu_r").copy()
+    cmap.set_bad(color="#f2f2f2")
+    vmax = np.nanmax(np.abs(delta)) if np.isfinite(delta).any() else 1.0
+    vmax = vmax or 1.0
+    im = ax.imshow(delta, aspect="auto", cmap=cmap, vmin=-vmax, vmax=vmax)
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04).set_label(f"Δ {metric_label} vs baseline")
+
+    ax.set_xticks(np.arange(len(quad_keys)))
+    ax.set_xticklabels(quad_keys, rotation=40, ha="right", fontsize=8)
+    ax.set_yticks(np.arange(len(present_swaps)))
+    ax.set_yticklabels([r for r, _ in present_swaps], fontsize=8)
+    ax.set_xlabel("Quadrant")
+    base_label = _decode_pipeline_label(baseline).replace("\n", " · ")
+    ax.set_title(
+        f"Δ {metric_label} vs baseline ({base_label})\n({CV_N_SPLITS}×{CV_N_REPEATS} CV)",
+        fontsize=9,
+    )
+
+    for i in range(len(present_swaps)):
+        for j in range(len(quad_keys)):
+            v = delta[i, j]
+            if np.isnan(v):
+                ax.text(j, i, "NA", ha="center", va="center", fontsize=7, color="#888888")
+                continue
+            color = "white" if abs(v) > 0.6 * vmax else "black"
+            ax.text(j, i, fmt.format(v), ha="center", va="center", fontsize=8, color=color)
+
+    fig.tight_layout()
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(save_path, format="png", dpi=150)
+    plt.close(fig)
+    print(f"Plot saved to {save_path}")
+
+
 def plot_auprc_by_stratum(
     pipeline_summaries: list[tuple[str, dict[str, dict]]],
     save_path: Path,

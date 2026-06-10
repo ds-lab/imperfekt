@@ -19,6 +19,7 @@ from plotting import (
     plot_auprc_by_stratum,
     plot_auprc_lift_by_stratum,
     plot_auroc_by_stratum,
+    plot_delta_auprc_heatmap,
     plot_shap_importance_bar,
     plot_shap_stability_scatter,
     plot_spearman_orthogonality,
@@ -95,6 +96,11 @@ for stratum, vals in sorted(prevalence.items()):
 plot_auprc_by_stratum(pipeline_summaries, figures_dir / "auprc_by_stratum.png")
 plot_auprc_lift_by_stratum(pipeline_summaries, figures_dir / "auprc_lift_by_stratum.png")
 plot_auroc_by_stratum(pipeline_summaries, figures_dir / "auroc_by_stratum.png")
+
+# Δ AUPRC heatmaps: variant − baseline (ma_pk_in/base) per quadrant.
+# Uses all_summaries (not the PIPELINES-filtered set) so baseline + swaps are visible.
+plot_delta_auprc_heatmap(all_summaries, figures_dir / "delta_auprc_heatmap.png", metric="auprc")
+plot_delta_auprc_heatmap(all_summaries, figures_dir / "delta_auprc_lift_heatmap.png", metric="auprc_lift")
 
 # %%
 # ── Stratum characterisation table (missingness axes) ────────────────────────
