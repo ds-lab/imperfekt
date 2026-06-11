@@ -11,6 +11,8 @@ import sys
 from pathlib import Path
 import glob
 
+import numpy as np
+
 ROOT = Path(__file__).parents[2]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).parent))
@@ -153,8 +155,9 @@ else:
 feat_quad_path = csv_path.parent / "feature_distribution_by_quadrant.csv"
 _feat_dist_run = "ma_pk_in/base+miss"
 _feat_dist_npz = _RUN_DIR / "features" / f"{_feat_dist_run.replace('/', '__')}.npz"
-if not feat_quad_path.exists() and _feat_dist_npz.exists():
-    compute_feature_distribution_by_quadrant(_feat_dist_npz, feat_quad_path)
+_feat_npz_data = np.load(_feat_dist_npz, allow_pickle=True) if _feat_dist_npz.exists() else None
+if not feat_quad_path.exists() and _feat_npz_data is not None:
+    compute_feature_distribution_by_quadrant(_feat_dist_npz, feat_quad_path, npz_data=_feat_npz_data)
 if feat_quad_path.exists() and cm is not None:
     print(f"\nBuilding feature-by-stratum wide table from {feat_quad_path}")
     fq = pl.read_csv(feat_quad_path)
@@ -242,8 +245,8 @@ else:
 # %%
 # ── Feature distribution by outcome ──────────────────────────────────────────
 feat_outcome_path = csv_path.parent / "feature_distribution_by_outcome.csv"
-if _feat_dist_npz.exists():
-    compute_feature_distribution_by_outcome(_feat_dist_npz, feat_outcome_path)
+if _feat_npz_data is not None:
+    compute_feature_distribution_by_outcome(_feat_dist_npz, feat_outcome_path, npz_data=_feat_npz_data)
 if feat_outcome_path.exists():
     print(f"\nFeature distribution by outcome from {feat_outcome_path}")
     fo = pl.read_csv(feat_outcome_path)

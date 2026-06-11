@@ -20,8 +20,18 @@ from examples.nemsis.features import feature_group  # noqa: E402
 
 _STRATUM_ORDER = ["Q_complete", "Q_alpha", "Q_beta", "Q_gamma", "Q_delta"]
 
-_PLAUS_LABEL = {"pk": "plaus=keep", "pr": "plaus=remove"}
-_IMP_LABEL   = {"in": "no imputation", "il": "LOCF", "is": "SAITS"}
+_PLAUS_LABEL    = {"pk": "plaus=keep", "pr": "plaus=remove"}
+_IMP_LABEL      = {"in": "no imputation", "il": "LOCF", "is": "SAITS"}
+_IMP_LINESTYLE  = {"in": "-", "il": ":", "is": "-."}
+
+
+def _imp_linestyle(label: str) -> str:
+    """Return linestyle for the imputation encoded in a pipeline label string."""
+    name = label.removeprefix("Setup ")
+    parts = name.split("/")[0].split("_")  # e.g. ["ma", "pk", "in"]
+    if len(parts) == 3:
+        return _IMP_LINESTYLE.get(parts[2], "-")
+    return "-"
 
 
 def _decode_pipeline_label(label: str) -> str:
@@ -200,8 +210,9 @@ def plot_auprc_by_stratum(
     all_lo, all_hi = [], []
     for idx, (label, summary) in enumerate(pipeline_summaries):
         color = colors[idx % len(colors)]
+        ls = _imp_linestyle(label)
         mean, lo, hi = _vals(summary)
-        ax.plot(x, mean, marker="o", color=color, label=_decode_pipeline_label(label))
+        ax.plot(x, mean, marker="o", color=color, linestyle=ls, label=_decode_pipeline_label(label))
         ax.plot(x, lo, linestyle="--", color=color, linewidth=0.8, alpha=0.6)
         ax.plot(x, hi, linestyle="--", color=color, linewidth=0.8, alpha=0.6)
         ax.fill_between(x, lo, hi, color=color, alpha=0.1)
@@ -210,7 +221,7 @@ def plot_auprc_by_stratum(
 
         overall = summary.get("overall", {}).get("auprc")
         if overall:
-            ax.axhline(overall["mean"], color=color, linestyle=":", linewidth=0.8, alpha=0.5)
+            ax.axhline(overall["mean"], color=color, linestyle=ls, linewidth=0.8, alpha=0.5)
 
     ax.set_ylim(*_data_ylim(all_lo + all_hi))
     ax.set_xticks(x)
@@ -267,8 +278,9 @@ def plot_auroc_by_stratum(
     all_lo, all_hi = [], []
     for idx, (label, summary) in enumerate(pipeline_summaries):
         color = colors[idx % len(colors)]
+        ls = _imp_linestyle(label)
         mean, lo, hi = _vals(summary)
-        ax.plot(x, mean, marker="o", color=color, label=_decode_pipeline_label(label))
+        ax.plot(x, mean, marker="o", color=color, linestyle=ls, label=_decode_pipeline_label(label))
         ax.plot(x, lo, linestyle="--", color=color, linewidth=0.8, alpha=0.6)
         ax.plot(x, hi, linestyle="--", color=color, linewidth=0.8, alpha=0.6)
         ax.fill_between(x, lo, hi, color=color, alpha=0.1)
@@ -277,7 +289,7 @@ def plot_auroc_by_stratum(
 
         overall = summary.get("overall", {}).get("auroc")
         if overall:
-            ax.axhline(overall["mean"], color=color, linestyle=":", linewidth=0.8, alpha=0.5)
+            ax.axhline(overall["mean"], color=color, linestyle=ls, linewidth=0.8, alpha=0.5)
 
     y_lo, y_hi = _data_ylim(all_lo + all_hi)
     ax.set_ylim(y_lo, y_hi)
@@ -335,8 +347,9 @@ def plot_auprc_lift_by_stratum(
 
     for idx, (label, summary) in enumerate(pipeline_summaries):
         color = colors[idx % len(colors)]
+        ls = _imp_linestyle(label)
         mean, lo, hi = _vals(summary)
-        ax.plot(x, mean, marker="o", color=color, label=_decode_pipeline_label(label))
+        ax.plot(x, mean, marker="o", color=color, linestyle=ls, label=_decode_pipeline_label(label))
         ax.plot(x, lo, linestyle="--", color=color, linewidth=0.8, alpha=0.6)
         ax.plot(x, hi, linestyle="--", color=color, linewidth=0.8, alpha=0.6)
         ax.fill_between(x, lo, hi, color=color, alpha=0.1)

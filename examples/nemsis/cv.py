@@ -767,6 +767,7 @@ def save_feature_distribution_by_outcome(
 def compute_feature_distribution_by_quadrant(
     features_npz_path: Path,
     save_path: Path,
+    npz_data=None,
 ) -> pl.DataFrame | None:
     """Compute per-stratum feature distribution table from a features .npz file.
 
@@ -779,14 +780,17 @@ def compute_feature_distribution_by_quadrant(
 
     Returns the tidy DataFrame and writes it as CSV to save_path.
     Returns None if the .npz is missing or lacks required keys.
+    ``npz_data`` may be a pre-loaded NpzFile to avoid re-reading the file.
     """
     from scipy import stats
 
-    if not features_npz_path.exists():
-        print(f"compute_feature_distribution_by_quadrant: {features_npz_path} not found")
-        return None
-
-    data = np.load(features_npz_path, allow_pickle=True)
+    if npz_data is None:
+        if not features_npz_path.exists():
+            print(f"compute_feature_distribution_by_quadrant: {features_npz_path} not found")
+            return None
+        data = np.load(features_npz_path, allow_pickle=True)
+    else:
+        data = npz_data
     for key in ("feature_names", "X_test_all", "y_test_all", "strata_all"):
         if key not in data.files:
             print(f"compute_feature_distribution_by_quadrant: key {key!r} missing in {features_npz_path}")
@@ -859,6 +863,7 @@ def compute_feature_distribution_by_quadrant(
 def compute_feature_distribution_by_outcome(
     features_npz_path: Path,
     save_path: Path,
+    npz_data=None,
 ) -> pl.DataFrame | None:
     """Compute per-outcome feature distribution table from a features .npz file.
 
@@ -870,14 +875,17 @@ def compute_feature_distribution_by_outcome(
 
     Returns the tidy DataFrame and writes it as CSV to save_path.
     Returns None if the .npz is missing or lacks required keys.
+    ``npz_data`` may be a pre-loaded NpzFile to avoid re-reading the file.
     """
     from scipy import stats
 
-    if not features_npz_path.exists():
-        print(f"compute_feature_distribution_by_outcome: {features_npz_path} not found")
-        return None
-
-    data = np.load(features_npz_path, allow_pickle=True)
+    if npz_data is None:
+        if not features_npz_path.exists():
+            print(f"compute_feature_distribution_by_outcome: {features_npz_path} not found")
+            return None
+        data = np.load(features_npz_path, allow_pickle=True)
+    else:
+        data = npz_data
     for key in ("feature_names", "X_test_all", "y_test_all"):
         if key not in data.files:
             print(f"compute_feature_distribution_by_outcome: key {key!r} missing in {features_npz_path}")

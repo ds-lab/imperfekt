@@ -69,7 +69,7 @@ STAGE_3_CONFIGS: dict[str, dict[str, str]] = {
     # "iq_pk_il": {"method": "iqr", "plaus": "keep",   "imp": "locf"},
     # "iq_pr_in": {"method": "iqr", "plaus": "remove", "imp": "none"},
     # "iq_pr_il": {"method": "iqr", "plaus": "remove", "imp": "locf"},
-   # "ma_pk_in": {"method": "mad", "plaus": "keep",   "imp": "none"},
+    "ma_pk_in": {"method": "mad", "plaus": "keep",   "imp": "none"},
     "ma_pk_il": {"method": "mad", "plaus": "keep",   "imp": "locf"},
     "ma_pk_is": {"method": "mad", "plaus": "keep",   "imp": "saits"},
     "ma_pr_in": {"method": "mad", "plaus": "remove", "imp": "none"},
