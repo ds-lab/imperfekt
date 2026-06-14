@@ -66,7 +66,7 @@ for config_name, config in STAGE_3_CONFIGS.items():
             pipeline_summaries,
             RUN_DIR / "figures" / "auprc_lift_by_stratum.png",
         )
-        save_cv_results(pipeline_summaries, RUN_DIR / "cv_results_temp_2.csv")
+        save_cv_results(pipeline_summaries, RUN_DIR / "cv_results_temp.csv")
 # %%
 save_cv_results(pipeline_summaries, RUN_DIR / "cv_results.csv")
 (RUN_DIR / "cv_results_temp.csv").unlink(missing_ok=True)

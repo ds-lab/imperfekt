@@ -42,6 +42,8 @@ PIPELINES = [
     "Setup ma_pk_in/base+miss",
 #    "Setup ma_pk_in/base+plaus",
 #    "Setup ma_pk_in/base+miss+plaus",
+    "Setup ma_pk_is/base",
+    "Setup ma_pk_is/base+miss",
     "Setup ma_pk_il/base",
     "Setup ma_pk_il/base+miss",
  #   "Setup ma_pk_il/base+plaus",

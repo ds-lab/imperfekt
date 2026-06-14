@@ -6,7 +6,7 @@ import polars as pl
 
 PATH = Path(__file__).parent.parent
 
-DATASET_NAME = "nemsis" # "nemsis" or "mcmed"
+DATASET_NAME = "mcmed" # "nemsis" or "mcmed"
 NEMSIS_YEAR = "2024+2025" # "2024", "2025" or combo ("2024+2025")
 
 # Run full cohort or just a slice (with sure positives)

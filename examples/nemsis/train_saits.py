@@ -187,10 +187,10 @@ def _saits_regime(n_samples: int, n_steps: int, n_features: int) -> tuple[str, d
         epochs, batch_size, lr = 200, 64, 1e-4
     elif n_samples < 5000:
         size_regime = "N<5000"
-        epochs, batch_size, lr = 100, 128, 3e-4
+        epochs, batch_size, lr = 200, 128, 3e-4
     else:
         size_regime = "N>=5000"
-        epochs, batch_size, lr = 100, 512, 3e-4
+        epochs, batch_size, lr = 200, 512, 3e-4
 
     regime = f"{shape_regime}|{size_regime}"
     hp = {

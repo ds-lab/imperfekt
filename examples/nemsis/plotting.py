@@ -26,8 +26,15 @@ _IMP_LINESTYLE  = {"in": "-", "il": ":", "is": "-."}
 
 
 def _imp_linestyle(label: str) -> str:
-    """Return linestyle for the imputation encoded in a pipeline label string."""
+    """Return linestyle for the imputation encoded in a pipeline label string.
+
+    For GRU mask-ablation runs ('gru/<config>/<arm>') the linestyle instead
+    distinguishes the mask arm (solid = mask, dashed = no mask) so the two arms
+    of one config are visually paired.
+    """
     name = label.removeprefix("Setup ")
+    if name.startswith("gru/"):
+        return "-" if name.rsplit("/", 1)[-1] != "nomask" else "--"
     parts = name.split("/")[0].split("_")  # e.g. ["ma", "pk", "in"]
     if len(parts) == 3:
         return _IMP_LINESTYLE.get(parts[2], "-")
@@ -42,6 +49,20 @@ def _decode_pipeline_label(label: str) -> str:
     Falls back to the raw label if the pattern is not recognised.
     """
     name = label.removeprefix("Setup ")
+    # GRU mask-ablation: 'gru/<config>/<arm>' → '<config decoded> · GRU (mask|no mask)'.
+    if name.startswith("gru/"):
+        rest = name[len("gru/"):]
+        config_key, arm = rest.rsplit("/", 1) if "/" in rest else (rest, "")
+        parts = config_key.split("_")
+        if len(parts) == 3:
+            _, plaus_code, imp_code = parts
+            plaus = _PLAUS_LABEL.get(plaus_code, plaus_code)
+            imp = _IMP_LABEL.get(imp_code, imp_code)
+            head = f"{plaus} · {imp}"
+        else:
+            head = config_key
+        arm_label = {"mask": "GRU (mask)", "nomask": "GRU (no mask)"}.get(arm, f"GRU {arm}".strip())
+        return f"{head}\n{arm_label}"
     if "/" in name:
         config_key, feature_set = name.split("/", 1)
     else:
@@ -98,8 +119,11 @@ def plot_delta_auprc_heatmap(
     if swaps is None:
         swaps = [
             ("F → base+miss", "Setup ma_pk_in/base+miss"),
+            ("F → base+plaus", "Setup ma_pk_in/base+plaus"),
             ("imp → LOCF", "Setup ma_pk_il/base"),
             ("imp → SAITS", "Setup ma_pk_is/base"),
+            ("plaus → remove", "Setup ma_pr_in/base"),
+            ("plaus/F → remove & base+plaus", "Setup ma_pr_in/base+plaus"),
         ]
 
     present_swaps = []
@@ -114,7 +138,7 @@ def plot_delta_auprc_heatmap(
 
     quad_keys = _sort_strata(
         {k for k, v in summ[baseline].items()
-         if k != "overall" and not k.startswith("_") and isinstance(v, dict)}
+         if k != "overall" and k != "Q_complete" and not k.startswith("_") and isinstance(v, dict)}
     )
 
     def _mean(pipe: str, q: str) -> float:
