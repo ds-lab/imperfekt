@@ -4,11 +4,11 @@ Composite Score: Irregularity, Intravariable & Intervariable Imperfection Strati
 =========================================================================================
 Assigns each case to one of five imperfection strata (Q_complete / Q_alpha / Q_beta /
 Q_gamma / Q_delta) using the least-correlated pair of metrics as axes,
-median-bisected per variable / cohort.
+median-bisected per cohort.
 
 Three analyses are demonstrated:
   1. Irregularity composite score   — temporal observation spacing
-  2. Intravariable composite score  — per-variable missingness pattern (one stratum per case × variable)
+  2. Intravariable composite score  — cross-variable missingness burden (one stratum per case)
   3. Intervariable composite score  — cross-variable co-missingness structure (one stratum per case)
 
 Replace the synthetic dataset block with your own data load and adjust
@@ -166,61 +166,46 @@ iv = IntravariableImperfection(
 iv = iv.composite_score(save_results=SAVE_RESULTS)
 
 # %%
-print("\n=== Intravariable: case scores per variable ===")
+print("\n=== Intravariable: case scores ===")
+composite = iv.results.iv_composite_scores
+indicated_cols = [c for c in composite.columns if c.endswith("_indicated_pct")]
 print(
-    iv.results.iv_composite_scores.select(
-        [
-            "id",
-            "variable",
-            "indicated_pct",
-            "gap_cv",
-            "gap_burstiness_coeff",
-            "gap_adherence_rate",
-            "mc_p11",
-            "axis_x",
-            "axis_y",
-            "axis_pair_corr",
-            "imperfection_stratum",
-        ]
+    composite.select(
+        ["id"] + indicated_cols + ["axis_x", "axis_y", "axis_pair_corr", "imperfection_stratum"]
     )
 )
 
 # %%
-print("\n=== Intravariable: stratum prevalence per variable ===")
-composite = iv.results.iv_composite_scores
-for var in cols:
-    var_scores = composite.filter(pl.col("variable") == var)
-    total_var = var_scores.height
-    print(
-        f"\n  {var}  (axis: "
-        f"{var_scores['axis_x'][0]} × {var_scores['axis_y'][0]}, "
-        f"corr={var_scores['axis_pair_corr'][0]:.3f})"
-    )
-    print(
-        var_scores.filter(pl.col("imperfection_stratum").is_not_null())
-        .group_by("imperfection_stratum")
-        .agg(pl.len().alias("n"))
-        .with_columns((pl.col("n") / total_var * 100).round(1).alias("pct"))
-        .sort("imperfection_stratum")
-    )
+print("\n=== Intravariable: stratum prevalence ===")
+total = composite.height
+axis_x = composite["axis_x"][0]
+axis_y = composite["axis_y"][0]
+corr = composite["axis_pair_corr"][0]
+print(f"  axis: {axis_x} × {axis_y}  (corr={corr:.3f})")
+print(
+    composite.filter(pl.col("imperfection_stratum").is_not_null())
+    .group_by("imperfection_stratum")
+    .agg(pl.len().alias("n"))
+    .with_columns((pl.col("n") / total * 100).round(1).alias("pct"))
+    .sort("imperfection_stratum")
+)
 
 # %%
-print("\n=== Intravariable: pairwise axis correlations (heartrate) ===")
-print(iv.results.iv_pairwise_correlations[cols[0]])
+print("\n=== Intravariable: pooled axis-pair correlations ===")
+print(iv.results.iv_pooled_corr_table)
 
 # %%
 # Cross-validation usage: fit medians on train, apply to held-out test
 # -------------------------------------------------------------------
-# For intravariable, do this per variable:
+# For intravariable (axis pair is shared across all variables):
 #
-# for var in cols:
-#     var_train = train_scores.filter(pl.col("variable") == var)
-#     x_med = float(var_train[axis_x].median())
-#     y_med = float(var_train[axis_y].median())
-#     test_var = IntravariableImperfection.assign_strata(
-#         test_scores.filter(pl.col("variable") == var),
-#         axis_x, axis_y, x_med, y_med,
-#     )
+# axis_x = train_scores["axis_x"][0]
+# axis_y = train_scores["axis_y"][0]
+# x_med = float(train_scores[axis_x].median())
+# y_med = float(train_scores[axis_y].median())
+# test_stratified = IntravariableImperfection.assign_strata(
+#     test_scores, axis_x, axis_y, x_med, y_med, cols,
+# )
 
 # %%
 ####################################

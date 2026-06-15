@@ -53,59 +53,57 @@ imp.intravariable.composite_score(save_results=False)
 intra_scores = imp.intravariable.results.iv_composite_scores
 assert intra_scores is not None
 
-# Selected axis pair per variable
-print("\n=== Intravariable: selected axis pairs ===")
+# Selected axis pair (shared across all cases)
+print("\n=== Intravariable: selected axis pair ===")
 print(
-    intra_scores.select(["variable", "axis_x", "axis_y", "axis_pair_corr",
+    intra_scores.select(["axis_x", "axis_y", "axis_pair_corr",
                          "axis_x_median_threshold", "axis_y_median_threshold"])
-    .unique(["variable", "axis_x", "axis_y"])
-    .sort("variable")
+    .unique(["axis_x", "axis_y"])
 )
 
-# All pairwise rho values (including non-selected pairs)
+# All pairwise rho values for the candidate axes
 print("\n=== Intravariable: all axis-pair correlations (rho) ===")
-for var, corr_tbl in imp.intravariable.results.iv_pairwise_correlations.items():
-    print(f"\n-- variable: {var} --")
-    print(corr_tbl.sort("abs_corr"))
+print(imp.intravariable.results.iv_pooled_corr_table)
+
+indicated_cols = [c for c in intra_scores.columns if c.endswith("_indicated_pct")]
 
 print("\n=== Null stratum diagnosis ===")
+any_imperfect = pl.fold(
+    acc=pl.lit(False),
+    function=lambda acc, s: acc | (s > 0),
+    exprs=[pl.col(c) for c in indicated_cols],
+)
 null_strata = intra_scores.filter(
-    pl.col("indicated_pct").gt(0) & pl.col("imperfection_stratum").is_null()
+    any_imperfect & pl.col("imperfection_stratum").is_null()
 )
 print(f"Imperfect cases with null stratum: {null_strata.height}")
 if null_strata.height > 0:
-    print(null_strata.select([
-        "id", "variable", "indicated_pct",
-        "max_gap_fraction", "gap_missing_centroid",
-        "gap_normalized_entropy", "gap_adherence_rate",
-        "axis_x", "axis_y", "imperfection_stratum",
-    ]).head(20))
+    print(null_strata.select(
+        ["id"] + indicated_cols + ["axis_x", "axis_y", "imperfection_stratum"]
+    ).head(20))
 
 intra_scores = intra_scores.join(labels, on="id", how="left")
 
 def intra_dist(df: pl.DataFrame) -> None:
     df = df.filter(pl.col("imperfection_stratum").is_not_null())
+    indicated_cols = [c for c in df.columns if c.endswith("_indicated_pct")]
+
+    agg_exprs = [
+        pl.len().alias("n"),
+        (pl.col("label").sum() / pl.len() * 100).round(1).alias("label1_pct"),
+    ] + [pl.col(c).mean().round(2).alias(f"mean_{c}") for c in indicated_cols]
 
     dist = (
-        df.group_by(["variable", "imperfection_stratum"])
-        .agg(
-            pl.len().alias("n"),
-            (pl.col("label").sum() / pl.len() * 100).round(1).alias("label1_pct"),
-            pl.col("indicated_pct").mean().round(2).alias("mean_indicated_pct"),
-            pl.col("gap_missing_centroid").mean().round(3).alias("mean_centroid"),
-            pl.col("max_gap_fraction").mean().round(3).alias("mean_max_gap_fraction"),
-        )
+        df.group_by("imperfection_stratum")
+        .agg(agg_exprs)
         .with_columns(
-            (pl.col("n") / pl.col("n").sum().over("variable") * 100)
-            .round(1)
-            .alias("stratum_pct")
+            (pl.col("n") / pl.col("n").sum() * 100).round(1).alias("stratum_pct")
         )
-        .sort(["variable", "imperfection_stratum"])
+        .sort("imperfection_stratum")
     )
-    for var, var_df in dist.group_by("variable", maintain_order=True):
-        var_total = var_df["n"].sum()
-        print(f"\n=== Intravariable | variable={var[0]} (n={var_total}) ===")
-        print(var_df.drop("variable"))
+    total = dist["n"].sum()
+    print(f"\n=== Intravariable (n={total}) ===")
+    print(dist)
 
 # %%
 pl.Config.set_tbl_cols(100)

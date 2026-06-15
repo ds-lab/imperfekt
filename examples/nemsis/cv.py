@@ -2,10 +2,10 @@ import json
 from pathlib import Path
 
 from imperfekt.analysis.intervariable.intervariable import IntervariableImperfection
+from imperfekt.analysis.intravariable.intravariable import IntravariableImperfection
 import polars as pl
 
 import numpy as np
-import polars as pl
 from collections import defaultdict
 from sklearn.metrics import average_precision_score, brier_score_loss, roc_auc_score
 from sklearn.model_selection import RepeatedStratifiedKFold
@@ -29,6 +29,7 @@ from examples.nemsis.features import feature_group, is_structural_feature
 from examples.utils.models import XGBoostModel  # noqa: E402
 
 _STRATA_CACHE_ROOT = RESULTS_DIR / "intervariable_strata_cache"
+_INTRA_STRATA_CACHE_ROOT = RESULTS_DIR / "intravariable_strata_cache"
 _STRATA_CACHE_VERSION = 1
 
 
@@ -105,6 +106,89 @@ def compute_intervariable_missingness_strata(
         print(f"Cached intervariable strata to {cache_dir}")
 
     return case_metrics, (axis_x, axis_y)
+
+
+def compute_intravariable_missingness_strata(
+    df: pl.DataFrame,
+    cohort_path: Path | None = None,
+) -> tuple[pl.DataFrame, tuple[str, str]]:
+    """
+    Run IntravariableImperfection on the full dataset to extract per-stay
+    cross-variable missingness burden and the dynamically selected axis pair.
+
+    Cached identically to compute_intervariable_missingness_strata under
+    RESULTS_DIR/intravariable_strata_cache/. Cache key is the same structure
+    (version, data fingerprint, vital_cols).
+
+    Returns:
+      case_metrics  - iv_composite_scores (id, {col}_indicated_pct, axis_x, axis_y, …)
+      axes          - (axis_x_name, axis_y_name) selected by the library
+    """
+    cache_dir = (
+        _INTRA_STRATA_CACHE_ROOT / f"{cohort_path.stem}_{data_fingerprint_tag(cohort_path)}"
+        if cohort_path is not None else None
+    )
+    cache_meta_path = cache_dir / "meta.json" if cache_dir is not None else None
+    cache_metrics_path = cache_dir / "case_metrics.parquet" if cache_dir is not None else None
+
+    if cohort_path is not None and cache_meta_path.exists() and cache_metrics_path.exists():
+        expected_key = _strata_cache_key(cohort_path)
+        cached_meta = json.loads(cache_meta_path.read_text())
+        if cached_meta.get("key") == expected_key:
+            case_metrics = pl.read_parquet(cache_metrics_path)
+            axes = tuple(cached_meta["axes"])
+            print(f"Loaded intravariable strata from cache: {cache_dir}")
+            return case_metrics, axes
+
+    strata_dir = RESULTS_DIR / "intravariable_strata"
+    imp = IntravariableImperfection(
+        df,
+        imperfection="missingness",
+        id_col="id",
+        clock_col="clock",
+        cols=VITAL_COLS,
+        save_path=strata_dir,
+    )
+    imp.composite_score(save_results=True)
+    case_metrics = imp.results.iv_composite_scores
+    axis_x = case_metrics["axis_x"][0]
+    axis_y = case_metrics["axis_y"][0]
+
+    if cohort_path is not None:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        case_metrics.write_parquet(cache_metrics_path)
+        cache_meta_path.write_text(
+            json.dumps(
+                {"key": _strata_cache_key(cohort_path), "axes": [axis_x, axis_y]},
+                indent=2,
+            )
+        )
+        print(f"Cached intravariable strata to {cache_dir}")
+
+    return case_metrics, (axis_x, axis_y)
+
+
+def combine_case_metrics(
+    inter_metrics: pl.DataFrame,
+    intra_metrics: pl.DataFrame,
+) -> pl.DataFrame:
+    """
+    Left-join intravariable metrics onto intervariable metrics on id.
+
+    Drops mode-specific axis metadata and stratum columns from intra before
+    joining (they would collide with the generic axis_x/axis_y names from
+    inter, and each mode's individual DataFrame remains the authoritative
+    source for axis selection). The combined frame carries all numeric metrics
+    from both sources for stratum characteristic reporting and feature
+    engineering.
+    """
+    _drop = {
+        "axis_x", "axis_y", "axis_pair_corr",
+        "axis_x_median_threshold", "axis_y_median_threshold",
+        "imperfection_stratum",
+    }
+    intra_slim = intra_metrics.drop([c for c in _drop if c in intra_metrics.columns])
+    return inter_metrics.join(intra_slim, on="id", how="left")
 
 
 def _compute_metrics(y_true: np.ndarray, y_proba: np.ndarray) -> dict | None:
@@ -244,6 +328,7 @@ def run_cv(
     case_metrics: pl.DataFrame,
     axes: tuple[str, str],
     pipeline_name: str,
+    stratification_mode: str = "intervariable",
     shap_save_path: Path | None = None,
     features_save_path: Path | None = None,
     shap_full: bool = True,
@@ -260,9 +345,12 @@ def run_cv(
     Repeated stratified k-fold CV (CV_N_SPLITS x CV_N_REPEATS).
     Splits are on id to prevent patient-level leakage across folds.
 
-    Irregularity quadrant thresholds (Q_alpha/Q_beta/Q_gamma/Q_delta) are derived strictly from
+    Quadrant thresholds (Q_alpha/Q_beta/Q_gamma/Q_delta) are derived strictly from
     the *train* fold on each iteration, then applied to test stays, so no
     test-set information leaks into the stratum evaluation boundaries.
+    ``stratification_mode`` selects which axis space is used ("intervariable" or
+    "intravariable"); both sets of metrics are always reported as stratum
+    characteristics via the combined case_metrics frame.
 
     If feature_distribution_save_path is given, per-fold feature means and
     outcome prevalence are accumulated per stratum (and "overall") and written
@@ -275,7 +363,7 @@ def run_cv(
       last_X_test      - test features from the final fold
       last_test_df     - exact test DataFrame from the final fold
       feature_cols     - ordered list of feature column names
-      last_test_strata - id/intervariable_stratum for the final fold's
+      last_test_strata - id/active_stratum for the final fold's
                          test set (train-derived thresholds)
     """
     feature_cols = [c for c in stay_df.columns if c not in ("id", "label")]
@@ -380,37 +468,53 @@ def run_cv(
         med_y = train_metrics[axis_y].median()
 
         test_ids = test["id"]
-        strata_input_cols = ["id", axis_x, axis_y]
-        if "avg_indicated_vars_pct" not in strata_input_cols:
-            strata_input_cols.append("avg_indicated_vars_pct")
-        # Do NOT drop null-axis rows before assign_strata: Q_complete cases (no
-        # missingness) have null co-missingness/entropy axes by construction, and
-        # assign_strata labels them Q_complete *before* its null-axis check. We
-        # instead drop unassignable rows (null intervariable_stratum) afterwards,
-        # which keeps Q_complete while still excluding genuinely null-axis cases.
-        test_strata = (
-            IntervariableImperfection.assign_strata(
-                case_metrics.filter(pl.col("id").is_in(test_ids.to_list())).select(
-                    strata_input_cols
-                ),
-                axis_x,
-                axis_y,
-                med_x,
-                med_y,
-            )
-            .select(["id", "intervariable_stratum"])
-            .drop_nulls("intervariable_stratum")
-        )
+        test_case_rows = case_metrics.filter(pl.col("id").is_in(test_ids.to_list()))
 
-        # Join test strata onto test rows to get a per-row stratum label aligned
-        # with y_test/y_proba, then group by stratum without repeated is_in scans.
-        # Also join cv/qcod/adherence_rate for irregularity characterisation per stratum.
+        # Do NOT drop null-axis rows before assign_strata: Q_complete cases (no
+        # missingness) have null axes by construction, and assign_strata labels them
+        # Q_complete *before* its null-axis check. Drop unassignable rows (null
+        # active_stratum) afterwards to keep Q_complete while excluding genuinely
+        # undefined cases.
+        if stratification_mode == "intravariable":
+            _base_intra = {"id", axis_x, axis_y}
+            intra_cols_needed = list(_base_intra) + [
+                f"{c}_indicated_pct" for c in VITAL_COLS
+                if f"{c}_indicated_pct" in case_metrics.columns
+                and f"{c}_indicated_pct" not in _base_intra
+            ]
+            test_strata = (
+                IntravariableImperfection.assign_strata(
+                    test_case_rows.select(intra_cols_needed),
+                    axis_x, axis_y, med_x, med_y, VITAL_COLS,
+                )
+                .select(["id", "imperfection_stratum"])
+                .rename({"imperfection_stratum": "active_stratum"})
+                .drop_nulls("active_stratum")
+            )
+        else:
+            inter_cols_needed = ["id", axis_x, axis_y]
+            if "avg_indicated_vars_pct" not in inter_cols_needed:
+                inter_cols_needed.append("avg_indicated_vars_pct")
+            test_strata = (
+                IntervariableImperfection.assign_strata(
+                    test_case_rows.select(inter_cols_needed),
+                    axis_x, axis_y, med_x, med_y,
+                )
+                .select(["id", "intervariable_stratum"])
+                .rename({"intervariable_stratum": "active_stratum"})
+                .drop_nulls("active_stratum")
+            )
+
+        # All numeric case-level metrics from the (combined) case_metrics frame —
+        # reported as stratum characteristics regardless of which mode drives strata.
+        _stratum_meta_cols = {
+            "id", "axis_x", "axis_y", "axis_pair_corr",
+            "axis_x_median_threshold", "axis_y_median_threshold",
+            "active_stratum", "intervariable_stratum", "imperfection_stratum",
+        }
         imperfekt_cols = [
-            "avg_indicated_vars_pct",
-            "co_missingness_concentration",
-            "missing_variable_breadth",
-            "pattern_entropy",
-            "max_pairwise_co_missingness",
+            c for c in case_metrics.columns
+            if c not in _stratum_meta_cols and case_metrics.schema[c].is_numeric()
         ]
         available_imperfekt = [c for c in imperfekt_cols if c in case_metrics.columns]
         test_strata_imperfekt = test_strata.join(
@@ -422,10 +526,10 @@ def run_cv(
         strata_arr = (
             test.select("id")
             .join(
-                test_strata_imperfekt.select(["id", "intervariable_stratum"]),
+                test_strata_imperfekt.select(["id", "active_stratum"]),
                 on="id",
                 how="left",
-            )["intervariable_stratum"]
+            )["active_stratum"]
             .fill_null("")
             .to_numpy()
         )
@@ -561,20 +665,16 @@ def summarise_cv(fold_metrics: dict[str, list], pipeline_name: str) -> dict[str,
     """
     from scipy import stats
 
+    _CORE_METRICS = (
+        "auprc", "auprc_lift", "auroc", "brier_skill_score", "n_pos_pct",
+    )
     summary = {}
     for key, folds in fold_metrics.items():
-        for metric in (
-            "auprc",
-            "auprc_lift",
-            "auroc",
-            "brier_skill_score",
-            "n_pos_pct",
-            "avg_indicated_vars_pct",
-            "co_missingness_concentration",
-            "missing_variable_breadth",
-            "pattern_entropy",
-            "max_pairwise_co_missingness",
-        ):
+        all_metrics = {m for f in folds for m in f}
+        ordered_metrics = [m for m in _CORE_METRICS if m in all_metrics] + sorted(
+            m for m in all_metrics if m not in _CORE_METRICS
+        )
+        for metric in ordered_metrics:
             vals = np.array([f[metric] for f in folds if metric in f and not np.isnan(f[metric])])
             if len(vals) == 0:
                 continue
@@ -607,17 +707,16 @@ def save_cv_results(
       auroc_mean, auroc_ci, brier_skill_score_mean, brier_skill_score_ci,
       n_pos_pct_mean, n_pos_pct_ci, avg_indicated_vars_pct_mean, …
     """
-    metrics = (
-        "auprc",
-        "auprc_lift",
-        "auroc",
-        "brier_skill_score",
-        "n_pos_pct",
-        "avg_indicated_vars_pct",
-        "co_missingness_concentration",
-        "missing_variable_breadth",
-        "pattern_entropy",
-        "max_pairwise_co_missingness",
+    _CORE_METRICS = ("auprc", "auprc_lift", "auroc", "brier_skill_score", "n_pos_pct")
+
+    # Collect all metric keys across all summaries so every column is present.
+    all_metric_keys: set[str] = set()
+    for _, summary in pipeline_summaries:
+        for s, s_dict in summary.items():
+            if not s.startswith("_"):
+                all_metric_keys.update(s_dict.keys())
+    metrics = [m for m in _CORE_METRICS if m in all_metric_keys] + sorted(
+        m for m in all_metric_keys if m not in _CORE_METRICS
     )
 
     rows = []

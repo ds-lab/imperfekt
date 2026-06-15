@@ -9,142 +9,6 @@ PATH = Path(__file__).parent.parent
 DATASET_NAME = "mcmed" # "nemsis" or "mcmed"
 NEMSIS_YEAR = "2024+2025" # "2024", "2025" or combo ("2024+2025")
 
-# Run full cohort or just a slice (with sure positives)
-DEBUG = False
-DEBUG_N_STAYS = 2000 * 10
-DEBUG_MIN_POS_FRAC = 0.1
-
-if DATASET_NAME == "nemsis":
-    COHORT_WINDOW_MINUTES = 20
-    COHORT_MIN_READINGS = 5
-    COHORT_MAX_READINGS = 40
-elif DATASET_NAME == "mcmed":
-    COHORT_WINDOW_MINUTES = 60
-    COHORT_MIN_READINGS = 15
-    COHORT_MAX_READINGS = None
-
-FILTER_ALWAYS_NULL_VITALS = False
-
-CLINICAL_ENDPOINT = "sepsis" # "destination" or "sepsis"
-if DATASET_NAME == "nemsis":
-    S3_BASE = f"ewai/data/nemsis/{NEMSIS_YEAR}/raw_parquet"
-    COHORT_PATH = (
-        f"{PATH}/data/{DATASET_NAME}/"
-        f"{CLINICAL_ENDPOINT}_{NEMSIS_YEAR}_{COHORT_WINDOW_MINUTES}_{COHORT_MIN_READINGS}_{COHORT_MAX_READINGS}_{FILTER_ALWAYS_NULL_VITALS}.parquet"
-    )
-    RESULTS_DIR = PATH / f"data/{DATASET_NAME}/post_publication_results"
-    VITAL_COLS = ["sbp", "hr", "o2sat", "rr"]
-    REQUIRED_VITAL_COLS = VITAL_COLS # for cohort inclusion
-elif DATASET_NAME == "mcmed":
-    S3_BASE = f"ewai/data/mc-med/data/parquet"
-    COHORT_PATH = (
-        f"{PATH}/data/{DATASET_NAME}/"
-        f"{CLINICAL_ENDPOINT}_{COHORT_WINDOW_MINUTES}_{COHORT_MIN_READINGS}_{FILTER_ALWAYS_NULL_VITALS}.parquet"
-    )
-    RESULTS_DIR = PATH / f"data/{DATASET_NAME}/post_publication_results"
-    VITAL_COLS = ["sbp", "hr", "o2sat", "rr"] #"1min_HRV", "5min_HRV"
-    REQUIRED_VITAL_COLS = ["sbp", "hr", "o2sat", "rr"] # for cohort inclusion; HRV columns may be missing for some cases
-else:
-    raise ValueError(f"Unsupported DATASET_NAME: {DATASET_NAME}")
-
-
-# Pre-trained SAITS models live here, one per plausibility branch, written by
-# train_saits.py as ``<DATASET_NAME>_plaus_<keep|remove>.pypots``. Single source
-# of truth so the trainer and the experiment pipeline agree on the location.
-SAITS_MODEL_DIR = PATH / "models" / "saits"
-
-
-def saits_model_path(plaus: str) -> Path:
-    """Path to the pre-trained SAITS model for a plausibility branch.
-
-    ``plaus`` is "keep" or "remove" (as stored in STAGE_3_CONFIGS). The returned
-    path may not exist yet — callers that want to skip-when-missing should check
-    ``.exists()`` (see prep._apply_imputation).
-    """
-    return SAITS_MODEL_DIR / f"{DATASET_NAME}_plaus_{plaus}.pypots"
-
-
-STAGE_3_CONFIGS: dict[str, dict[str, str]] = {
-    # "iq_pk_in": {"method": "iqr", "plaus": "keep",   "imp": "none"},
-    # "iq_pk_il": {"method": "iqr", "plaus": "keep",   "imp": "locf"},
-    # "iq_pr_in": {"method": "iqr", "plaus": "remove", "imp": "none"},
-    # "iq_pr_il": {"method": "iqr", "plaus": "remove", "imp": "locf"},
-    "ma_pk_in": {"method": "mad", "plaus": "keep",   "imp": "none"},
-    "ma_pk_il": {"method": "mad", "plaus": "keep",   "imp": "locf"},
-    "ma_pk_is": {"method": "mad", "plaus": "keep",   "imp": "saits"},
-    "ma_pr_in": {"method": "mad", "plaus": "remove", "imp": "none"},
-    "ma_pr_il": {"method": "mad", "plaus": "remove", "imp": "locf"},
-    "ma_pr_is": {"method": "mad", "plaus": "remove", "imp": "saits"},
-}
-
-STAGE_4_CONFIGS: dict[str, dict[str, bool]] = {
-    "base": {"base": True, "miss": False, "plaus": False},
-    "base+miss": {"base": True, "miss": True,  "plaus": False},
-    "base+plaus": {"base": True, "miss": False, "plaus": True},
-    "base+miss+plaus": {"base": True, "miss": True,  "plaus": True},
-}
-
-STRUCTURAL_FEATURE_COLS = []
-
-RANDOM_STATE = 42
-CV_N_SPLITS = 5
-CV_N_REPEATS = 10
-
-AXES = ("avg_indicated_vars_pct", "pattern_entropy")
-
-# Train-fold undersampling + Bayesian prior correction.
-# Within each CV fold we keep all positives and randomly subsample negatives
-# (without replacement) to a fixed pos:neg ratio before fitting XGBoost only.
-# The held-out validation fold is never undersampled, so it retains the natural
-# (~0.19%) prevalence; raw predict_proba is then rescaled in odds space back to
-# the true eligible-cohort prevalence (prior correction).
-APPLY_UNDERSAMPLING = True  # set False to train on the full (imbalanced) train fold
-TRAIN_NEG_POS_RATIO = 10  # target 1:10 pos:neg in the undersampled training set
-UNDERSAMPLE_RANDOM_STATE = 1234  # combined with the fold index for per-fold reproducibility
-APPLY_PRIOR_CORRECTION = True
-
-# SHAP subsampling: explaining every held-out test row with TreeExplainer is
-# expensive for large cohorts and the mean |SHAP| per feature is just a row
-# average, so a random subsample gives an unbiased estimate at a fraction of the
-# cost. Subsampling is *stratified* (capped per intervariable stratum) so the
-# rare strata keep enough rows for a usable per-stratum estimate. Set to None to
-# explain all test rows (exact, slow).
-SHAP_MAX_ROWS_PER_STRATUM = 2000
-SHAP_SUBSAMPLE_RANDOM_STATE = 7
-
-# Plotting
-SHOW_LEGEND = True
-# Extended, colorblind-friendly palette. The first 5 are the Okabe-Ito colors
-# used historically; the rest extend the cycle so many pipelines stay distinct.
-# 24 distinct entries cover the full STAGE_3 × STAGE_4 grid without wrapping.
-PLOT_COLORS = [
-    "#0072B2",  # blue
-    "#E69F00",  # orange
-    "#009E73",  # green
-    "#D55E00",  # vermilion
-    "#CC79A7",  # reddish purple
-    "#56B4E9",  # sky blue
-    "#F0E442",  # yellow
-    "#000000",  # black
-    "#999999",  # grey
-    "#882255",  # wine
-    "#44AA99",  # teal
-    "#AA4499",  # purple
-    "#117733",  # dark green
-    "#332288",  # indigo
-    "#DDCC77",  # sand
-    "#661100",  # dark red
-    "#88CCEE",  # light blue
-    "#999933",  # olive
-    "#CC6677",  # rose
-    "#6699CC",  # steel blue
-    "#AA3377",  # magenta
-    "#228833",  # forest green
-    "#EE7733",  # burnt orange
-    "#BBBBBB",  # light grey
-]
-
-
 def _debug_stay_sample(lf: pl.LazyFrame) -> pl.DataFrame:
     """Stratified-by-outcome sample of whole stays for the debug slice.
 
@@ -222,3 +86,147 @@ def data_fingerprint_tag(cohort_path: Path | str | None = None) -> str:
     """
     payload = json.dumps(data_fingerprint(cohort_path), sort_keys=True)
     return hashlib.sha1(payload.encode()).hexdigest()[:12]
+
+# Run full cohort or just a slice (with sure positives)
+DEBUG = False
+DEBUG_N_STAYS = 2000 * 10
+DEBUG_MIN_POS_FRAC = 0.1
+
+if DATASET_NAME == "nemsis":
+    COHORT_WINDOW_MINUTES = 20
+    COHORT_MIN_READINGS = 5
+    COHORT_MAX_READINGS = 40
+elif DATASET_NAME == "mcmed":
+    COHORT_WINDOW_MINUTES = 60
+    COHORT_MIN_READINGS = 15
+    COHORT_MAX_READINGS = None
+
+FILTER_ALWAYS_NULL_VITALS = False
+
+CLINICAL_ENDPOINT = "sepsis" # "destination" or "sepsis"
+if DATASET_NAME == "nemsis":
+    S3_BASE = f"ewai/data/nemsis/{NEMSIS_YEAR}/raw_parquet"
+    COHORT_PATH = (
+        f"{PATH}/data/{DATASET_NAME}/"
+        f"{CLINICAL_ENDPOINT}_{NEMSIS_YEAR}_{COHORT_WINDOW_MINUTES}_{COHORT_MIN_READINGS}_{COHORT_MAX_READINGS}_{FILTER_ALWAYS_NULL_VITALS}.parquet"
+    )
+    RESULTS_DIR = PATH / f"data/{DATASET_NAME}/post_publication_results"
+    VITAL_COLS = ["sbp", "hr", "o2sat", "rr"]
+    REQUIRED_VITAL_COLS = VITAL_COLS # for cohort inclusion
+elif DATASET_NAME == "mcmed":
+    S3_BASE = f"ewai/data/mc-med/data/parquet"
+    COHORT_PATH = (
+        f"{PATH}/data/{DATASET_NAME}/"
+        f"{CLINICAL_ENDPOINT}_{COHORT_WINDOW_MINUTES}_{COHORT_MIN_READINGS}_{FILTER_ALWAYS_NULL_VITALS}.parquet"
+    )
+    RESULTS_DIR = PATH / f"data/{DATASET_NAME}/post_publication_results"
+    VITAL_COLS = ["sbp", "hr", "o2sat", "rr"] #"1min_HRV", "5min_HRV"
+    REQUIRED_VITAL_COLS = ["sbp", "hr", "o2sat", "rr"] # for cohort inclusion; HRV columns may be missing for some cases
+else:
+    raise ValueError(f"Unsupported DATASET_NAME: {DATASET_NAME}")
+
+
+# Pre-trained SAITS models live here, one per plausibility branch, written by
+# train_saits.py as ``<DATASET_NAME>_plaus_<keep|remove>.pypots``. Single source
+# of truth so the trainer and the experiment pipeline agree on the location.
+SAITS_MODEL_DIR = RESULTS_DIR / data_fingerprint_tag(COHORT_PATH) / "saits"
+
+
+def saits_model_path(plaus: str) -> Path:
+    """Path to the pre-trained SAITS model for a plausibility branch.
+
+    ``plaus`` is "keep" or "remove" (as stored in STAGE_3_CONFIGS). The returned
+    path may not exist yet — callers that want to skip-when-missing should check
+    ``.exists()`` (see prep._apply_imputation).
+    """
+    return SAITS_MODEL_DIR / f"{DATASET_NAME}_plaus_{plaus}.pypots"
+
+
+STAGE_3_CONFIGS: dict[str, dict[str, str]] = {
+    # "iq_pk_in": {"method": "iqr", "plaus": "keep",   "imp": "none"},
+    # "iq_pk_il": {"method": "iqr", "plaus": "keep",   "imp": "locf"},
+    # "iq_pr_in": {"method": "iqr", "plaus": "remove", "imp": "none"},
+    # "iq_pr_il": {"method": "iqr", "plaus": "remove", "imp": "locf"},
+    "ma_pk_in": {"method": "mad", "plaus": "keep",   "imp": "none"},
+    "ma_pk_il": {"method": "mad", "plaus": "keep",   "imp": "locf"},
+    "ma_pk_is": {"method": "mad", "plaus": "keep",   "imp": "saits"},
+    "ma_pr_in": {"method": "mad", "plaus": "remove", "imp": "none"},
+    "ma_pr_il": {"method": "mad", "plaus": "remove", "imp": "locf"},
+    "ma_pr_is": {"method": "mad", "plaus": "remove", "imp": "saits"},
+}
+
+STAGE_4_CONFIGS: dict[str, dict[str, bool]] = {
+    "base": {"base": True, "miss": False, "plaus": False},
+    "base+miss": {"base": True, "miss": True,  "plaus": False},
+    "base+plaus": {"base": True, "miss": False, "plaus": True},
+    "base+miss+plaus": {"base": True, "miss": True,  "plaus": True},
+}
+
+STRUCTURAL_FEATURE_COLS = []
+
+RANDOM_STATE = 42
+CV_N_SPLITS = 5
+CV_N_REPEATS = 10
+
+# "intervariable" uses avg_indicated_vars_pct × pattern_entropy (co-missingness structure)
+# "intravariable"  uses the least-correlated {col}_indicated_pct pair (per-variable burden)
+STRATIFICATION_MODE: str = "intravariable"  # or "intravariable" / "intervariable"
+
+AXES_INTERVARIABLE = ("avg_indicated_vars_pct", "pattern_entropy")
+AXES_INTRAVARIABLE = ("sbp_indicated_pct", "rr_indicated_pct")
+
+AXES = AXES_INTRAVARIABLE if STRATIFICATION_MODE == "intravariable" else AXES_INTERVARIABLE
+
+# Train-fold undersampling + Bayesian prior correction.
+# Within each CV fold we keep all positives and randomly subsample negatives
+# (without replacement) to a fixed pos:neg ratio before fitting XGBoost only.
+# The held-out validation fold is never undersampled, so it retains the natural
+# (~0.19%) prevalence; raw predict_proba is then rescaled in odds space back to
+# the true eligible-cohort prevalence (prior correction).
+APPLY_UNDERSAMPLING = True  # set False to train on the full (imbalanced) train fold
+TRAIN_NEG_POS_RATIO = 10  # target 1:10 pos:neg in the undersampled training set
+UNDERSAMPLE_RANDOM_STATE = 1234  # combined with the fold index for per-fold reproducibility
+APPLY_PRIOR_CORRECTION = True
+
+# SHAP subsampling: explaining every held-out test row with TreeExplainer is
+# expensive for large cohorts and the mean |SHAP| per feature is just a row
+# average, so a random subsample gives an unbiased estimate at a fraction of the
+# cost. Subsampling is *stratified* (capped per intervariable stratum) so the
+# rare strata keep enough rows for a usable per-stratum estimate. Set to None to
+# explain all test rows (exact, slow).
+SHAP_MAX_ROWS_PER_STRATUM = 2000
+SHAP_SUBSAMPLE_RANDOM_STATE = 7
+
+# Plotting
+SHOW_LEGEND = True
+# Extended, colorblind-friendly palette. The first 5 are the Okabe-Ito colors
+# used historically; the rest extend the cycle so many pipelines stay distinct.
+# 24 distinct entries cover the full STAGE_3 × STAGE_4 grid without wrapping.
+PLOT_COLORS = [
+    "#0072B2",  # blue
+    "#E69F00",  # orange
+    "#009E73",  # green
+    "#D55E00",  # vermilion
+    "#CC79A7",  # reddish purple
+    "#56B4E9",  # sky blue
+    "#F0E442",  # yellow
+    "#000000",  # black
+    "#999999",  # grey
+    "#882255",  # wine
+    "#44AA99",  # teal
+    "#AA4499",  # purple
+    "#117733",  # dark green
+    "#332288",  # indigo
+    "#DDCC77",  # sand
+    "#661100",  # dark red
+    "#88CCEE",  # light blue
+    "#999933",  # olive
+    "#CC6677",  # rose
+    "#6699CC",  # steel blue
+    "#AA3377",  # magenta
+    "#228833",  # forest green
+    "#EE7733",  # burnt orange
+    "#BBBBBB",  # light grey
+]
+
+
