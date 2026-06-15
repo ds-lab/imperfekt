@@ -27,11 +27,11 @@ from plotting import (
     plot_spearman_orthogonality,
 )
 from examples.nemsis.cv import load_cv_results, save_shap_importance_csv, compute_feature_distribution_by_quadrant, compute_feature_distribution_by_outcome
-from config import RESULTS_DIR, data_fingerprint_tag, COHORT_PATH
+from config import RESULTS_DIR, STRATIFICATION_MODE, data_fingerprint_tag, COHORT_PATH
 import polars as pl
 
 _fp_tag = data_fingerprint_tag(COHORT_PATH)
-_RUN_DIR = RESULTS_DIR / _fp_tag
+_RUN_DIR = RESULTS_DIR / _fp_tag / STRATIFICATION_MODE
 csv_path = Path(sys.argv[1]) if len(sys.argv) > 1 else _RUN_DIR / "cv_results.csv"
 
 # ── Filter ────────────────────────────────────────────────────────────────────
@@ -111,7 +111,15 @@ plot_delta_auprc_heatmap(all_summaries, figures_dir / "delta_auprc_lift_heatmap.
 # Find the most recently written case_metrics.parquet under the strata cache.
 _STRATUM_ORDER = ["Q_complete", "Q_alpha", "Q_beta", "Q_gamma", "Q_delta"]
 
-cache_root = RESULTS_DIR / "intervariable_strata_cache"
+_cache_name = (
+    "intravariable_strata_cache" if STRATIFICATION_MODE == "intravariable"
+    else "intervariable_strata_cache"
+)
+_stratum_col = (
+    "imperfection_stratum" if STRATIFICATION_MODE == "intravariable"
+    else "intervariable_stratum"
+)
+cache_root = RESULTS_DIR / _cache_name
 parquet_candidates = sorted(
     glob.glob(str(cache_root / "*" / "case_metrics.parquet")),
     key=lambda p: Path(p).stat().st_mtime,
@@ -121,23 +129,27 @@ if parquet_candidates:
     print(f"\nBuilding stratum characterisation table from {metrics_path}")
     cm = pl.read_parquet(metrics_path)
 
-    stratum_table = (
-        cm.group_by("intervariable_stratum")
-        .agg(
-            pl.len().alias("n"),
-            pl.col("avg_indicated_vars_pct").mean().alias("avg_indicated_vars_pct_mean"),
-            pl.col("avg_indicated_vars_pct").std().alias("avg_indicated_vars_pct_std"),
-            pl.col("co_missingness_concentration").mean().alias("co_missingness_concentration_mean"),
-            pl.col("co_missingness_concentration").std().alias("co_missingness_concentration_std"),
-            pl.col("missing_variable_breadth").mean().alias("missing_variable_breadth_mean"),
-            pl.col("missing_variable_breadth").std().alias("missing_variable_breadth_std"),
-            pl.col("pattern_entropy").mean().alias("pattern_entropy_mean"),
-            pl.col("pattern_entropy").std().alias("pattern_entropy_std"),
-            pl.col("max_pairwise_co_missingness").mean().alias("max_pairwise_co_missingness_mean"),
-            pl.col("max_pairwise_co_missingness").std().alias("max_pairwise_co_missingness_std"),
+    # Aggregate all numeric columns present in the cache — works for both modes.
+    _meta_cols = {"id", "axis_x", "axis_y", "axis_pair_corr",
+                  "axis_x_median_threshold", "axis_y_median_threshold",
+                  "imperfection_stratum", "intervariable_stratum"}
+    numeric_cols = [
+        c for c in cm.columns
+        if c not in _meta_cols and cm.schema[c].is_numeric()
+    ]
+    agg_exprs = [pl.len().alias("n")] + [
+        expr
+        for c in numeric_cols
+        for expr in (
+            pl.col(c).mean().alias(f"{c}_mean"),
+            pl.col(c).std().alias(f"{c}_std"),
         )
+    ]
+    stratum_table = (
+        cm.group_by(_stratum_col)
+        .agg(agg_exprs)
         .with_columns(
-            pl.col("intervariable_stratum").cast(pl.Enum(_STRATUM_ORDER)).alias("_sort_key")
+            pl.col(_stratum_col).cast(pl.Enum(_STRATUM_ORDER)).alias("_sort_key")
         )
         .sort("_sort_key")
         .drop("_sort_key")
@@ -148,7 +160,7 @@ if parquet_candidates:
     print(f"Stratum characterisation table saved to {table_path}")
     print(stratum_table)
 else:
-    print("\nNo case_metrics.parquet found under intervariable_strata_cache — skipping stratum table.")
+    print(f"\nNo case_metrics.parquet found under {_cache_name} — skipping stratum table.")
     cm = None
 
 # %%
@@ -166,8 +178,8 @@ if feat_quad_path.exists() and cm is not None:
 
     # n per stratum from case_metrics → proportion of all stratified cases
     n_by_stratum = (
-        cm.filter(pl.col("intervariable_stratum").is_not_null())
-        .group_by("intervariable_stratum")
+        cm.filter(pl.col(_stratum_col).is_not_null())
+        .group_by(_stratum_col)
         .len()
     )
     total_cases = n_by_stratum["len"].sum()
@@ -224,8 +236,8 @@ if feat_quad_path.exists() and cm is not None:
                     pl.lit("%)"),
                 ).alias("mean_ci")
             )
-            .select(["intervariable_stratum", "mean_ci"])
-            .rename({"intervariable_stratum": "stratum"})
+            .select([_stratum_col, "mean_ci"])
+            .rename({_stratum_col: "stratum"})
             .with_columns(pl.lit(0).alias("_row"))
             .pivot(index="_row", on="stratum", values="mean_ci")
             .drop("_row")

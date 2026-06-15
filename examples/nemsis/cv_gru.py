@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 from imperfekt.analysis.intervariable.intervariable import IntervariableImperfection
+from imperfekt.analysis.intravariable.intravariable import IntravariableImperfection
 from sklearn.model_selection import RepeatedStratifiedKFold
 
 from config import (
@@ -55,6 +56,7 @@ def run_cv_gru(
     axes: tuple[str, str],
     pipeline_name: str,
     use_mask: bool = True,
+    stratification_mode: str = "intervariable",
 ) -> tuple[
     dict[str, list],
     GRUModel | None,
@@ -66,16 +68,19 @@ def run_cv_gru(
     """Repeated stratified k-fold CV using a GRU sequence model.
 
     Args:
-        cohort_df:     Long-format DataFrame (id, clock, vitals..., label) after
-                       plausibility filtering and imputation by ConfigBuilder.
-        case_metrics:  Per-case intervariable missingness metrics from
-                       compute_intervariable_missingness_strata().
-        axes:          (axis_x_name, axis_y_name) for intervariable strata.
-        pipeline_name: Label used in progress output and result keys.
-        use_mask:      When True the GRU input includes the binary observed-mask
-                       channel; when False it is values-only (mask ablation).
-                       Comparing the two per stratum shows where the missingness
-                       indicator adds predictive information.
+        cohort_df:           Long-format DataFrame (id, clock, vitals..., label) after
+                             plausibility filtering and imputation by ConfigBuilder.
+        case_metrics:        Combined per-case metrics from combine_case_metrics()
+                             (intervariable + intravariable joined on id).
+        axes:                (axis_x_name, axis_y_name) for the active stratification mode.
+        pipeline_name:       Label used in progress output and result keys.
+        use_mask:            When True the GRU input includes the binary observed-mask
+                             channel; when False it is values-only (mask ablation).
+                             Comparing the two per stratum shows where the missingness
+                             indicator adds predictive information.
+        stratification_mode: "intervariable" (co-missingness structure) or
+                             "intravariable" (per-variable missingness burden). Controls
+                             which axis space and assign_strata implementation are used.
 
     Returns:
         fold_metrics     - dict mapping "overall" and each stratum label to a
@@ -84,7 +89,7 @@ def run_cv_gru(
         None             - placeholder for SHAP compatibility with run_cv signature.
         last_test_df     - exact test DataFrame (long-format) from the final fold.
         feature_cols     - VITAL_COLS used as sequence features.
-        last_test_strata - id/intervariable_stratum for the final fold's test set.
+        last_test_strata - id/active_stratum for the final fold's test set.
     """
     # Stay-level labels for stratified splitting (one row per unique id).
     subject_labels = (
@@ -111,12 +116,14 @@ def run_cv_gru(
 
     axis_x, axis_y = axes
 
+    _stratum_meta_cols = {
+        "id", "axis_x", "axis_y", "axis_pair_corr",
+        "axis_x_median_threshold", "axis_y_median_threshold",
+        "active_stratum", "intervariable_stratum", "imperfection_stratum",
+    }
     imperfekt_cols = [
-        "avg_indicated_vars_pct",
-        "co_missingness_concentration",
-        "missing_variable_breadth",
-        "pattern_entropy",
-        "max_pairwise_co_missingness",
+        c for c in case_metrics.columns
+        if c not in _stratum_meta_cols and case_metrics.schema[c].is_numeric()
     ]
 
     fold_metrics: dict[str, list] = defaultdict(list)
@@ -228,23 +235,37 @@ def run_cv_gru(
         med_x = train_metrics[axis_x].median()
         med_y = train_metrics[axis_y].median()
 
-        strata_input_cols = ["id", axis_x, axis_y]
-        if "avg_indicated_vars_pct" not in strata_input_cols:
-            strata_input_cols.append("avg_indicated_vars_pct")
+        test_case_rows = case_metrics.filter(pl.col("id").is_in(list(test_subjects)))
 
-        test_strata = (
-            IntervariableImperfection.assign_strata(
-                case_metrics.filter(pl.col("id").is_in(list(test_subjects))).select(
-                    strata_input_cols
-                ),
-                axis_x,
-                axis_y,
-                med_x,
-                med_y,
+        if stratification_mode == "intravariable":
+            _base_intra = {"id", axis_x, axis_y}
+            intra_cols_needed = list(_base_intra) + [
+                f"{c}_indicated_pct" for c in VITAL_COLS
+                if f"{c}_indicated_pct" in case_metrics.columns
+                and f"{c}_indicated_pct" not in _base_intra
+            ]
+            test_strata = (
+                IntravariableImperfection.assign_strata(
+                    test_case_rows.select(intra_cols_needed),
+                    axis_x, axis_y, med_x, med_y, VITAL_COLS,
+                )
+                .select(["id", "imperfection_stratum"])
+                .rename({"imperfection_stratum": "active_stratum"})
+                .drop_nulls("active_stratum")
             )
-            .select(["id", "intervariable_stratum"])
-            .drop_nulls("intervariable_stratum")
-        )
+        else:
+            inter_cols_needed = ["id", axis_x, axis_y]
+            if "avg_indicated_vars_pct" not in inter_cols_needed:
+                inter_cols_needed.append("avg_indicated_vars_pct")
+            test_strata = (
+                IntervariableImperfection.assign_strata(
+                    test_case_rows.select(inter_cols_needed),
+                    axis_x, axis_y, med_x, med_y,
+                )
+                .select(["id", "intervariable_stratum"])
+                .rename({"intervariable_stratum": "active_stratum"})
+                .drop_nulls("active_stratum")
+            )
 
         available_imperfekt = [c for c in imperfekt_cols if c in case_metrics.columns]
         test_strata_imperfekt = test_strata.join(
@@ -257,10 +278,10 @@ def run_cv_gru(
         test_ids_df = pl.DataFrame({"id": test_ids})
         strata_arr = (
             test_ids_df.join(
-                test_strata_imperfekt.select(["id", "intervariable_stratum"]),
+                test_strata_imperfekt.select(["id", "active_stratum"]),
                 on="id",
                 how="left",
-            )["intervariable_stratum"]
+            )["active_stratum"]
             .fill_null("")
             .to_numpy()
         )
@@ -270,6 +291,7 @@ def run_cv_gru(
             sid = row["id"]
             imperfekt_lookup[sid] = {c: row[c] for c in imperfekt_cols if c in row}
 
+        ids_arr = np.asarray(test_ids)
         for stratum_label in np.unique(strata_arr):
             if stratum_label == "":
                 continue
@@ -279,7 +301,7 @@ def run_cv_gru(
                 for imperfekt_metric in imperfekt_cols:
                     vals = [
                         imperfekt_lookup[sid][imperfekt_metric]
-                        for sid in np.asarray(test_ids)[mask]
+                        for sid in ids_arr[mask]
                         if sid in imperfekt_lookup
                         and imperfekt_metric in imperfekt_lookup[sid]
                         and imperfekt_lookup[sid][imperfekt_metric] is not None
