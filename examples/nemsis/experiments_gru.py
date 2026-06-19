@@ -57,6 +57,7 @@ STRATIFICATION_MODES = {
     "intervariable": AXES_INTERVARIABLE,
     "intravariable": AXES_INTRAVARIABLE,
 }
+_FEAT_DIST_RUN = "ma_pk_in/mask"
 
 for strat_mode, axes in STRATIFICATION_MODES.items():
     RUN_DIR = RESULTS_DIR / _fp_tag / strat_mode
@@ -82,10 +83,17 @@ for strat_mode, axes in STRATIFICATION_MODES.items():
                 f" — Setup {run_name} [{strat_mode}]…"
             )
 
+            do_shap = config_name == "ma_pk_in" and arm_name == "mask"
+            shap_path = RUN_DIR / "shap" / f"{config_name}_{arm_name}.npz" if do_shap else None
+            do_feat_dist = f"{config_name}/{arm_name}" == _FEAT_DIST_RUN
+            feat_dist_path = RUN_DIR / "features" / f"{config_name}_{arm_name}.npz" if do_feat_dist else None
             folds, _, _, _, _, _ = run_cv_gru(
                 cohort_df, case_metrics, axes, run_name,
                 use_mask=use_mask,
                 stratification_mode=strat_mode,
+                shap_full=do_shap,
+                shap_save_path=shap_path,
+                features_save_path=feat_dist_path,
             )
             summary = summarise_cv(folds, run_name)
             summary["_run_timestamp"] = datetime.now().isoformat(timespec="seconds")

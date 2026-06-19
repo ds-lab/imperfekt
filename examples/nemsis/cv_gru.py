@@ -3,19 +3,25 @@
 Mirrors the structure of cv.py's run_cv() but operates on the raw long-format
 cohort DataFrame rather than stay-level aggregated features. Each fold converts
 train/test subsets to (N, T, D) 3D arrays via df_to_3d_array, then trains a
-GRUModel. SHAP is not computed for GRU runs.
+GRUModel. SHAP is computed via shap.GradientExplainer when shap_full=True,
+producing per-feature value importance, per-feature mask-channel importance
+(when use_mask=True), and a per-feature temporal importance profile for both
+the value and mask channels — all saved as .npz.
 
-Shared utilities (undersample_train, prior_correct_probs, _compute_metrics,
-summarise_cv, save_cv_results) are imported directly from cv.py to avoid drift.
+Shared utilities (_compute_metrics, prior_correct_probs, _stratified_shap_subsample)
+are imported directly from cv.py to avoid drift.
 """
 
 from __future__ import annotations
 
+import warnings
 from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
 import polars as pl
+import torch
+import torch.nn as nn
 from imperfekt.analysis.intervariable.intervariable import IntervariableImperfection
 from imperfekt.analysis.intravariable.intravariable import IntravariableImperfection
 from sklearn.model_selection import RepeatedStratifiedKFold
@@ -26,16 +32,58 @@ from config import (
     CV_N_REPEATS,
     CV_N_SPLITS,
     RANDOM_STATE,
+    SHAP_MAX_ROWS_PER_STRATUM,
+    SHAP_SUBSAMPLE_RANDOM_STATE,
     TRAIN_NEG_POS_RATIO,
     UNDERSAMPLE_RANDOM_STATE,
     VITAL_COLS,
 )
 from cv import (
     _compute_metrics,
+    _stratified_shap_subsample,
     prior_correct_probs,
 )
 from examples.utils.gru_model import GRUModel
 from seq_array import df_to_3d_array
+
+
+class _GRUShapWrapper(nn.Module):
+    """Single-tensor wrapper around _GRUNet for shap.GradientExplainer.
+
+    GradientExplainer requires a callable f(tensor) -> tensor. The GRU's
+    forward() needs lengths derived from the input, so we recompute them here.
+    Works for both use_mask=True (D_input=2D, mask in last D cols) and
+    use_mask=False (D_input=D, nonzero treated as observed).
+
+    When the model was trained with static features (static_size > 0) the
+    fc layer expects hidden_size + static_size inputs. We hold the static
+    tensor fixed (background mean) so GradientExplainer only attributes over
+    the sequence input — this avoids the shape mismatch while keeping the
+    forward pass valid.
+    """
+
+    def __init__(self, net: nn.Module, D: int, use_mask: bool, static: torch.Tensor | None = None):
+        super().__init__()
+        self.net = net
+        self.D = D
+        self.use_mask = use_mask
+        # Held-out static features (background mean); None when static_size == 0.
+        if static is not None:
+            self.register_buffer("static", static)
+        else:
+            self.static = None
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        T = x.shape[1]
+        if self.use_mask:
+            any_obs = x[:, :, self.D:].any(dim=2)  # (N, T)
+        else:
+            any_obs = (x != 0).any(dim=2)           # (N, T)
+        flipped = any_obs.flip(dims=[1])
+        last_from_end = flipped.long().argmax(dim=1)  # (N,)
+        lengths = (T - last_from_end).clamp(min=1)
+        static = self.static.expand(x.shape[0], -1) if self.static is not None else None
+        return self.net(x, lengths, static).unsqueeze(1)  # (N, 1) — GradientExplainer requires 2D output
 
 
 def _undersample_indices(y: np.ndarray, ratio: int, random_state: int) -> np.ndarray:
@@ -57,6 +105,9 @@ def run_cv_gru(
     pipeline_name: str,
     use_mask: bool = True,
     stratification_mode: str = "intervariable",
+    shap_save_path: Path | None = None,
+    shap_full: bool = True,
+    features_save_path: Path | None = None,
 ) -> tuple[
     dict[str, list],
     GRUModel | None,
@@ -127,6 +178,13 @@ def run_cv_gru(
     ]
 
     fold_metrics: dict[str, list] = defaultdict(list)
+    fold_shap_abs: dict[str, list[np.ndarray]] = defaultdict(list)
+    fold_shap_mask_abs: dict[str, list[np.ndarray]] = defaultdict(list)
+    fold_shap_time_feat_abs: dict[str, list[np.ndarray]] = defaultdict(list)
+    fold_shap_time_feat_mask_abs: dict[str, list[np.ndarray]] = defaultdict(list)
+    all_X_test_chunks: list[np.ndarray] = []
+    all_y_test_chunks: list[np.ndarray] = []
+    all_strata_chunks: list[np.ndarray] = []
     last_model: GRUModel | None = None
     last_test_df: pl.DataFrame | None = None
     last_test_strata: pl.DataFrame | None = None
@@ -206,6 +264,8 @@ def run_cv_gru(
             use_mask=use_mask,
         )
         model._train_model(X_train_us.astype(np.float32), y_train_us, X_train_static_us)
+        # Build processed train array now (scaler already fitted); used as SHAP background.
+        X_train_combined, _ = model._build_input(X_train_us.astype(np.float32))
         _, y_proba = model._predict(X_test_3d.astype(np.float32), X_test_static)
 
         if APPLY_PRIOR_CORRECTION:
@@ -291,6 +351,21 @@ def run_cv_gru(
             sid = row["id"]
             imperfekt_lookup[sid] = {c: row[c] for c in imperfekt_cols if c in row}
 
+        if features_save_path is not None:
+            with np.errstate(all="ignore"), warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                X_test_agg = np.concatenate(
+                    [
+                        np.nanmean(X_test_3d, axis=1),
+                        np.nanmin(X_test_3d, axis=1),
+                        np.nanmax(X_test_3d, axis=1),
+                    ],
+                    axis=1,
+                )  # (N, D*3): per-stay mean/min/max over observed timesteps
+            all_X_test_chunks.append(X_test_agg)
+            all_y_test_chunks.append(y_test)
+            all_strata_chunks.append(strata_arr)
+
         ids_arr = np.asarray(test_ids)
         for stratum_label in np.unique(strata_arr):
             if stratum_label == "":
@@ -309,9 +384,106 @@ def run_cv_gru(
                     m_s[imperfekt_metric] = float(np.mean(vals)) if vals else float("nan")
                 fold_metrics[stratum_label].append(m_s)
 
+        if shap_full:
+            try:
+                import shap as _shap
+                D = len(VITAL_COLS)
+                X_test_combined, _ = model._build_input(X_test_3d.astype(np.float32))
+                _sub_idx = _stratified_shap_subsample(
+                    strata_arr, SHAP_MAX_ROWS_PER_STRATUM, SHAP_SUBSAMPLE_RANDOM_STATE + fold_idx
+                )
+                X_shap_np = X_test_combined[_sub_idx]   # (N_sub, T, D_input)
+                _strata_shap = strata_arr[_sub_idx]
+
+                rng_bg = np.random.default_rng(SHAP_SUBSAMPLE_RANDOM_STATE + fold_idx)
+                bg_idx = rng_bg.choice(
+                    len(X_train_combined), size=min(100, len(X_train_combined)), replace=False
+                )
+                bg_tensor = torch.tensor(
+                    X_train_combined[bg_idx], dtype=torch.float32, device=model.device
+                )
+                X_shap_tensor = torch.tensor(
+                    X_shap_np, dtype=torch.float32, device=model.device
+                )
+
+                # When a static head is present, hold static at its training
+                # mean so GradientExplainer only attributes over sequence dims.
+                if model._static_mean is not None:
+                    _static_bg = torch.tensor(
+                        model._static_mean[None, :], dtype=torch.float32, device=model.device
+                    )
+                else:
+                    _static_bg = None
+                wrapper = _GRUShapWrapper(model.model, D, use_mask, _static_bg).to(model.device)
+                wrapper.eval()
+                with torch.backends.cudnn.flags(enabled=False):
+                    explainer = _shap.GradientExplainer(wrapper, bg_tensor)
+                    # shap_values returns (N_sub, T, D_input, 1) because the wrapper
+                    # outputs (N, 1); [..., 0] drops the trailing output dimension.
+                    shap_vals = np.array(explainer.shap_values(X_shap_tensor))[..., 0]  # (N_sub, T, D_input)
+                abs_shap = np.abs(shap_vals)
+                D_in = abs_shap.shape[2]
+
+                def _agg(arr: np.ndarray):
+                    val_imp = arr[:, :, :D].mean(axis=(0, 1))                          # (D,)
+                    mask_imp = arr[:, :, D:].mean(axis=(0, 1)) if D_in > D else None   # (D,) or None
+                    time_feat_imp = arr[:, :, :D].mean(axis=0)                          # (T, D)
+                    time_feat_mask_imp = arr[:, :, D:].mean(axis=0) if D_in > D else None  # (T, D) or None
+                    return val_imp, mask_imp, time_feat_imp, time_feat_mask_imp
+
+                v, mk, ti, ti_mk = _agg(abs_shap)
+                fold_shap_abs["overall"].append(v)
+                if mk is not None:
+                    fold_shap_mask_abs["overall"].append(mk)
+                fold_shap_time_feat_abs["overall"].append(ti)
+                if ti_mk is not None:
+                    fold_shap_time_feat_mask_abs["overall"].append(ti_mk)
+
+                for _sl in np.unique(_strata_shap):
+                    if _sl == "":
+                        continue
+                    _sl_mask = _strata_shap == _sl
+                    if _sl_mask.sum() > 0:
+                        v_s, mk_s, ti_s, ti_mk_s = _agg(abs_shap[_sl_mask])
+                        fold_shap_abs[_sl].append(v_s)
+                        if mk_s is not None:
+                            fold_shap_mask_abs[_sl].append(mk_s)
+                        fold_shap_time_feat_abs[_sl].append(ti_s)
+                        if ti_mk_s is not None:
+                            fold_shap_time_feat_mask_abs[_sl].append(ti_mk_s)
+            except Exception as _e:
+                print(f"  [{pipeline_name}] GRU SHAP skipped (fold {fold_idx + 1}): {_e}")
+
         last_model = model
         last_test_df = test_df
         last_test_strata = test_strata
 
     print()
+
+    if shap_full and shap_save_path is not None and fold_shap_abs:
+        shap_save_path.parent.mkdir(parents=True, exist_ok=True)
+        save_dict: dict[str, np.ndarray] = {"feature_names": np.array(list(VITAL_COLS))}
+        for _sl, _arrs in fold_shap_abs.items():
+            save_dict[f"shap_{_sl}"] = np.stack(_arrs)
+        for _sl, _arrs in fold_shap_mask_abs.items():
+            save_dict[f"shap_mask_{_sl}"] = np.stack(_arrs)
+        for _sl, _arrs in fold_shap_time_feat_abs.items():
+            save_dict[f"shap_time_feat_{_sl}"] = np.stack(_arrs)          # (n_folds, T, D)
+        for _sl, _arrs in fold_shap_time_feat_mask_abs.items():
+            save_dict[f"shap_time_feat_mask_{_sl}"] = np.stack(_arrs)     # (n_folds, T, D)
+        np.savez_compressed(shap_save_path, **save_dict)
+        print(f"  [{pipeline_name}] GRU SHAP saved to {shap_save_path}")
+
+    if features_save_path is not None and all_X_test_chunks:
+        agg_feature_names = [f"{c}_{stat}" for stat in ("mean", "min", "max") for c in VITAL_COLS]
+        features_save_path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(
+            features_save_path,
+            feature_names=np.array(agg_feature_names),
+            X_test_all=np.concatenate(all_X_test_chunks, axis=0),
+            y_test_all=np.concatenate(all_y_test_chunks, axis=0),
+            strata_all=np.concatenate(all_strata_chunks, axis=0),
+        )
+        print(f"  [{pipeline_name}] Feature values saved to {features_save_path}")
+
     return dict(fold_metrics), last_model, None, last_test_df, list(VITAL_COLS), last_test_strata

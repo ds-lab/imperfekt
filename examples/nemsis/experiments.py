@@ -14,13 +14,13 @@ import polars as pl
 from pathlib import Path
 
 from config import (
-    AXES,
+    AXES_INTERVARIABLE,
+    AXES_INTRAVARIABLE,
     COHORT_PATH,
     RESULTS_DIR,
     CV_N_REPEATS,
     CV_N_SPLITS,
     STAGE_3_CONFIGS,
-    STRATIFICATION_MODE,
     load_cohort,
     saits_model_path,
     data_fingerprint_tag,
@@ -29,8 +29,6 @@ from prep import ConfigBuilder
 
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 _fp_tag = data_fingerprint_tag(COHORT_PATH)
-RUN_DIR = RESULTS_DIR / _fp_tag / STRATIFICATION_MODE
-RUN_DIR.mkdir(parents=True, exist_ok=True)
 
 df = load_cohort()
 print(f"Cohort: {df['id'].n_unique()} stays, {len(df)} observations")
@@ -42,56 +40,71 @@ intra_metrics, _ = compute_intravariable_missingness_strata(df, cohort_path=Path
 case_metrics = combine_case_metrics(inter_metrics, intra_metrics)
 print(f"Combined case_metrics columns: {case_metrics.columns}")
 
-axes = AXES
-
 # Masks and configs are built lazily by the ConfigBuilder: a fully cached
 # feature-set run never touches them. On a cache miss, make_feature_sets calls
 # the provider, which builds only the requested config (and only the mask that
 # config needs), memoized for reuse across setups.
 builder = ConfigBuilder(df)
 
-setups = dict()
-pipeline_summaries = []
 _SHAP_FULL_RUNS = {"ma_pk_in/base+miss"} # {"ma_pk_in/base+miss"}
 _FEAT_DIST_OUTCOME_RUN = "ma_pk_in/base+miss"
 
+STRATIFICATION_MODES = {
+    "intervariable": AXES_INTERVARIABLE,
+    "intravariable": AXES_INTRAVARIABLE,
+}
+
 # %% EXPERIMENTS
-for config_name, config in STAGE_3_CONFIGS.items():
-    print(f"Config {config_name}: method={config['method']}, plaus={config['plaus']}, imp={config['imp']}")
-    if config["imp"] == "saits" and not saits_model_path(config["plaus"]).exists():
-        print(f"  -> skipped {config_name}: no SAITS model for plaus={config['plaus']}")
-        continue
-    feature_sets = make_feature_sets(
-        lambda config_name=config_name: builder.config(config_name),
-        config_name=config_name,
-        cohort_path=Path(COHORT_PATH),
-        case_metrics=case_metrics,
-    )
+# Each (config x setup) is evaluated under both stratification modes so the
+# per-stratum patterns can be compared across the intra/inter decomposition,
+# mirroring experiments_gru.py. make_feature_sets is mode-independent, so the
+# cached feature-set build is reused across both passes.
+for strat_mode, axes in STRATIFICATION_MODES.items():
+    RUN_DIR = RESULTS_DIR / _fp_tag / strat_mode
+    RUN_DIR.mkdir(parents=True, exist_ok=True)
 
-    for setup_name, stay_df in feature_sets.items():
-        run_name = f"{config_name}/{setup_name}"
-        setups[run_name] = stay_df
-        print(f"\nRunning {CV_N_SPLITS}×{CV_N_REPEATS} repeated stratified k-fold CV — Setup {run_name}…")
-        shap_path = RUN_DIR / "shap" / f"{run_name.replace('/', '__')}.npz"
-        features_path = RUN_DIR / "features" / f"{run_name.replace('/', '__')}.npz"
-        folds, _, _, _, _, _ = run_cv(
-            stay_df, case_metrics, axes, run_name,
-            stratification_mode=STRATIFICATION_MODE,
-            shap_save_path=shap_path,
-            features_save_path=features_path if run_name == _FEAT_DIST_OUTCOME_RUN else None,
-            shap_full=run_name in _SHAP_FULL_RUNS,
-        )
-        summary = summarise_cv(folds, run_name)
-        summary["_run_timestamp"] = datetime.now().isoformat(timespec="seconds")
-        pipeline_summaries.append((f"Setup {run_name}", summary))
+    setups = dict()
+    pipeline_summaries = []
 
-        plot_auprc_lift_by_stratum(
-            pipeline_summaries,
-            RUN_DIR / "figures" / "auprc_lift_by_stratum.png",
+    for config_name, config in STAGE_3_CONFIGS.items():
+        print(f"Config {config_name}: method={config['method']}, plaus={config['plaus']}, imp={config['imp']}")
+        if config["imp"] == "saits" and not saits_model_path(config["plaus"]).exists():
+            print(f"  -> skipped {config_name}: no SAITS model for plaus={config['plaus']}")
+            continue
+        feature_sets = make_feature_sets(
+            lambda config_name=config_name: builder.config(config_name),
+            config_name=config_name,
+            cohort_path=Path(COHORT_PATH),
+            case_metrics=case_metrics,
         )
-        save_cv_results(pipeline_summaries, RUN_DIR / "cv_results_temp.csv")
-# %%
-save_cv_results(pipeline_summaries, RUN_DIR / "cv_results.csv")
-(RUN_DIR / "cv_results_temp.csv").unlink(missing_ok=True)
+
+        for setup_name, stay_df in feature_sets.items():
+            run_name = f"{config_name}/{setup_name}"
+            setups[run_name] = stay_df
+            print(
+                f"\nRunning {CV_N_SPLITS}×{CV_N_REPEATS} repeated stratified k-fold CV"
+                f" — Setup {run_name} [{strat_mode}]…"
+            )
+            shap_path = RUN_DIR / "shap" / f"{run_name.replace('/', '__')}.npz"
+            features_path = RUN_DIR / "features" / f"{run_name.replace('/', '__')}.npz"
+            folds, _, _, _, _, _ = run_cv(
+                stay_df, case_metrics, axes, run_name,
+                stratification_mode=strat_mode,
+                shap_save_path=shap_path,
+                features_save_path=features_path if run_name == _FEAT_DIST_OUTCOME_RUN else None,
+                shap_full=run_name in _SHAP_FULL_RUNS,
+            )
+            summary = summarise_cv(folds, run_name)
+            summary["_run_timestamp"] = datetime.now().isoformat(timespec="seconds")
+            pipeline_summaries.append((f"Setup {run_name}", summary))
+
+            plot_auprc_lift_by_stratum(
+                pipeline_summaries,
+                RUN_DIR / "figures" / "auprc_lift_by_stratum.png",
+            )
+            save_cv_results(pipeline_summaries, RUN_DIR / "cv_results_temp.csv")
+
+    save_cv_results(pipeline_summaries, RUN_DIR / "cv_results.csv")
+    (RUN_DIR / "cv_results_temp.csv").unlink(missing_ok=True)
 
 # %%

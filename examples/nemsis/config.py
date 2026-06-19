@@ -88,8 +88,8 @@ def data_fingerprint_tag(cohort_path: Path | str | None = None) -> str:
     return hashlib.sha1(payload.encode()).hexdigest()[:12]
 
 # Run full cohort or just a slice (with sure positives)
-DEBUG = False
-DEBUG_N_STAYS = 2000 * 10
+DEBUG = True
+DEBUG_N_STAYS = 1200 * 10
 DEBUG_MIN_POS_FRAC = 0.1
 
 if DATASET_NAME == "nemsis":
@@ -170,7 +170,7 @@ CV_N_REPEATS = 10
 
 # "intervariable" uses avg_indicated_vars_pct × pattern_entropy (co-missingness structure)
 # "intravariable"  uses the least-correlated {col}_indicated_pct pair (per-variable burden)
-STRATIFICATION_MODE: str = "intravariable"  # or "intravariable" / "intervariable"
+STRATIFICATION_MODE: str = "intervariable"  # or "intravariable" / "intervariable"
 
 AXES_INTERVARIABLE = ("avg_indicated_vars_pct", "pattern_entropy")
 AXES_INTRAVARIABLE = ("sbp_indicated_pct", "rr_indicated_pct")

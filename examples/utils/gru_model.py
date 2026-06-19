@@ -124,6 +124,10 @@ class GRUModel:
         # Static feature standardization stats (mean/std per column).
         self._static_mean: np.ndarray | None = None
         self._static_std: np.ndarray | None = None
+        # Temperature for post-hoc calibration of predicted probabilities
+        # (logit / T before sigmoid); fit on the held-out validation split
+        # right after early stopping. 1.0 = no rescaling.
+        self._temperature: float = 1.0
 
     def _fit_scaler(self, X_filled: np.ndarray, mask: np.ndarray) -> None:
         """Fit per-feature mean/std over observed (mask=1) train values only.
@@ -206,6 +210,40 @@ class GRUModel:
         )
         return train_idx, val_idx
 
+    @staticmethod
+    def _fit_temperature(logits: np.ndarray, y: np.ndarray) -> float:
+        """Fit a scalar temperature T minimizing BCE of sigmoid(logits / T).
+
+        Temperature scaling (Guo et al. 2017) rescales logits by a single
+        learned factor before the sigmoid, correcting over/under-confidence
+        without changing the ranking of predictions (AUROC/AUPRC are
+        unaffected). T > 1 softens overconfident probabilities; T < 1
+        sharpens underconfident ones. Falls back to T=1.0 if the validation
+        slice has only one class (BCE has no information about confidence).
+        """
+        if len(np.unique(y)) < 2:
+            return 1.0
+
+        logits_t = torch.as_tensor(logits, dtype=torch.float32)
+        y_t = torch.as_tensor(y, dtype=torch.float32)
+
+        log_T = torch.zeros(1, requires_grad=True)
+        optimizer = torch.optim.LBFGS([log_T], lr=0.1, max_iter=50)
+        criterion = nn.BCEWithLogitsLoss()
+
+        def closure():
+            optimizer.zero_grad()
+            T = torch.exp(log_T)
+            loss = criterion(logits_t / T, y_t)
+            loss.backward()
+            return loss
+
+        optimizer.step(closure)
+        T = float(torch.exp(log_T).item())
+        # Guard against pathological fits (e.g. exploding T on tiny/degenerate
+        # validation slices); clip to a sane range rather than risk NaNs.
+        return float(np.clip(T, 1e-2, 1e2))
+
     def _train_model(self, X_3d: np.ndarray, y: np.ndarray, X_static: np.ndarray | None = None) -> None:
         """Train the GRU on a (N, T, D) array and binary labels y (N,).
 
@@ -284,6 +322,14 @@ class GRUModel:
             net.load_state_dict(best_state)
         self.model = net
 
+        if has_val:
+            net.eval()
+            with torch.no_grad():
+                val_logits = net(xv, lv, sv).cpu().numpy()
+            self._temperature = self._fit_temperature(val_logits, y_arr[val_idx])
+        else:
+            self._temperature = 1.0
+
     def _predict(self, X_3d: np.ndarray, X_static: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
         """Return (y_pred, y_proba) for a (N, T, D) array.
 
@@ -307,7 +353,7 @@ class GRUModel:
                 xb = torch.tensor(X_combined[start : start + self.batch_size], device=self.device)
                 lb = torch.tensor(lengths[start : start + self.batch_size], device=self.device)
                 sb = torch.tensor(X_static_scaled[start : start + self.batch_size], device=self.device) if X_static_scaled is not None else None
-                logits = self.model(xb, lb, sb)
+                logits = self.model(xb, lb, sb) / self._temperature
                 proba = torch.sigmoid(logits).cpu().numpy()
                 all_proba.append(proba)
 

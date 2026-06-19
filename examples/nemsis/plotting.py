@@ -398,6 +398,7 @@ _SHAP_GROUP_COLORS = {
     "structural_plaus": "#E69F00",   # orange
     "physiology":       "#999999",   # grey
     "metadata":         "#BBBBBB",   # light grey
+    "mask":             "#0072B2",   # blue — GRU mask-channel importance
 }
 
 

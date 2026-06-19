@@ -1073,22 +1073,33 @@ def print_information_gain_ratio(
 
 
 def summarise_shap(npz_path: Path) -> pl.DataFrame:
-    """Read a SHAP .npz and return mean ± std of mean |SHAP| per stratum × feature."""
+    """Read a SHAP .npz and return mean ± std of mean |SHAP| per stratum × feature.
+
+    Value-channel rows use the feature name as-is (feature_group from `feature_group()`).
+    Mask-channel rows (GRU runs with use_mask=True, stored as shap_mask_{stratum}) are
+    suffixed "{feat} (mask)" and tagged feature_group="mask" so they plot distinctly
+    from the corresponding value-channel feature.
+    """
     data = np.load(npz_path, allow_pickle=True)
     feature_names: list[str] = data["feature_names"].tolist()
     rows: list[dict] = []
     for key in data.files:
-        if not key.startswith("shap_"):
+        if key.startswith("shap_mask_"):
+            stratum = key[len("shap_mask_"):]
+            is_mask = True
+        elif key.startswith("shap_") and not key.startswith("shap_time_"):
+            stratum = key[len("shap_"):]
+            is_mask = False
+        else:
             continue
-        stratum = key[len("shap_"):]
         mat = data[key]  # (n_folds, n_features)
         for i, feat in enumerate(feature_names):
             col = mat[:, i]
             rows.append(
                 {
                     "stratum": stratum,
-                    "feature": feat,
-                    "feature_group": feature_group(feat),
+                    "feature": f"{feat} (mask)" if is_mask else feat,
+                    "feature_group": "mask" if is_mask else feature_group(feat),
                     "mean_abs_shap_mean": float(col.mean()),
                     "mean_abs_shap_std": float(col.std(ddof=1)) if len(col) > 1 else 0.0,
                 }
