@@ -6,7 +6,7 @@ import polars as pl
 
 PATH = Path(__file__).parent.parent
 
-DATASET_NAME = "mcmed" # "nemsis" or "mcmed"
+DATASET_NAME = "nemsis" # "nemsis" or "mcmed"
 NEMSIS_YEAR = "2024+2025" # "2024", "2025" or combo ("2024+2025")
 
 def _debug_stay_sample(lf: pl.LazyFrame) -> pl.DataFrame:
@@ -88,7 +88,7 @@ def data_fingerprint_tag(cohort_path: Path | str | None = None) -> str:
     return hashlib.sha1(payload.encode()).hexdigest()[:12]
 
 # Run full cohort or just a slice (with sure positives)
-DEBUG = True
+DEBUG = False
 DEBUG_N_STAYS = 1200 * 10
 DEBUG_MIN_POS_FRAC = 0.1
 

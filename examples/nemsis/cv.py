@@ -323,57 +323,188 @@ def _stratified_shap_subsample(
     return np.sort(np.concatenate(keep))
 
 
+def _assign_fold_strata(
+    order_ids: np.ndarray | pl.Series,
+    train_ids: list,
+    test_ids: list,
+    case_metrics: pl.DataFrame,
+    axes: tuple[str, str],
+    stratification_mode: str,
+) -> tuple[np.ndarray, dict[str, dict[str, float]], list[str], pl.DataFrame]:
+    """Assign each test stay to its train-derived stratum for one mode.
+
+    Quadrant thresholds are taken from the *train* fold medians and applied to
+    the test stays, so no test-set information leaks into the stratum
+    boundaries. ``order_ids`` gives the id ordering the returned stratum array
+    must align to (the test feature-matrix row order — ``test``'s row order for
+    the tabular loop, or ``df_to_3d_array``'s sorted ids for the GRU loop).
+    Returns the per-row stratum array (null/unassignable stays as ``""``), a
+    per-id lookup of all numeric case-level imperfection metrics (for stratum
+    characterisation), the list of those imperfection metric column names, and
+    the id/active_stratum DataFrame of assigned stays.
+    """
+    axis_x, axis_y = axes
+
+    # Medians from train only; thresholds applied to test — no leakage.
+    train_metrics = case_metrics.filter(pl.col("id").is_in(train_ids))
+    med_x = train_metrics[axis_x].median()
+    med_y = train_metrics[axis_y].median()
+
+    test_case_rows = case_metrics.filter(pl.col("id").is_in(test_ids))
+
+    # Do NOT drop null-axis rows before assign_strata: Q_complete cases (no
+    # missingness) have null axes by construction, and assign_strata labels them
+    # Q_complete *before* its null-axis check. Drop unassignable rows (null
+    # active_stratum) afterwards to keep Q_complete while excluding genuinely
+    # undefined cases.
+    if stratification_mode == "intravariable":
+        _base_intra = {"id", axis_x, axis_y}
+        intra_cols_needed = list(_base_intra) + [
+            f"{c}_indicated_pct" for c in VITAL_COLS
+            if f"{c}_indicated_pct" in case_metrics.columns
+            and f"{c}_indicated_pct" not in _base_intra
+        ]
+        test_strata = (
+            IntravariableImperfection.assign_strata(
+                test_case_rows.select(intra_cols_needed),
+                axis_x, axis_y, med_x, med_y, VITAL_COLS,
+            )
+            .select(["id", "imperfection_stratum"])
+            .rename({"imperfection_stratum": "active_stratum"})
+            .drop_nulls("active_stratum")
+        )
+    else:
+        inter_cols_needed = ["id", axis_x, axis_y]
+        if "avg_indicated_vars_pct" not in inter_cols_needed:
+            inter_cols_needed.append("avg_indicated_vars_pct")
+        test_strata = (
+            IntervariableImperfection.assign_strata(
+                test_case_rows.select(inter_cols_needed),
+                axis_x, axis_y, med_x, med_y,
+            )
+            .select(["id", "intervariable_stratum"])
+            .rename({"intervariable_stratum": "active_stratum"})
+            .drop_nulls("active_stratum")
+        )
+
+    # All numeric case-level metrics from the (combined) case_metrics frame —
+    # reported as stratum characteristics regardless of which mode drives strata.
+    _stratum_meta_cols = {
+        "id", "axis_x", "axis_y", "axis_pair_corr",
+        "axis_x_median_threshold", "axis_y_median_threshold",
+        "active_stratum", "intervariable_stratum", "imperfection_stratum",
+    }
+    imperfekt_cols = [
+        c for c in case_metrics.columns
+        if c not in _stratum_meta_cols and case_metrics.schema[c].is_numeric()
+    ]
+    available_imperfekt = [c for c in imperfekt_cols if c in case_metrics.columns]
+    test_strata_imperfekt = test_strata.join(
+        case_metrics.select(available_imperfekt + ["id"]),
+        on="id",
+        how="left",
+    )
+
+    strata_arr = (
+        pl.DataFrame({"id": order_ids})
+        .join(
+            test_strata_imperfekt.select(["id", "active_stratum"]),
+            on="id",
+            how="left",
+        )["active_stratum"]
+        .fill_null("")
+        .to_numpy()
+    )
+
+    imperfekt_lookup: dict[str, dict[str, float]] = {}
+    for row in test_strata_imperfekt.iter_rows(named=True):
+        sid = row["id"]
+        imperfekt_lookup[sid] = {c: row[c] for c in imperfekt_cols if c in row}
+
+    return strata_arr, imperfekt_lookup, imperfekt_cols, test_strata
+
+
+def _accumulate_stratum_metrics(
+    fold_metrics: dict[str, list],
+    strata_arr: np.ndarray,
+    ids_arr: np.ndarray,
+    y_test: np.ndarray,
+    y_proba: np.ndarray,
+    imperfekt_lookup: dict[str, dict[str, float]],
+    imperfekt_cols: list[str],
+) -> None:
+    """Append per-stratum metric dicts for one fold into ``fold_metrics``."""
+    for stratum_label in np.unique(strata_arr):
+        if stratum_label == "":
+            continue
+        mask = strata_arr == stratum_label
+        m_s = _compute_metrics(y_test[mask], y_proba[mask])
+        if m_s:
+            for imperfekt_metric in imperfekt_cols:
+                vals = [
+                    imperfekt_lookup[sid][imperfekt_metric]
+                    for sid in ids_arr[mask]
+                    if sid in imperfekt_lookup
+                    and imperfekt_metric in imperfekt_lookup[sid]
+                    and imperfekt_lookup[sid][imperfekt_metric] is not None
+                ]
+                m_s[imperfekt_metric] = float(np.mean(vals)) if vals else float("nan")
+            fold_metrics[stratum_label].append(m_s)
+
+
 def run_cv(
     stay_df: pl.DataFrame,
     case_metrics: pl.DataFrame,
-    axes: tuple[str, str],
+    modes: dict[str, tuple[str, str]],
     pipeline_name: str,
-    stratification_mode: str = "intervariable",
-    shap_save_path: Path | None = None,
-    features_save_path: Path | None = None,
+    shap_save_paths: dict[str, Path] | None = None,
+    features_save_paths: dict[str, Path] | None = None,
     shap_full: bool = True,
     shap_interactions: bool = False,
-) -> tuple[
-    dict[str, list],
-    XGBoostModel | None,
-    np.ndarray | None,
-    pl.DataFrame | None,
-    list[str],
-    pl.DataFrame | None,
-]:
-    """
-    Repeated stratified k-fold CV (CV_N_SPLITS x CV_N_REPEATS).
-    Splits are on id to prevent patient-level leakage across folds.
+) -> dict[str, dict[str, list]]:
+    """Repeated stratified k-fold CV (CV_N_SPLITS x CV_N_REPEATS) over 1+ modes.
+
+    Splits are on id to prevent patient-level leakage across folds. The model is
+    trained once per fold and reused across every stratification mode in
+    ``modes`` — the modes differ only in how the held-out test stays are bucketed
+    into strata (a cheap step), so evaluating N modes costs ~1× a single pass
+    rather than N×. Pass a single-entry ``modes`` for the ordinary one-mode run.
 
     Quadrant thresholds (Q_alpha/Q_beta/Q_gamma/Q_delta) are derived strictly from
     the *train* fold on each iteration, then applied to test stays, so no
-    test-set information leaks into the stratum evaluation boundaries.
-    ``stratification_mode`` selects which axis space is used ("intervariable" or
-    "intravariable"); both sets of metrics are always reported as stratum
-    characteristics via the combined case_metrics frame.
+    test-set information leaks into the stratum evaluation boundaries. For every
+    mode, all numeric case-level metrics are reported as stratum characteristics
+    via the combined case_metrics frame.
 
-    If feature_distribution_save_path is given, per-fold feature means and
-    outcome prevalence are accumulated per stratum (and "overall") and written
-    as a tidy CSV at the end — using the same leakage-safe fold splits.
+    Args:
+      modes               - mode name (e.g. "intervariable") → its (axis_x,
+                            axis_y) pair. Drives which axis space buckets strata.
+      shap_save_paths     - mode name → SHAP .npz output path (only modes present
+                            are written). SHAP is a per-stratum-capped subsample
+                            using that mode's strata, identical to a per-mode run.
+      features_save_paths - mode name → features .npz output path (per-fold test
+                            features/labels/strata pooled), same leakage-safe
+                            fold splits.
 
-    Returns:
-      fold_metrics     - dict mapping "overall" and each stratum label to a
-                         list of metric dicts, one per fold
-      last_model       - trained model from the final fold (for SHAP)
-      last_X_test      - test features from the final fold
-      last_test_df     - exact test DataFrame from the final fold
-      feature_cols     - ordered list of feature column names
-      last_test_strata - id/active_stratum for the final fold's
-                         test set (train-derived thresholds)
+    Returns a dict mapping each mode name to that mode's ``fold_metrics`` dict
+    (mapping "overall" and each stratum label to a list of per-fold metric
+    dicts). Feed each value to :func:`summarise_cv` / :func:`save_cv_results`.
     """
+    shap_save_paths = shap_save_paths or {}
+    features_save_paths = features_save_paths or {}
+
     feature_cols = [c for c in stay_df.columns if c not in ("id", "label")]
-    fold_shap_abs: dict[str, list[np.ndarray]] = defaultdict(list)
-    last_shap_interactions: dict[str, np.ndarray] = {}
-    last_X_test_raw: np.ndarray | None = None
-    last_y_test_raw: np.ndarray | None = None
-    all_X_test_chunks: list[np.ndarray] = []
-    all_y_test_chunks: list[np.ndarray] = []
-    all_strata_chunks: list[np.ndarray] = []
+
+    # Per-mode accumulators, keyed by mode name.
+    fold_metrics_by_mode: dict[str, dict[str, list]] = {m: defaultdict(list) for m in modes}
+    fold_shap_abs_by_mode: dict[str, dict[str, list[np.ndarray]]] = {
+        m: defaultdict(list) for m in modes
+    }
+    shap_interactions_by_mode: dict[str, dict[str, np.ndarray]] = {m: {} for m in modes}
+    shap_last_raw_by_mode: dict[str, dict[str, np.ndarray]] = {m: {} for m in modes}
+    feat_chunks_by_mode: dict[str, dict[str, list[np.ndarray]]] = {
+        m: {"X": [], "y": [], "strata": []} for m in modes
+    }
 
     subject_labels = (
         stay_df.select(["id", "label"])
@@ -396,14 +527,6 @@ def run_cv(
         n_repeats=CV_N_REPEATS,
         random_state=RANDOM_STATE,
     )
-
-    axis_x, axis_y = axes
-
-    fold_metrics: dict[str, list] = defaultdict(list)
-    last_model = None
-    last_X_test = None
-    last_test_df = None
-    last_test_strata = None
 
     total_folds = CV_N_SPLITS * CV_N_REPEATS
     for fold_idx, (train_idx, test_idx) in enumerate(rskf.split(subjects, subject_outcomes)):
@@ -458,204 +581,149 @@ def run_cv(
             f"val_prevalence={val_prevalence:.5f}"
         )
 
+        # Overall metrics are mode-independent (same y_proba), but each mode's
+        # fold_metrics carries its own "overall" list so summarise_cv per mode is
+        # identical to a single-mode run.
         m = _compute_metrics(y_test, y_proba)
-        if m:
-            fold_metrics["overall"].append(m)
-
-        # Medians from train only; thresholds applied to test — no leakage.
-        train_metrics = case_metrics.filter(pl.col("id").is_in(train["id"].to_list()))
-        med_x = train_metrics[axis_x].median()
-        med_y = train_metrics[axis_y].median()
-
-        test_ids = test["id"]
-        test_case_rows = case_metrics.filter(pl.col("id").is_in(test_ids.to_list()))
-
-        # Do NOT drop null-axis rows before assign_strata: Q_complete cases (no
-        # missingness) have null axes by construction, and assign_strata labels them
-        # Q_complete *before* its null-axis check. Drop unassignable rows (null
-        # active_stratum) afterwards to keep Q_complete while excluding genuinely
-        # undefined cases.
-        if stratification_mode == "intravariable":
-            _base_intra = {"id", axis_x, axis_y}
-            intra_cols_needed = list(_base_intra) + [
-                f"{c}_indicated_pct" for c in VITAL_COLS
-                if f"{c}_indicated_pct" in case_metrics.columns
-                and f"{c}_indicated_pct" not in _base_intra
-            ]
-            test_strata = (
-                IntravariableImperfection.assign_strata(
-                    test_case_rows.select(intra_cols_needed),
-                    axis_x, axis_y, med_x, med_y, VITAL_COLS,
-                )
-                .select(["id", "imperfection_stratum"])
-                .rename({"imperfection_stratum": "active_stratum"})
-                .drop_nulls("active_stratum")
-            )
-        else:
-            inter_cols_needed = ["id", axis_x, axis_y]
-            if "avg_indicated_vars_pct" not in inter_cols_needed:
-                inter_cols_needed.append("avg_indicated_vars_pct")
-            test_strata = (
-                IntervariableImperfection.assign_strata(
-                    test_case_rows.select(inter_cols_needed),
-                    axis_x, axis_y, med_x, med_y,
-                )
-                .select(["id", "intervariable_stratum"])
-                .rename({"intervariable_stratum": "active_stratum"})
-                .drop_nulls("active_stratum")
-            )
-
-        # All numeric case-level metrics from the (combined) case_metrics frame —
-        # reported as stratum characteristics regardless of which mode drives strata.
-        _stratum_meta_cols = {
-            "id", "axis_x", "axis_y", "axis_pair_corr",
-            "axis_x_median_threshold", "axis_y_median_threshold",
-            "active_stratum", "intervariable_stratum", "imperfection_stratum",
-        }
-        imperfekt_cols = [
-            c for c in case_metrics.columns
-            if c not in _stratum_meta_cols and case_metrics.schema[c].is_numeric()
-        ]
-        available_imperfekt = [c for c in imperfekt_cols if c in case_metrics.columns]
-        test_strata_imperfekt = test_strata.join(
-            case_metrics.select(available_imperfekt + ["id"]),
-            on="id",
-            how="left",
-        )
-
-        strata_arr = (
-            test.select("id")
-            .join(
-                test_strata_imperfekt.select(["id", "active_stratum"]),
-                on="id",
-                how="left",
-            )["active_stratum"]
-            .fill_null("")
-            .to_numpy()
-        )
-
-        imperfekt_lookup: dict[str, dict[str, float]] = {}
-        for row in test_strata_imperfekt.iter_rows(named=True):
-            sid = row["id"]
-            imperfekt_lookup[sid] = {c: row[c] for c in imperfekt_cols if c in row}
-
         ids_arr = test["id"].to_numpy()
 
-        for stratum_label in np.unique(strata_arr):
-            if stratum_label == "":
+        # Build the SHAP TreeExplainer once for this fold's model (the expensive
+        # step) and share it across every SHAP-emitting mode.
+        explainer = None
+        if shap_full and shap_save_paths:
+            explainer = _make_fold_explainer(model, fold_idx, pipeline_name)
+
+        train_id_list = train["id"].to_list()
+        test_id_list = test["id"].to_list()
+        for mode_name, axes in modes.items():
+            strata_arr, imperfekt_lookup, imperfekt_cols, _ = _assign_fold_strata(
+                test["id"], train_id_list, test_id_list, case_metrics, axes, mode_name,
+            )
+            fm = fold_metrics_by_mode[mode_name]
+            if m:
+                fm["overall"].append(dict(m))
+            _accumulate_stratum_metrics(
+                fm, strata_arr, ids_arr, y_test, y_proba,
+                imperfekt_lookup, imperfekt_cols,
+            )
+
+            if explainer is None or mode_name not in shap_save_paths:
+                if mode_name in features_save_paths:
+                    ch = feat_chunks_by_mode[mode_name]
+                    ch["X"].append(X_test)
+                    ch["y"].append(y_test)
+                    ch["strata"].append(strata_arr)
                 continue
-            mask = strata_arr == stratum_label
-            m_s = _compute_metrics(y_test[mask], y_proba[mask])
-            if m_s:
-                for imperfekt_metric in imperfekt_cols:
-                    vals = [
-                        imperfekt_lookup[sid][imperfekt_metric]
-                        for sid in ids_arr[mask]
-                        if sid in imperfekt_lookup
-                        and imperfekt_metric in imperfekt_lookup[sid]
-                        and imperfekt_lookup[sid][imperfekt_metric] is not None
-                    ]
-                    m_s[imperfekt_metric] = float(np.mean(vals)) if vals else float("nan")
-                fold_metrics[stratum_label].append(m_s)
 
-        if shap_full:
-            try:
-                import shap as _shap
-                import shap.explainers._tree as _shap_tree
-                import shap.explainers.other._ubjson as _shap_ubj
-                # XGBoost ≥2.0 stores base_score as '[5E-1]' in UBJ; SHAP 0.49
-                # calls float() on it directly and crashes. Patch the UBJ decoder
-                # in-place to strip brackets before the float conversion.
-                if not getattr(_shap_ubj, "_bracket_fix_applied", False):
-                    _orig_decode = _shap_ubj.decode_ubjson_buffer
-                    def _fixed_decode(fd, _orig=_orig_decode):
-                        result = _orig(fd)
-                        try:
-                            lmp = result["learner"]["learner_model_param"]
-                            bs = lmp.get("base_score", "")
-                            if isinstance(bs, str) and bs.startswith("[") and bs.endswith("]"):
-                                lmp["base_score"] = bs[1:-1]
-                        except Exception:
-                            pass
-                        return result
-                    _shap_ubj.decode_ubjson_buffer = _fixed_decode
-                    _shap_tree.decode_ubjson_buffer = _fixed_decode
-                    _shap_ubj._bracket_fix_applied = True
-
-                # Stratified subsample of test rows to explain: mean |SHAP| per
-                # feature is a row average, so a per-stratum-capped subsample is
-                # an unbiased estimate at a fraction of the TreeExplainer cost.
-                _sub_idx = _stratified_shap_subsample(
-                    strata_arr,
-                    SHAP_MAX_ROWS_PER_STRATUM,
-                    SHAP_SUBSAMPLE_RANDOM_STATE + fold_idx,
-                )
-                _X_shap = X_test[_sub_idx]
-                _strata_shap = strata_arr[_sub_idx]
-
-                _explainer = _shap.TreeExplainer(model.model.get_booster())
-                _shap_vals = _explainer.shap_values(_X_shap)  # (n_sub, n_features)
-                fold_shap_abs["overall"].append(np.abs(_shap_vals).mean(axis=0))
+            # Stratified subsample of test rows to explain: mean |SHAP| per
+            # feature is a row average, so a per-stratum-capped subsample is an
+            # unbiased estimate at a fraction of the TreeExplainer cost. Using
+            # this mode's strata keeps the .npz identical to a single-mode run.
+            _sub_idx = _stratified_shap_subsample(
+                strata_arr,
+                SHAP_MAX_ROWS_PER_STRATUM,
+                SHAP_SUBSAMPLE_RANDOM_STATE + fold_idx,
+            )
+            _X_shap = X_test[_sub_idx]
+            _strata_shap = strata_arr[_sub_idx]
+            _shap_vals = explainer.shap_values(_X_shap)  # (n_sub, n_features)
+            _abs = fold_shap_abs_by_mode[mode_name]
+            _abs["overall"].append(np.abs(_shap_vals).mean(axis=0))
+            for _sl in np.unique(_strata_shap):
+                if _sl == "":
+                    continue
+                _mask = _strata_shap == _sl
+                if _mask.sum() > 0:
+                    _abs[_sl].append(np.abs(_shap_vals[_mask]).mean(axis=0))
+            if shap_interactions and fold_idx == total_folds - 1:
+                _ivals = explainer.shap_interaction_values(_X_shap)  # (n_sub, n_feat, n_feat)
+                _inter = shap_interactions_by_mode[mode_name]
+                _inter["overall"] = _ivals.mean(axis=0)
                 for _sl in np.unique(_strata_shap):
                     if _sl == "":
                         continue
                     _mask = _strata_shap == _sl
                     if _mask.sum() > 0:
-                        fold_shap_abs[_sl].append(np.abs(_shap_vals[_mask]).mean(axis=0))
-                if shap_interactions and fold_idx == total_folds - 1:
-                    _ivals = _explainer.shap_interaction_values(_X_shap)  # (n_sub, n_feat, n_feat)
-                    last_shap_interactions["overall"] = _ivals.mean(axis=0)
-                    for _sl in np.unique(_strata_shap):
-                        if _sl == "":
-                            continue
-                        _mask = _strata_shap == _sl
-                        if _mask.sum() > 0:
-                            last_shap_interactions[_sl] = _ivals[_mask].mean(axis=0)
-                    last_X_test_raw = _X_shap
-                    last_y_test_raw = y_test[_sub_idx]
-            except Exception as _e:
-                print(f"  [{pipeline_name}] SHAP skipped (fold {fold_idx + 1}): {_e}")
+                        _inter[_sl] = _ivals[_mask].mean(axis=0)
+                shap_last_raw_by_mode[mode_name] = {
+                    "last_X_test_raw": _X_shap,
+                    "last_y_test_raw": y_test[_sub_idx],
+                }
 
-        if features_save_path is not None:
-            all_X_test_chunks.append(X_test)
-            all_y_test_chunks.append(y_test)
-            all_strata_chunks.append(strata_arr)
-
-        last_model = model
-        last_test_df = test
-        last_X_test = X_test
-        last_test_strata = test_strata
+            if mode_name in features_save_paths:
+                ch = feat_chunks_by_mode[mode_name]
+                ch["X"].append(X_test)
+                ch["y"].append(y_test)
+                ch["strata"].append(strata_arr)
 
     print()
 
-    if shap_full and shap_save_path is not None and fold_shap_abs:
-        shap_save_path.parent.mkdir(parents=True, exist_ok=True)
-        save_dict: dict[str, np.ndarray] = {
-            "feature_names": np.array(feature_cols),
-        }
-        for _sl, _arrs in fold_shap_abs.items():
-            save_dict[f"shap_{_sl}"] = np.stack(_arrs)
-        for _sl, _mat in last_shap_interactions.items():
-            save_dict[f"interact_{_sl}"] = _mat
-        if last_X_test_raw is not None:
-            save_dict["last_X_test_raw"] = last_X_test_raw
-        if last_y_test_raw is not None:
-            save_dict["last_y_test_raw"] = last_y_test_raw
-        np.savez_compressed(shap_save_path, **save_dict)
-        print(f"  [{pipeline_name}] SHAP saved to {shap_save_path}")
+    for mode_name in modes:
+        shap_path = shap_save_paths.get(mode_name)
+        fold_shap_abs = fold_shap_abs_by_mode[mode_name]
+        if shap_full and shap_path is not None and fold_shap_abs:
+            shap_path.parent.mkdir(parents=True, exist_ok=True)
+            save_dict: dict[str, np.ndarray] = {"feature_names": np.array(feature_cols)}
+            for _sl, _arrs in fold_shap_abs.items():
+                save_dict[f"shap_{_sl}"] = np.stack(_arrs)
+            for _sl, _mat in shap_interactions_by_mode[mode_name].items():
+                save_dict[f"interact_{_sl}"] = _mat
+            save_dict.update(shap_last_raw_by_mode[mode_name])
+            np.savez_compressed(shap_path, **save_dict)
+            print(f"  [{pipeline_name}] SHAP saved to {shap_path}")
 
-    if features_save_path is not None and all_X_test_chunks:
-        features_save_path.parent.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(
-            features_save_path,
-            feature_names=np.array(feature_cols),
-            X_test_all=np.concatenate(all_X_test_chunks, axis=0),
-            y_test_all=np.concatenate(all_y_test_chunks, axis=0),
-            strata_all=np.concatenate(all_strata_chunks, axis=0),
-        )
-        print(f"  [{pipeline_name}] Feature values saved to {features_save_path}")
+        feat_path = features_save_paths.get(mode_name)
+        ch = feat_chunks_by_mode[mode_name]
+        if feat_path is not None and ch["X"]:
+            feat_path.parent.mkdir(parents=True, exist_ok=True)
+            np.savez_compressed(
+                feat_path,
+                feature_names=np.array(feature_cols),
+                X_test_all=np.concatenate(ch["X"], axis=0),
+                y_test_all=np.concatenate(ch["y"], axis=0),
+                strata_all=np.concatenate(ch["strata"], axis=0),
+            )
+            print(f"  [{pipeline_name}] Feature values saved to {feat_path}")
 
-    return dict(fold_metrics), last_model, last_X_test, last_test_df, feature_cols, last_test_strata
+    return {m: dict(fm) for m, fm in fold_metrics_by_mode.items()}
+
+
+def _make_fold_explainer(
+    model: XGBoostModel,
+    fold_idx: int,
+    pipeline_name: str,
+):
+    """Build a SHAP TreeExplainer for one fold's model (or None on failure).
+
+    Applies the XGBoost ≥2.0 UBJSON base_score patch (SHAP 0.49 calls float()
+    on a bracketed '[5E-1]' literal and crashes) once, then returns the
+    explainer so a single build can be reused across multiple stratification
+    modes within the fold.
+    """
+    try:
+        import shap as _shap
+        import shap.explainers._tree as _shap_tree
+        import shap.explainers.other._ubjson as _shap_ubj
+        if not getattr(_shap_ubj, "_bracket_fix_applied", False):
+            _orig_decode = _shap_ubj.decode_ubjson_buffer
+            def _fixed_decode(fd, _orig=_orig_decode):
+                result = _orig(fd)
+                try:
+                    lmp = result["learner"]["learner_model_param"]
+                    bs = lmp.get("base_score", "")
+                    if isinstance(bs, str) and bs.startswith("[") and bs.endswith("]"):
+                        lmp["base_score"] = bs[1:-1]
+                except Exception:
+                    pass
+                return result
+            _shap_ubj.decode_ubjson_buffer = _fixed_decode
+            _shap_tree.decode_ubjson_buffer = _fixed_decode
+            _shap_ubj._bracket_fix_applied = True
+
+        return _shap.TreeExplainer(model.model.get_booster())
+    except Exception as _e:
+        print(f"  [{pipeline_name}] SHAP skipped (fold {fold_idx + 1}): {_e}")
+        return None
 
 
 def summarise_cv(fold_metrics: dict[str, list], pipeline_name: str) -> dict[str, dict]:

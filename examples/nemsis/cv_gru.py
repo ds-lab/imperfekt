@@ -8,8 +8,11 @@ producing per-feature value importance, per-feature mask-channel importance
 (when use_mask=True), and a per-feature temporal importance profile for both
 the value and mask channels — all saved as .npz.
 
-Shared utilities (_compute_metrics, prior_correct_probs, _stratified_shap_subsample)
-are imported directly from cv.py to avoid drift.
+Shared utilities (_compute_metrics, prior_correct_probs,
+_stratified_shap_subsample, _assign_fold_strata, _accumulate_stratum_metrics)
+are imported directly from cv.py to avoid drift. Like cv.run_cv, run_cv_gru
+trains once per fold and evaluates all stratification modes from that single
+pass.
 """
 
 from __future__ import annotations
@@ -22,8 +25,6 @@ import numpy as np
 import polars as pl
 import torch
 import torch.nn as nn
-from imperfekt.analysis.intervariable.intervariable import IntervariableImperfection
-from imperfekt.analysis.intravariable.intravariable import IntravariableImperfection
 from sklearn.model_selection import RepeatedStratifiedKFold
 
 from config import (
@@ -39,6 +40,8 @@ from config import (
     VITAL_COLS,
 )
 from cv import (
+    _accumulate_stratum_metrics,
+    _assign_fold_strata,
     _compute_metrics,
     _stratified_shap_subsample,
     prior_correct_probs,
@@ -98,50 +101,95 @@ def _undersample_indices(y: np.ndarray, ratio: int, random_state: int) -> np.nda
     return keep
 
 
+def _make_fold_gru_explainer(
+    model: GRUModel,
+    X_train_combined: np.ndarray,
+    X_test_3d: np.ndarray,
+    use_mask: bool,
+    D: int,
+    fold_idx: int,
+    pipeline_name: str,
+):
+    """Build a SHAP GradientExplainer for one fold's GRU (or None on failure).
+
+    Returns ``(explainer, X_test_combined)`` where ``X_test_combined`` is the
+    fold's processed test input (N, T, D_input) that callers subsample per mode.
+    Both are mode-independent, so building them once per fold lets every
+    SHAP-emitting mode share the (expensive) explainer. Returns ``(None, None)``
+    if SHAP setup fails.
+    """
+    try:
+        import shap as _shap
+        X_test_combined, _ = model._build_input(X_test_3d.astype(np.float32))
+
+        rng_bg = np.random.default_rng(SHAP_SUBSAMPLE_RANDOM_STATE + fold_idx)
+        bg_idx = rng_bg.choice(
+            len(X_train_combined), size=min(100, len(X_train_combined)), replace=False
+        )
+        bg_tensor = torch.tensor(
+            X_train_combined[bg_idx], dtype=torch.float32, device=model.device
+        )
+
+        # When a static head is present, hold static at its training mean so
+        # GradientExplainer only attributes over sequence dims.
+        if model._static_mean is not None:
+            _static_bg = torch.tensor(
+                model._static_mean[None, :], dtype=torch.float32, device=model.device
+            )
+        else:
+            _static_bg = None
+        wrapper = _GRUShapWrapper(model.model, D, use_mask, _static_bg).to(model.device)
+        wrapper.eval()
+        with torch.backends.cudnn.flags(enabled=False):
+            explainer = _shap.GradientExplainer(wrapper, bg_tensor)
+        return explainer, X_test_combined
+    except Exception as _e:
+        print(f"  [{pipeline_name}] GRU SHAP skipped (fold {fold_idx + 1}): {_e}")
+        return None, None
+
+
 def run_cv_gru(
     cohort_df: pl.DataFrame,
     case_metrics: pl.DataFrame,
-    axes: tuple[str, str],
+    modes: dict[str, tuple[str, str]],
     pipeline_name: str,
     use_mask: bool = True,
-    stratification_mode: str = "intervariable",
-    shap_save_path: Path | None = None,
+    shap_save_paths: dict[str, Path] | None = None,
     shap_full: bool = True,
-    features_save_path: Path | None = None,
-) -> tuple[
-    dict[str, list],
-    GRUModel | None,
-    None,
-    pl.DataFrame | None,
-    list[str],
-    pl.DataFrame | None,
-]:
-    """Repeated stratified k-fold CV using a GRU sequence model.
+    features_save_paths: dict[str, Path] | None = None,
+) -> dict[str, dict[str, list]]:
+    """Repeated stratified k-fold CV using a GRU sequence model, over 1+ modes.
+
+    Mirrors :func:`cv.run_cv`: the GRU is trained once per fold and reused across
+    every stratification mode in ``modes`` — the modes only differ in how the
+    held-out test stays are bucketed into strata — so evaluating N modes costs
+    ~1× a single pass rather than N×. SHAP (GradientExplainer) is likewise
+    computed once per fold and re-bucketed per mode. Pass a single-entry
+    ``modes`` for the ordinary one-mode run.
 
     Args:
         cohort_df:           Long-format DataFrame (id, clock, vitals..., label) after
                              plausibility filtering and imputation by ConfigBuilder.
         case_metrics:        Combined per-case metrics from combine_case_metrics()
                              (intervariable + intravariable joined on id).
-        axes:                (axis_x_name, axis_y_name) for the active stratification mode.
+        modes:               mode name (e.g. "intervariable") → its (axis_x, axis_y)
+                             pair. Drives which axis space buckets strata.
         pipeline_name:       Label used in progress output and result keys.
         use_mask:            When True the GRU input includes the binary observed-mask
                              channel; when False it is values-only (mask ablation).
                              Comparing the two per stratum shows where the missingness
                              indicator adds predictive information.
-        stratification_mode: "intervariable" (co-missingness structure) or
-                             "intravariable" (per-variable missingness burden). Controls
-                             which axis space and assign_strata implementation are used.
+        shap_save_paths:     mode name → SHAP .npz output path (only modes present
+                             are written).
+        features_save_paths: mode name → features .npz output path (only modes
+                             present are written).
 
-    Returns:
-        fold_metrics     - dict mapping "overall" and each stratum label to a
-                           list of metric dicts, one per fold.
-        last_model       - trained GRUModel from the final fold.
-        None             - placeholder for SHAP compatibility with run_cv signature.
-        last_test_df     - exact test DataFrame (long-format) from the final fold.
-        feature_cols     - VITAL_COLS used as sequence features.
-        last_test_strata - id/active_stratum for the final fold's test set.
+    Returns a dict mapping each mode name to that mode's ``fold_metrics`` dict
+    (mapping "overall" and each stratum label to a list of per-fold metric
+    dicts). Feed each value to :func:`summarise_cv` / :func:`save_cv_results`.
     """
+    shap_save_paths = shap_save_paths or {}
+    features_save_paths = features_save_paths or {}
     # Stay-level labels for stratified splitting (one row per unique id).
     subject_labels = (
         cohort_df.select(["id", "label"])
@@ -165,37 +213,51 @@ def run_cv_gru(
         random_state=RANDOM_STATE,
     )
 
-    axis_x, axis_y = axes
-
-    _stratum_meta_cols = {
-        "id", "axis_x", "axis_y", "axis_pair_corr",
-        "axis_x_median_threshold", "axis_y_median_threshold",
-        "active_stratum", "intervariable_stratum", "imperfection_stratum",
+    # Per-mode accumulators, keyed by mode name.
+    fold_metrics_by_mode: dict[str, dict[str, list]] = {m: defaultdict(list) for m in modes}
+    fold_shap_abs_by_mode: dict[str, dict[str, list[np.ndarray]]] = {
+        m: defaultdict(list) for m in modes
     }
-    imperfekt_cols = [
-        c for c in case_metrics.columns
-        if c not in _stratum_meta_cols and case_metrics.schema[c].is_numeric()
-    ]
-
-    fold_metrics: dict[str, list] = defaultdict(list)
-    fold_shap_abs: dict[str, list[np.ndarray]] = defaultdict(list)
-    fold_shap_mask_abs: dict[str, list[np.ndarray]] = defaultdict(list)
-    fold_shap_time_feat_abs: dict[str, list[np.ndarray]] = defaultdict(list)
-    fold_shap_time_feat_mask_abs: dict[str, list[np.ndarray]] = defaultdict(list)
-    all_X_test_chunks: list[np.ndarray] = []
-    all_y_test_chunks: list[np.ndarray] = []
-    all_strata_chunks: list[np.ndarray] = []
-    last_model: GRUModel | None = None
-    last_test_df: pl.DataFrame | None = None
-    last_test_strata: pl.DataFrame | None = None
+    fold_shap_mask_abs_by_mode: dict[str, dict[str, list[np.ndarray]]] = {
+        m: defaultdict(list) for m in modes
+    }
+    fold_shap_time_feat_abs_by_mode: dict[str, dict[str, list[np.ndarray]]] = {
+        m: defaultdict(list) for m in modes
+    }
+    fold_shap_time_feat_mask_abs_by_mode: dict[str, dict[str, list[np.ndarray]]] = {
+        m: defaultdict(list) for m in modes
+    }
+    feat_chunks_by_mode: dict[str, dict[str, list[np.ndarray]]] = {
+        m: {"X": [], "y": [], "strata": []} for m in modes
+    }
 
     total_folds = CV_N_SPLITS * CV_N_REPEATS
 
     for fold_idx, (train_idx, test_idx) in enumerate(rskf.split(subjects, subject_outcomes)):
         print(f"  [{pipeline_name}] fold {fold_idx + 1}/{total_folds}", end="\r")
 
-        train_subjects = set(subjects[train_idx].tolist())
+        # Full train fold (pre-undersampling). Strata median thresholds are
+        # derived from this set so they match cv.run_cv, where undersampling
+        # touches only the model's feature matrix, not the stratum boundaries.
+        train_subjects_full = set(subjects[train_idx].tolist())
         test_subjects = set(subjects[test_idx].tolist())
+
+        # Train-only negative undersampling at the *subject* level, applied to the
+        # id list *before* building any dense array. Mirrors cv.run_cv, where
+        # undersampling precedes feature materialization — building the full
+        # (N_train, T, D) array first and discarding ~90% of rows afterwards would
+        # needlessly allocate ~10× the memory and stall on large cohorts.
+        if APPLY_UNDERSAMPLING:
+            train_subj_arr = subjects[train_idx]
+            train_subj_outcomes = subject_outcomes[train_idx]
+            keep_subj_idx = _undersample_indices(
+                train_subj_outcomes,
+                ratio=TRAIN_NEG_POS_RATIO,
+                random_state=UNDERSAMPLE_RANDOM_STATE + fold_idx,
+            )
+            train_subjects = set(train_subj_arr[keep_subj_idx].tolist())
+        else:
+            train_subjects = train_subjects_full
 
         train_df = cohort_df.filter(pl.col("id").is_in(train_subjects))
         test_df = cohort_df.filter(pl.col("id").is_in(test_subjects))
@@ -205,23 +267,22 @@ def run_cv_gru(
         train_ids, X_train_3d, _, _ = df_to_3d_array(train_df, "id", "clock", list(VITAL_COLS))
         test_ids, X_test_3d, _, _ = df_to_3d_array(test_df, "id", "clock", list(VITAL_COLS))
 
-        # Static features: one row per subject, aligned to sorted id order.
+        # Static features: one row per subject, aligned to df_to_3d_array's id order.
+        # A left-join onto the id ordering keeps alignment in a single vectorized
+        # pass — a per-id .filter() loop here is O(N²) and stalls on large cohorts.
         static_cols = ["age"] if "age" in cohort_df.columns else []
         if static_cols:
-            id_to_static_train = (
-                train_df.group_by("id").agg([pl.col(c).first() for c in static_cols])
-            )
-            id_to_static_test = (
-                test_df.group_by("id").agg([pl.col(c).first() for c in static_cols])
-            )
-            X_train_static = np.array(
-                [id_to_static_train.filter(pl.col("id") == i).select(static_cols).row(0) for i in train_ids],
-                dtype=np.float32,
-            )
-            X_test_static = np.array(
-                [id_to_static_test.filter(pl.col("id") == i).select(static_cols).row(0) for i in test_ids],
-                dtype=np.float32,
-            )
+            def _static_array(src_df: pl.DataFrame, ids: list) -> np.ndarray:
+                per_id = src_df.group_by("id").agg([pl.col(c).first() for c in static_cols])
+                ordered = (
+                    pl.DataFrame({"id": ids})
+                    .join(per_id, on="id", how="left")
+                    .select(static_cols)
+                )
+                return ordered.to_numpy().astype(np.float32)
+
+            X_train_static = _static_array(train_df, train_ids)
+            X_test_static = _static_array(test_df, test_ids)
         else:
             X_train_static = None
             X_test_static = None
@@ -240,21 +301,14 @@ def run_cv_gru(
             )
         )
 
-        y_train = np.array([id_to_label_train[i] for i in train_ids], dtype=np.int8)
+        # train_ids/X_train_3d already reflect the undersampled subject set (the
+        # negatives were dropped from the id list before df_to_3d_array), so the
+        # labels built here are the undersampled training labels.
+        y_train_us = np.array([id_to_label_train[i] for i in train_ids], dtype=np.int8)
         y_test = np.array([id_to_label_test[i] for i in test_ids], dtype=np.int8)
 
-        # Undersampling at stay level (N axis). X[keep_idx] works for 3D arrays.
-        if APPLY_UNDERSAMPLING:
-            keep_idx = _undersample_indices(
-                y_train,
-                ratio=TRAIN_NEG_POS_RATIO,
-                random_state=UNDERSAMPLE_RANDOM_STATE + fold_idx,
-            )
-            X_train_us, y_train_us = X_train_3d[keep_idx], y_train[keep_idx]
-            X_train_static_us = X_train_static[keep_idx] if X_train_static is not None else None
-        else:
-            X_train_us, y_train_us = X_train_3d, y_train
-            X_train_static_us = X_train_static
+        X_train_us = X_train_3d
+        X_train_static_us = X_train_static
 
         pi_train_art = float(y_train_us.mean())
 
@@ -286,72 +340,19 @@ def run_cv_gru(
             f"val_prevalence={val_prevalence:.5f}"
         )
 
+        # Overall metrics are mode-independent (same y_proba); each mode keeps
+        # its own "overall" list so per-mode summarise_cv is unchanged.
         m = _compute_metrics(y_test, y_proba)
-        if m:
-            fold_metrics["overall"].append(m)
+        ids_arr = np.asarray(test_ids)
+        # Strata thresholds use the full (pre-undersampling) train fold, matching
+        # cv.run_cv — see train_subjects_full above.
+        train_id_list = list(train_subjects_full)
+        test_id_list = list(test_subjects)
 
-        # Stratum thresholds derived from train fold only — no leakage.
-        train_metrics = case_metrics.filter(pl.col("id").is_in(list(train_subjects)))
-        med_x = train_metrics[axis_x].median()
-        med_y = train_metrics[axis_y].median()
-
-        test_case_rows = case_metrics.filter(pl.col("id").is_in(list(test_subjects)))
-
-        if stratification_mode == "intravariable":
-            _base_intra = {"id", axis_x, axis_y}
-            intra_cols_needed = list(_base_intra) + [
-                f"{c}_indicated_pct" for c in VITAL_COLS
-                if f"{c}_indicated_pct" in case_metrics.columns
-                and f"{c}_indicated_pct" not in _base_intra
-            ]
-            test_strata = (
-                IntravariableImperfection.assign_strata(
-                    test_case_rows.select(intra_cols_needed),
-                    axis_x, axis_y, med_x, med_y, VITAL_COLS,
-                )
-                .select(["id", "imperfection_stratum"])
-                .rename({"imperfection_stratum": "active_stratum"})
-                .drop_nulls("active_stratum")
-            )
-        else:
-            inter_cols_needed = ["id", axis_x, axis_y]
-            if "avg_indicated_vars_pct" not in inter_cols_needed:
-                inter_cols_needed.append("avg_indicated_vars_pct")
-            test_strata = (
-                IntervariableImperfection.assign_strata(
-                    test_case_rows.select(inter_cols_needed),
-                    axis_x, axis_y, med_x, med_y,
-                )
-                .select(["id", "intervariable_stratum"])
-                .rename({"intervariable_stratum": "active_stratum"})
-                .drop_nulls("active_stratum")
-            )
-
-        available_imperfekt = [c for c in imperfekt_cols if c in case_metrics.columns]
-        test_strata_imperfekt = test_strata.join(
-            case_metrics.select(available_imperfekt + ["id"]),
-            on="id",
-            how="left",
-        )
-
-        # Align strata to the sorted test_ids order from df_to_3d_array.
-        test_ids_df = pl.DataFrame({"id": test_ids})
-        strata_arr = (
-            test_ids_df.join(
-                test_strata_imperfekt.select(["id", "active_stratum"]),
-                on="id",
-                how="left",
-            )["active_stratum"]
-            .fill_null("")
-            .to_numpy()
-        )
-
-        imperfekt_lookup: dict[str, dict[str, float]] = {}
-        for row in test_strata_imperfekt.iter_rows(named=True):
-            sid = row["id"]
-            imperfekt_lookup[sid] = {c: row[c] for c in imperfekt_cols if c in row}
-
-        if features_save_path is not None:
+        # Per-stay aggregated features are mode-independent — build once if any
+        # mode requests the features .npz.
+        X_test_agg = None
+        if features_save_paths:
             with np.errstate(all="ignore"), warnings.catch_warnings():
                 warnings.simplefilter("ignore", RuntimeWarning)
                 X_test_agg = np.concatenate(
@@ -362,128 +363,114 @@ def run_cv_gru(
                     ],
                     axis=1,
                 )  # (N, D*3): per-stay mean/min/max over observed timesteps
-            all_X_test_chunks.append(X_test_agg)
-            all_y_test_chunks.append(y_test)
-            all_strata_chunks.append(strata_arr)
 
-        ids_arr = np.asarray(test_ids)
-        for stratum_label in np.unique(strata_arr):
-            if stratum_label == "":
+        # Build the GradientExplainer once for this fold's model (the expensive
+        # step) and reuse it across every SHAP-emitting mode.
+        explainer = None
+        D = len(VITAL_COLS)
+        X_test_combined = None
+        if shap_full and shap_save_paths:
+            explainer, X_test_combined = _make_fold_gru_explainer(
+                model, X_train_combined, X_test_3d, use_mask, D,
+                fold_idx, pipeline_name,
+            )
+
+        for mode_name, axes in modes.items():
+            strata_arr, imperfekt_lookup, imperfekt_cols, _ = _assign_fold_strata(
+                test_ids, train_id_list, test_id_list, case_metrics, axes, mode_name,
+            )
+            fm = fold_metrics_by_mode[mode_name]
+            if m:
+                fm["overall"].append(dict(m))
+            _accumulate_stratum_metrics(
+                fm, strata_arr, ids_arr, y_test, y_proba,
+                imperfekt_lookup, imperfekt_cols,
+            )
+
+            if mode_name in features_save_paths and X_test_agg is not None:
+                ch = feat_chunks_by_mode[mode_name]
+                ch["X"].append(X_test_agg)
+                ch["y"].append(y_test)
+                ch["strata"].append(strata_arr)
+
+            if explainer is None or mode_name not in shap_save_paths:
                 continue
-            mask = strata_arr == stratum_label
-            m_s = _compute_metrics(y_test[mask], y_proba[mask])
-            if m_s:
-                for imperfekt_metric in imperfekt_cols:
-                    vals = [
-                        imperfekt_lookup[sid][imperfekt_metric]
-                        for sid in ids_arr[mask]
-                        if sid in imperfekt_lookup
-                        and imperfekt_metric in imperfekt_lookup[sid]
-                        and imperfekt_lookup[sid][imperfekt_metric] is not None
-                    ]
-                    m_s[imperfekt_metric] = float(np.mean(vals)) if vals else float("nan")
-                fold_metrics[stratum_label].append(m_s)
 
-        if shap_full:
-            try:
-                import shap as _shap
-                D = len(VITAL_COLS)
-                X_test_combined, _ = model._build_input(X_test_3d.astype(np.float32))
-                _sub_idx = _stratified_shap_subsample(
-                    strata_arr, SHAP_MAX_ROWS_PER_STRATUM, SHAP_SUBSAMPLE_RANDOM_STATE + fold_idx
-                )
-                X_shap_np = X_test_combined[_sub_idx]   # (N_sub, T, D_input)
-                _strata_shap = strata_arr[_sub_idx]
+            # Per-stratum SHAP subsample uses this mode's strata, matching a
+            # single-mode run so the .npz is identical.
+            _sub_idx = _stratified_shap_subsample(
+                strata_arr, SHAP_MAX_ROWS_PER_STRATUM, SHAP_SUBSAMPLE_RANDOM_STATE + fold_idx
+            )
+            X_shap_tensor = torch.tensor(
+                X_test_combined[_sub_idx], dtype=torch.float32, device=model.device
+            )
+            _strata_shap = strata_arr[_sub_idx]
+            with torch.backends.cudnn.flags(enabled=False):
+                # shap_values returns (N_sub, T, D_input, 1) because the wrapper
+                # outputs (N, 1); [..., 0] drops the trailing output dimension.
+                shap_vals = np.array(explainer.shap_values(X_shap_tensor))[..., 0]  # (N_sub, T, D_input)
+            abs_shap = np.abs(shap_vals)
+            D_in = abs_shap.shape[2]
 
-                rng_bg = np.random.default_rng(SHAP_SUBSAMPLE_RANDOM_STATE + fold_idx)
-                bg_idx = rng_bg.choice(
-                    len(X_train_combined), size=min(100, len(X_train_combined)), replace=False
-                )
-                bg_tensor = torch.tensor(
-                    X_train_combined[bg_idx], dtype=torch.float32, device=model.device
-                )
-                X_shap_tensor = torch.tensor(
-                    X_shap_np, dtype=torch.float32, device=model.device
-                )
+            def _agg(arr: np.ndarray, _D=D, _D_in=D_in):
+                val_imp = arr[:, :, :_D].mean(axis=(0, 1))                            # (D,)
+                mask_imp = arr[:, :, _D:].mean(axis=(0, 1)) if _D_in > _D else None   # (D,) or None
+                time_feat_imp = arr[:, :, :_D].mean(axis=0)                            # (T, D)
+                time_feat_mask_imp = arr[:, :, _D:].mean(axis=0) if _D_in > _D else None  # (T, D) or None
+                return val_imp, mask_imp, time_feat_imp, time_feat_mask_imp
 
-                # When a static head is present, hold static at its training
-                # mean so GradientExplainer only attributes over sequence dims.
-                if model._static_mean is not None:
-                    _static_bg = torch.tensor(
-                        model._static_mean[None, :], dtype=torch.float32, device=model.device
-                    )
-                else:
-                    _static_bg = None
-                wrapper = _GRUShapWrapper(model.model, D, use_mask, _static_bg).to(model.device)
-                wrapper.eval()
-                with torch.backends.cudnn.flags(enabled=False):
-                    explainer = _shap.GradientExplainer(wrapper, bg_tensor)
-                    # shap_values returns (N_sub, T, D_input, 1) because the wrapper
-                    # outputs (N, 1); [..., 0] drops the trailing output dimension.
-                    shap_vals = np.array(explainer.shap_values(X_shap_tensor))[..., 0]  # (N_sub, T, D_input)
-                abs_shap = np.abs(shap_vals)
-                D_in = abs_shap.shape[2]
+            v, mk, ti, ti_mk = _agg(abs_shap)
+            fold_shap_abs_by_mode[mode_name]["overall"].append(v)
+            if mk is not None:
+                fold_shap_mask_abs_by_mode[mode_name]["overall"].append(mk)
+            fold_shap_time_feat_abs_by_mode[mode_name]["overall"].append(ti)
+            if ti_mk is not None:
+                fold_shap_time_feat_mask_abs_by_mode[mode_name]["overall"].append(ti_mk)
 
-                def _agg(arr: np.ndarray):
-                    val_imp = arr[:, :, :D].mean(axis=(0, 1))                          # (D,)
-                    mask_imp = arr[:, :, D:].mean(axis=(0, 1)) if D_in > D else None   # (D,) or None
-                    time_feat_imp = arr[:, :, :D].mean(axis=0)                          # (T, D)
-                    time_feat_mask_imp = arr[:, :, D:].mean(axis=0) if D_in > D else None  # (T, D) or None
-                    return val_imp, mask_imp, time_feat_imp, time_feat_mask_imp
-
-                v, mk, ti, ti_mk = _agg(abs_shap)
-                fold_shap_abs["overall"].append(v)
-                if mk is not None:
-                    fold_shap_mask_abs["overall"].append(mk)
-                fold_shap_time_feat_abs["overall"].append(ti)
-                if ti_mk is not None:
-                    fold_shap_time_feat_mask_abs["overall"].append(ti_mk)
-
-                for _sl in np.unique(_strata_shap):
-                    if _sl == "":
-                        continue
-                    _sl_mask = _strata_shap == _sl
-                    if _sl_mask.sum() > 0:
-                        v_s, mk_s, ti_s, ti_mk_s = _agg(abs_shap[_sl_mask])
-                        fold_shap_abs[_sl].append(v_s)
-                        if mk_s is not None:
-                            fold_shap_mask_abs[_sl].append(mk_s)
-                        fold_shap_time_feat_abs[_sl].append(ti_s)
-                        if ti_mk_s is not None:
-                            fold_shap_time_feat_mask_abs[_sl].append(ti_mk_s)
-            except Exception as _e:
-                print(f"  [{pipeline_name}] GRU SHAP skipped (fold {fold_idx + 1}): {_e}")
-
-        last_model = model
-        last_test_df = test_df
-        last_test_strata = test_strata
+            for _sl in np.unique(_strata_shap):
+                if _sl == "":
+                    continue
+                _sl_mask = _strata_shap == _sl
+                if _sl_mask.sum() > 0:
+                    v_s, mk_s, ti_s, ti_mk_s = _agg(abs_shap[_sl_mask])
+                    fold_shap_abs_by_mode[mode_name][_sl].append(v_s)
+                    if mk_s is not None:
+                        fold_shap_mask_abs_by_mode[mode_name][_sl].append(mk_s)
+                    fold_shap_time_feat_abs_by_mode[mode_name][_sl].append(ti_s)
+                    if ti_mk_s is not None:
+                        fold_shap_time_feat_mask_abs_by_mode[mode_name][_sl].append(ti_mk_s)
 
     print()
 
-    if shap_full and shap_save_path is not None and fold_shap_abs:
-        shap_save_path.parent.mkdir(parents=True, exist_ok=True)
-        save_dict: dict[str, np.ndarray] = {"feature_names": np.array(list(VITAL_COLS))}
-        for _sl, _arrs in fold_shap_abs.items():
-            save_dict[f"shap_{_sl}"] = np.stack(_arrs)
-        for _sl, _arrs in fold_shap_mask_abs.items():
-            save_dict[f"shap_mask_{_sl}"] = np.stack(_arrs)
-        for _sl, _arrs in fold_shap_time_feat_abs.items():
-            save_dict[f"shap_time_feat_{_sl}"] = np.stack(_arrs)          # (n_folds, T, D)
-        for _sl, _arrs in fold_shap_time_feat_mask_abs.items():
-            save_dict[f"shap_time_feat_mask_{_sl}"] = np.stack(_arrs)     # (n_folds, T, D)
-        np.savez_compressed(shap_save_path, **save_dict)
-        print(f"  [{pipeline_name}] GRU SHAP saved to {shap_save_path}")
+    for mode_name in modes:
+        shap_path = shap_save_paths.get(mode_name)
+        fold_shap_abs = fold_shap_abs_by_mode[mode_name]
+        if shap_full and shap_path is not None and fold_shap_abs:
+            shap_path.parent.mkdir(parents=True, exist_ok=True)
+            save_dict: dict[str, np.ndarray] = {"feature_names": np.array(list(VITAL_COLS))}
+            for _sl, _arrs in fold_shap_abs.items():
+                save_dict[f"shap_{_sl}"] = np.stack(_arrs)
+            for _sl, _arrs in fold_shap_mask_abs_by_mode[mode_name].items():
+                save_dict[f"shap_mask_{_sl}"] = np.stack(_arrs)
+            for _sl, _arrs in fold_shap_time_feat_abs_by_mode[mode_name].items():
+                save_dict[f"shap_time_feat_{_sl}"] = np.stack(_arrs)          # (n_folds, T, D)
+            for _sl, _arrs in fold_shap_time_feat_mask_abs_by_mode[mode_name].items():
+                save_dict[f"shap_time_feat_mask_{_sl}"] = np.stack(_arrs)     # (n_folds, T, D)
+            np.savez_compressed(shap_path, **save_dict)
+            print(f"  [{pipeline_name}] GRU SHAP saved to {shap_path}")
 
-    if features_save_path is not None and all_X_test_chunks:
-        agg_feature_names = [f"{c}_{stat}" for stat in ("mean", "min", "max") for c in VITAL_COLS]
-        features_save_path.parent.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(
-            features_save_path,
-            feature_names=np.array(agg_feature_names),
-            X_test_all=np.concatenate(all_X_test_chunks, axis=0),
-            y_test_all=np.concatenate(all_y_test_chunks, axis=0),
-            strata_all=np.concatenate(all_strata_chunks, axis=0),
-        )
-        print(f"  [{pipeline_name}] Feature values saved to {features_save_path}")
+        feat_path = features_save_paths.get(mode_name)
+        ch = feat_chunks_by_mode[mode_name]
+        if feat_path is not None and ch["X"]:
+            agg_feature_names = [f"{c}_{stat}" for stat in ("mean", "min", "max") for c in VITAL_COLS]
+            feat_path.parent.mkdir(parents=True, exist_ok=True)
+            np.savez_compressed(
+                feat_path,
+                feature_names=np.array(agg_feature_names),
+                X_test_all=np.concatenate(ch["X"], axis=0),
+                y_test_all=np.concatenate(ch["y"], axis=0),
+                strata_all=np.concatenate(ch["strata"], axis=0),
+            )
+            print(f"  [{pipeline_name}] Feature values saved to {feat_path}")
 
-    return dict(fold_metrics), last_model, None, last_test_df, list(VITAL_COLS), last_test_strata
+    return {m: dict(fm) for m, fm in fold_metrics_by_mode.items()}
