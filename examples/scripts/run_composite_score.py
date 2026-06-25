@@ -8,7 +8,9 @@ median-bisected per cohort.
 
 Three analyses are demonstrated:
   1. Irregularity composite score   — temporal observation spacing
-  2. Intravariable composite score  — cross-variable missingness burden (one stratum per case)
+  2. Intravariable composite score  — two modes: cross-variable (same metric across variables,
+     one stratum per case) and intra-variable (different metrics of one variable, one stratum
+     per case × variable)
   3. Intervariable composite score  — cross-variable co-missingness structure (one stratum per case)
 
 Replace the synthetic dataset block with your own data load and adjust
@@ -191,8 +193,39 @@ print(
 )
 
 # %%
-print("\n=== Intravariable: pooled axis-pair correlations ===")
+print("\n=== Intravariable: pooled axis-pair correlations (cross-variable, same metric) ===")
 print(iv.results.iv_pooled_corr_table)
+
+# %%
+##################################
+# 2b. INTRAVARIABLE (per-variable, different metrics) #
+##################################
+# Intra-variable mode: for each variable independently, pick the most orthogonal pair of
+# *different* metrics. Output is long (one row per case × variable).
+iv = iv.composite_score_intravariable(save_results=SAVE_RESULTS)
+
+intra = iv.results.iv_composite_scores_intravariable
+print("\n=== Intravariable (per-variable): selected axes per variable ===")
+print(
+    intra.group_by("variable").agg(
+        pl.col("axis_x").first(),
+        pl.col("axis_y").first(),
+        pl.col("axis_pair_corr").first(),
+    )
+)
+
+print("\n=== Intravariable (per-variable): stratum prevalence per variable ===")
+print(
+    intra.filter(pl.col("imperfection_stratum").is_not_null())
+    .group_by(["variable", "imperfection_stratum"])
+    .agg(pl.len().alias("n"))
+    .sort(["variable", "imperfection_stratum"])
+)
+
+# Per-variable correlation tables used for axis selection
+for var, tbl in iv.results.iv_pairwise_correlations.items():
+    print(f"\n=== Intravariable (per-variable): {var} axis-pair correlations ===")
+    print(tbl)
 
 # %%
 # Cross-validation usage: fit medians on train, apply to held-out test

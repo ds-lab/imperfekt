@@ -58,7 +58,8 @@ IntravariableImperfection
 │   ├── autocorrelation()             # Temporal autocorrelation of imperfection
 │   ├── windowed_significance()       # Values near imperfect instances
 │   ├── date_time_statistics()        # Temporal distribution patterns
-│   ├── composite_score()             # Per-(case × variable) quadrant stratification
+│   ├── composite_score()             # Cross-variable per-case quadrant stratification (same metric, two variables)
+│   ├── composite_score_intravariable()  # Intra-variable per-(case × variable) stratification (different metrics, one variable)
 │   ├── run()                         # Execute all analyses
 │   └── generate_html_report()        # Create HTML summary
 │
@@ -76,6 +77,10 @@ IntravariableImperfection
     ├── ws_observations_around_indicated: dict
     ├── ws_mwu_result: pl.DataFrame
     ├── dt_date_time_statistics: dict
+    ├── iv_composite_scores: pl.DataFrame                  # cross-variable, one row per case
+    ├── iv_pooled_corr_table: pl.DataFrame                 # cross-variable same-metric correlations
+    ├── iv_composite_scores_intravariable: pl.DataFrame    # intra-variable, one row per (case × variable)
+    ├── iv_pairwise_correlations: dict[str, pl.DataFrame]  # intra-variable per-variable correlations
     └── plots: IntravariablePlots
 ```
 
@@ -355,9 +360,14 @@ Analyzes imperfection patterns by calendar/clock time to detect **provider-level
 
 ---
 
-### 7. Composite Score (`composite_score`)
+### 7. Composite Score (`composite_score` / `composite_score_intravariable`)
 
-Assigns each (case × variable) pair to one of five imperfection strata, enabling subgroup analysis of model performance broken down by missingness pattern per variable.
+Assigns cases to one of five imperfection strata, enabling subgroup analysis of model performance broken down by missingness pattern. Two complementary axis-selection modes are provided:
+
+- **Cross-variable mode** (`composite_score`) — stratifies each **case** (one row per case, wide format) by comparing the *same* metric across two *different* variables (e.g. `hr_indicated_pct` × `sbp_indicated_pct`, or `hr_gap_normalized_entropy` × `sbp_gap_normalized_entropy`). The two variables whose values for a shared metric are most orthogonal are selected; the same axis pair is applied to every case.
+- **Intra-variable mode** (`composite_score_intravariable`) — stratifies each **(case × variable)** pair (one row per case × variable, long format) by comparing the *different* metrics of a *single* variable (e.g. for `hr`: `indicated_pct` × `gap_missing_centroid`). Axis selection is performed independently per variable.
+
+Both modes draw from the same eligible-metric set and use the same median-bisection logic.
 
 #### Strata
 
@@ -390,24 +400,29 @@ All metrics below are computed per (case × variable). Only a subset is eligible
 
 #### Axis Selection
 
-Only the five axes that are structurally defined for every imperfect case are eligible for axis selection:
+Only the four axes that are structurally defined for every imperfect case are eligible for axis selection (`ELIGIBLE_AXIS_METRICS`):
 
-- `indicated_pct`, `gap_adherence_rate`, `gap_normalized_entropy`, `max_gap_fraction`, `gap_missing_centroid`
+- `indicated_pct`, `gap_adherence_rate`, `gap_normalized_entropy`, `gap_missing_centroid`
 
-Axes derived from gap length distributions (`gap_cv`, `gap_qcod`, `gap_burstiness_coeff`, `gap_onset_cv`, `mc_p11`) require multiple gaps and produce `null` for cases with only one gap, making them unsuitable for axis selection across the full imperfect population. They are included in `iv_composite_scores` for reference but not used to split cases into quadrants.
+Axes derived from gap length distributions (`gap_cv`, `gap_qcod`, `gap_burstiness_coeff`, `max_gap_fraction`, `gap_onset_cv`, `mc_p11`) require multiple gaps and produce `null` for cases with only one gap, making them unsuitable for axis selection across the full imperfect population. They are included in the intra-variable output for reference but not used to split cases into quadrants.
 
-Before computing correlations, axes that are near-constant (more than 50 % of values equal to the median) are excluded for that variable, as they cannot meaningfully bisect the population.
+Before computing correlations, axes that are near-constant (more than 50 % of values equal to the median) are excluded, as they cannot meaningfully bisect the population.
 
-All pairwise Spearman rank correlations are computed across the eligible axes. The pair with the **lowest absolute correlation** (most orthogonal) is selected as the two stratification axes. Selection is performed independently per variable. The full correlation table is stored in `results.iv_pairwise_correlations`.
+The pair with the **lowest absolute Spearman correlation** (most orthogonal) is selected as the two stratification axes. The two modes differ only in which axes are *paired*:
+
+- **Cross-variable** (`composite_score`): candidate axes are `{variable}_{metric}` for every eligible metric. Pairs are restricted to the **same metric on two different variables** (e.g. `hr_gap_normalized_entropy` × `sbp_gap_normalized_entropy`) — never two different metrics. The full same-metric correlation table is stored in `results.iv_pooled_corr_table`.
+- **Intra-variable** (`composite_score_intravariable`): candidate axes are the eligible metrics themselves, and pairs are formed across **different metrics of a single variable**. Selection is performed independently per variable. The per-variable correlation tables are stored in `results.iv_pairwise_correlations` (dict keyed by variable name).
 
 #### Median Bisection
 
-The selected axes are split at their medians to produce the four quadrants. Medians are passed as parameters to `assign_strata()`, enabling leakage-free cross-validation: fit medians on the training fold, apply to the held-out test fold.
+The selected axes are split at their medians to produce the four quadrants. Medians are passed as parameters to `assign_strata()` (cross-variable) / `_assign_strata_long()` (intra-variable), enabling leakage-free cross-validation: fit medians on the training fold, apply to the held-out test fold. `gap_adherence_rate` is inverted (lower = more imperfect).
 
 #### Output
 
-- `results.iv_composite_scores` — one row per (case × variable) with all metrics, selected axes, thresholds, and `imperfection_stratum`
-- `results.iv_pairwise_correlations` — dict keyed by variable name, each a correlation table used for axis selection
+- `results.iv_composite_scores` — cross-variable mode: one row per **case** (wide), with `{variable}_indicated_pct`, selected axes, thresholds, and `imperfection_stratum`
+- `results.iv_pooled_corr_table` — cross-variable same-metric pair correlations
+- `results.iv_composite_scores_intravariable` — intra-variable mode: one row per **(case × variable)** (long), with all metrics, selected axes, thresholds, and `imperfection_stratum`
+- `results.iv_pairwise_correlations` — intra-variable mode: dict keyed by variable name, each a correlation table used for axis selection
 
 ---
 
