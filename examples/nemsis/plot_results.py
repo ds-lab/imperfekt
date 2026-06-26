@@ -27,11 +27,18 @@ from plotting import (
     plot_spearman_orthogonality,
 )
 from examples.nemsis.cv import load_cv_results, save_shap_importance_csv, compute_feature_distribution_by_quadrant, compute_feature_distribution_by_outcome
-from config import RESULTS_DIR, STRATIFICATION_MODE, data_fingerprint_tag, COHORT_PATH
+from config import RESULTS_DIR, STRATIFICATION_MODE, data_fingerprint_tag, COHORT_PATH, AXES_INTRAVARIABLE, AXES_INTERVARIABLE
 import polars as pl
 
 _fp_tag = data_fingerprint_tag(COHORT_PATH)
-_RUN_DIR = RESULTS_DIR / _fp_tag / STRATIFICATION_MODE
+if STRATIFICATION_MODE == "intravariable":
+    AXES = AXES_INTRAVARIABLE
+else:
+    AXES = AXES_INTERVARIABLE
+
+print(f"AXES: {AXES}")
+
+_RUN_DIR = RESULTS_DIR / _fp_tag / STRATIFICATION_MODE / f"{AXES[0]}_{AXES[1]}"
 csv_path = Path(sys.argv[1]) if len(sys.argv) > 1 else _RUN_DIR / "cv_results.csv"
 # experiments_gru.py writes GRU summaries to a sibling file, not cv_results.csv.
 gru_csv_path = csv_path.parent / "cv_results_gru.csv"
@@ -183,7 +190,7 @@ plot_delta_auprc_heatmap(
 # %%
 # ── Stratum characterisation table (missingness axes) ────────────────────────
 # Find the most recently written case_metrics.parquet under the strata cache.
-_STRATUM_ORDER = ["Q_complete", "Q_alpha", "Q_beta", "Q_gamma", "Q_delta"]
+_STRATUM_ORDER = ["Q_alpha", "Q_beta", "Q_gamma", "Q_delta"]
 
 _cache_name = (
     "intravariable_strata_cache" if STRATIFICATION_MODE == "intravariable"
@@ -468,7 +475,6 @@ if gru_shap_found:
 
             ax.set_xlabel("Time step (clock index)")
             ax.set_ylabel("Mean |SHAP|")
-            ax.set_title(f"GRU temporal SHAP importance — {label}  [{stratum_label}]")
             handles = [
                 plt.Line2D([0], [0], color=colors[i], linestyle="-", label=feat)
                 for i, feat in enumerate(feature_names)
@@ -487,4 +493,290 @@ if gru_shap_found:
             print(f"GRU temporal SHAP saved to {out_path}")
 else:
     print("\nNo GRU SHAP .npz files found — re-run experiments with shap_full=True.")
+
+# %%
+# ══════════════════════════════════════════════════════════════════════════════
+# SCENARIO EVALUATION — Cross-dataset plots and tables
+# ══════════════════════════════════════════════════════════════════════════════
+from plotting import (
+    plot_cross_dataset_delta_heatmap,
+    render_stratum_axis_table,
+)
+
+_SCENARIO_ROOT = ROOT / "examples" / "data" / "scenario_evaluation"
+_SCENARIO_ROOT.mkdir(parents=True, exist_ok=True)
+
+# ── Load both datasets (intervariable + intravariable) ────────────────────────
+_NEMSIS_BASE = ROOT / "examples" / "data" / "nemsis" / "post_publication_results" / "65260d86861d"
+_MCMED_BASE = ROOT / "examples" / "data" / "mcmed" / "post_publication_results" / "75927eb4c6de"
+
+def _load_as_dict(path: Path) -> dict[str, dict]:
+    """Load cv_results CSV and return {pipeline_label: summary_dict}."""
+    if not path.exists():
+        print(f"WARNING: {path} not found")
+        return {}
+    summaries = load_cv_results(path)
+    return {label: s for label, s in summaries}
+
+print("\n" + "=" * 72)
+print("SCENARIO EVALUATION — Loading both datasets × both stratification modes")
+print("=" * 72)
+
+_strat_data: dict[str, dict] = {}
+for mode in ("intervariable", "intravariable"):
+    if mode == "intravariable":
+        _axes = AXES_INTRAVARIABLE
+    else:
+        _axes = AXES_INTERVARIABLE
+    _axes_tag = f"{_axes[0]}_{_axes[1]}"
+    nemsis_xgb = _load_as_dict(_NEMSIS_BASE / mode / _axes_tag / "cv_results.csv")
+    nemsis_gru = _load_as_dict(_NEMSIS_BASE / mode / _axes_tag / "cv_results_gru.csv")
+    mcmed_xgb = _load_as_dict(_MCMED_BASE / mode / _axes_tag / "cv_results.csv")
+    mcmed_gru = _load_as_dict(_MCMED_BASE / mode / _axes_tag / "cv_results_gru.csv")
+    _strat_data[mode] = {
+        "nemsis_xgb": nemsis_xgb, "nemsis_gru": nemsis_gru,
+        "mcmed_xgb": mcmed_xgb, "mcmed_gru": mcmed_gru,
+    }
+    print(f"  [{mode}] NEMSIS XGB={len(nemsis_xgb)} GRU={len(nemsis_gru)} | MC-MED XGB={len(mcmed_xgb)} GRU={len(mcmed_gru)}")
+
+# %%
+# ── Generate scenario plots for BOTH stratification modes ─────────────────────
+
+_AXIS_METRICS_INTERVARIABLE = [
+    "avg_indicated_vars_pct",
+    "co_missingness_concentration",
+    "missing_variable_breadth",
+    "pattern_entropy",
+    "max_pairwise_co_missingness",
+]
+_AXIS_METRICS_INTRAVARIABLE = [
+    "sbp_indicated_pct",
+    "rr_indicated_pct",
+    "hr_indicated_pct",
+    "o2sat_indicated_pct",
+]
+
+for _mode in ("intervariable", "intravariable"):
+    _d = _strat_data[_mode]
+    nemsis_xgb = _d["nemsis_xgb"]
+    nemsis_gru = _d["nemsis_gru"]
+    mcmed_xgb = _d["mcmed_xgb"]
+    mcmed_gru = _d["mcmed_gru"]
+
+    if _mode == "intravariable":
+        _mode_axes = AXES_INTRAVARIABLE
+    else:
+        _mode_axes = AXES_INTERVARIABLE
+    _mode_dir = _SCENARIO_ROOT / _mode / f"{_mode_axes[0]}_{_mode_axes[1]}"
+    _xgb_datasets = {"NEMSIS": nemsis_xgb, "MC-MED": mcmed_xgb}
+    _gru_datasets = {"NEMSIS": nemsis_gru, "MC-MED": mcmed_gru}
+    _xgb_baselines = {"NEMSIS": "Setup ma_pk_in/base", "MC-MED": "Setup ma_pk_in/base"}
+    _gru_baselines = {"NEMSIS": "Setup gru/ma_pk_in/nomask", "MC-MED": "Setup gru/ma_pk_in/nomask"}
+    _heatmap_rows = ["overall", "Q_alpha", "Q_beta", "Q_gamma", "Q_delta"]
+
+    print(f"\n{'─' * 72}")
+    print(f"  Stratification mode: {_mode}")
+    print(f"{'─' * 72}")
+
+    # ── SCENARIO 1 ────────────────────────────────────────────────────────────
+    print(f"  [{_mode}] Scenario 1: Stratum Characterisation Tables")
+    _s1_dir = _mode_dir / "scenario_1"
+    _s1_dir.mkdir(parents=True, exist_ok=True)
+
+    _axis_metrics = _AXIS_METRICS_INTERVARIABLE if _mode == "intervariable" else _AXIS_METRICS_INTRAVARIABLE
+
+    _baseline_nemsis = nemsis_xgb.get("Setup ma_pk_in/base", {})
+    _baseline_mcmed = mcmed_xgb.get("Setup ma_pk_in/base", {})
+
+    if _baseline_nemsis:
+        render_stratum_axis_table(
+            _baseline_nemsis, _axis_metrics,
+            _s1_dir / "nemsis_stratum_axis_metrics.csv",
+        )
+    if _baseline_mcmed:
+        render_stratum_axis_table(
+            _baseline_mcmed, _axis_metrics,
+            _s1_dir / "mcmed_stratum_axis_metrics.csv",
+        )
+
+    # ── SCENARIO 2 ────────────────────────────────────────────────────────────
+    print(f"  [{_mode}] Scenario 2: Imputation Delta Heatmaps")
+    _s2_dir = _mode_dir / "scenario_2"
+    _s2_dir.mkdir(parents=True, exist_ok=True)
+
+    plot_cross_dataset_delta_heatmap(
+        _xgb_datasets, _s2_dir / "xgboost_imputation_delta_heatmap.png",
+        baselines=_xgb_baselines,
+        variants=[
+            ("LOCF", {"NEMSIS": "Setup ma_pk_il/base", "MC-MED": "Setup ma_pk_il/base"}),
+            ("SAITS", {"NEMSIS": "Setup ma_pk_is/base", "MC-MED": "Setup ma_pk_is/base"}),
+        ],
+        metric="auprc_lift",
+        row_order=_heatmap_rows,
+    )
+
+    plot_cross_dataset_delta_heatmap(
+        _gru_datasets, _s2_dir / "gru_imputation_delta_heatmap.png",
+        baselines=_gru_baselines,
+        variants=[
+            ("LOCF", {"NEMSIS": "Setup gru/ma_pk_il/nomask", "MC-MED": "Setup gru/ma_pk_il/nomask"}),
+            ("SAITS", {"NEMSIS": "Setup gru/ma_pk_is/nomask", "MC-MED": "Setup gru/ma_pk_is/nomask"}),
+        ],
+        metric="auprc_lift",
+        row_order=_heatmap_rows,
+    )
+
+    _s2_xgb_pipes = ["Setup ma_pk_in/base", "Setup ma_pk_il/base", "Setup ma_pk_is/base"]
+    _s2_gru_pipes = ["Setup gru/ma_pk_in/nomask", "Setup gru/ma_pk_il/nomask", "Setup gru/ma_pk_is/nomask"]
+
+    for ds_name, xgb_data, gru_data in [("nemsis", nemsis_xgb, nemsis_gru), ("mcmed", mcmed_xgb, mcmed_gru)]:
+        xgb_sums = [(l, s) for l, s in xgb_data.items() if l in _s2_xgb_pipes]
+        if xgb_sums:
+            plot_auprc_lift_by_stratum(xgb_sums, _s2_dir / f"{ds_name}_xgboost_imputation_by_stratum.png")
+        gru_sums = [(l, s) for l, s in gru_data.items() if l in _s2_gru_pipes]
+        if gru_sums:
+            plot_auprc_lift_by_stratum(gru_sums, _s2_dir / f"{ds_name}_gru_imputation_by_stratum.png")
+
+    # ── SCENARIO 3 ────────────────────────────────────────────────────────────
+    print(f"  [{_mode}] Scenario 3: Plausibility Handling Heatmaps")
+    _s3_dir = _mode_dir / "scenario_3"
+    _s3_dir.mkdir(parents=True, exist_ok=True)
+
+    # 3a. XGBoost: outlier removal vs absolute baseline
+    plot_cross_dataset_delta_heatmap(
+        _xgb_datasets, _s3_dir / "xgboost_outlier_vs_baseline_delta_heatmap.png",
+        baselines=_xgb_baselines,
+        variants=[
+            ("pr none", {"NEMSIS": "Setup ma_pr_in/base", "MC-MED": "Setup ma_pr_in/base"}),
+            ("pr LOCF", {"NEMSIS": "Setup ma_pr_il/base", "MC-MED": "Setup ma_pr_il/base"}),
+            ("pr SAITS", {"NEMSIS": "Setup ma_pr_is/base", "MC-MED": "Setup ma_pr_is/base"}),
+        ],
+        metric="auprc_lift",
+        row_order=_heatmap_rows,
+    )
+
+    # 3a. GRU: outlier removal vs absolute baseline
+    plot_cross_dataset_delta_heatmap(
+        _gru_datasets, _s3_dir / "gru_outlier_vs_baseline_delta_heatmap.png",
+        baselines=_gru_baselines,
+        variants=[
+            ("pr none", {"NEMSIS": "Setup gru/ma_pr_in/nomask", "MC-MED": "Setup gru/ma_pr_in/nomask"}),
+            ("pr LOCF", {"NEMSIS": "Setup gru/ma_pr_il/nomask", "MC-MED": "Setup gru/ma_pr_il/nomask"}),
+            ("pr SAITS", {"NEMSIS": "Setup gru/ma_pr_is/nomask", "MC-MED": "Setup gru/ma_pr_is/nomask"}),
+        ],
+        metric="auprc_lift",
+        row_order=_heatmap_rows,
+    )
+
+    # 3b. XGBoost: marginal effect of outlier removal (pr − pk, per imputation)
+    plot_cross_dataset_delta_heatmap(
+        _xgb_datasets, _s3_dir / "xgboost_outlier_marginal_delta_heatmap.png",
+        baselines=_xgb_baselines,
+        variants=[
+            ("none:\npr−pk", {"NEMSIS": "Setup ma_pr_in/base", "MC-MED": "Setup ma_pr_in/base"}),
+            ("LOCF:\npr−pk", {"NEMSIS": "Setup ma_pr_il/base", "MC-MED": "Setup ma_pr_il/base"}),
+            ("SAITS:\npr−pk", {"NEMSIS": "Setup ma_pr_is/base", "MC-MED": "Setup ma_pr_is/base"}),
+        ],
+        variant_baselines=[
+            {"NEMSIS": "Setup ma_pk_in/base", "MC-MED": "Setup ma_pk_in/base"},
+            {"NEMSIS": "Setup ma_pk_il/base", "MC-MED": "Setup ma_pk_il/base"},
+            {"NEMSIS": "Setup ma_pk_is/base", "MC-MED": "Setup ma_pk_is/base"},
+        ],
+        metric="auprc_lift",
+        row_order=_heatmap_rows,
+    )
+
+    # 3b. GRU: marginal effect of outlier removal (pr − pk, per imputation)
+    plot_cross_dataset_delta_heatmap(
+        _gru_datasets, _s3_dir / "gru_outlier_marginal_delta_heatmap.png",
+        baselines=_gru_baselines,
+        variants=[
+            ("none:\npr−pk", {"NEMSIS": "Setup gru/ma_pr_in/nomask", "MC-MED": "Setup gru/ma_pr_in/nomask"}),
+            ("LOCF:\npr−pk", {"NEMSIS": "Setup gru/ma_pr_il/nomask", "MC-MED": "Setup gru/ma_pr_il/nomask"}),
+            ("SAITS:\npr−pk", {"NEMSIS": "Setup gru/ma_pr_is/nomask", "MC-MED": "Setup gru/ma_pr_is/nomask"}),
+        ],
+        variant_baselines=[
+            {"NEMSIS": "Setup gru/ma_pk_in/nomask", "MC-MED": "Setup gru/ma_pk_in/nomask"},
+            {"NEMSIS": "Setup gru/ma_pk_il/nomask", "MC-MED": "Setup gru/ma_pk_il/nomask"},
+            {"NEMSIS": "Setup gru/ma_pk_is/nomask", "MC-MED": "Setup gru/ma_pk_is/nomask"},
+        ],
+        metric="auprc_lift",
+        row_order=_heatmap_rows,
+    )
+
+    # 3c. By-stratum line plots
+    _s3_xgb_pipes = [
+        "Setup ma_pk_in/base", "Setup ma_pk_il/base", "Setup ma_pk_is/base",
+        "Setup ma_pr_in/base", "Setup ma_pr_il/base", "Setup ma_pr_is/base",
+    ]
+    _s3_gru_pipes = [
+        "Setup gru/ma_pk_in/nomask", "Setup gru/ma_pk_il/nomask", "Setup gru/ma_pk_is/nomask",
+        "Setup gru/ma_pr_in/nomask", "Setup gru/ma_pr_il/nomask", "Setup gru/ma_pr_is/nomask",
+    ]
+
+    for ds_name, xgb_data, gru_data in [("nemsis", nemsis_xgb, nemsis_gru), ("mcmed", mcmed_xgb, mcmed_gru)]:
+        xgb_sums = [(l, s) for l, s in xgb_data.items() if l in _s3_xgb_pipes]
+        if xgb_sums:
+            plot_auprc_lift_by_stratum(xgb_sums, _s3_dir / f"{ds_name}_xgboost_plausibility_by_stratum.png")
+        gru_sums = [(l, s) for l, s in gru_data.items() if l in _s3_gru_pipes]
+        if gru_sums:
+            plot_auprc_lift_by_stratum(gru_sums, _s3_dir / f"{ds_name}_gru_plausibility_by_stratum.png")
+
+    # ── SCENARIO 4 ────────────────────────────────────────────────────────────
+    print(f"  [{_mode}] Scenario 4: Imperfection-Aware Features Heatmaps")
+    _s4_dir = _mode_dir / "scenario_4"
+    _s4_dir.mkdir(parents=True, exist_ok=True)
+
+    _s4_combined_nemsis = {**nemsis_xgb, **nemsis_gru}
+    _s4_combined_mcmed = {**mcmed_xgb, **mcmed_gru}
+    _s4_datasets = {"NEMSIS": _s4_combined_nemsis, "MC-MED": _s4_combined_mcmed}
+
+    plot_cross_dataset_delta_heatmap(
+        _s4_datasets, _s4_dir / "miss_features_delta_heatmap.png",
+        baselines={"NEMSIS": "Setup ma_pk_in/base", "MC-MED": "Setup ma_pk_in/base"},
+        variants=[
+            ("XGBoost\n+miss", {"NEMSIS": "Setup ma_pk_in/base+miss", "MC-MED": "Setup ma_pk_in/base+miss"}),
+            ("GRU\n+mask", {"NEMSIS": "Setup gru/ma_pk_in/mask", "MC-MED": "Setup gru/ma_pk_in/mask"}),
+        ],
+        variant_baselines=[
+            {"NEMSIS": "Setup ma_pk_in/base", "MC-MED": "Setup ma_pk_in/base"},
+            {"NEMSIS": "Setup gru/ma_pk_in/nomask", "MC-MED": "Setup gru/ma_pk_in/nomask"},
+        ],
+        metric="auprc_lift",
+        row_order=["overall", "Q_alpha", "Q_beta", "Q_gamma", "Q_delta"],
+    )
+
+    plot_cross_dataset_delta_heatmap(
+        _xgb_datasets, _s4_dir / "xgboost_miss_features_delta_heatmap.png",
+        baselines=_xgb_baselines,
+        variants=[
+            ("+miss", {"NEMSIS": "Setup ma_pk_in/base+miss", "MC-MED": "Setup ma_pk_in/base+miss"}),
+            ("+plaus", {"NEMSIS": "Setup ma_pk_in/base+plaus", "MC-MED": "Setup ma_pk_in/base+plaus"}),
+            ("+miss+plaus", {"NEMSIS": "Setup ma_pk_in/base+miss+plaus", "MC-MED": "Setup ma_pk_in/base+miss+plaus"}),
+        ],
+        metric="auprc_lift",
+        row_order=_heatmap_rows,
+    )
+
+    # 4b. By-stratum line plots
+    _s4_xgb_pipes = [
+        "Setup ma_pk_in/base", "Setup ma_pk_in/base+miss",
+        "Setup ma_pk_in/base+plaus", "Setup ma_pk_in/base+miss+plaus",
+    ]
+    _s4_gru_pipes = ["Setup gru/ma_pk_in/nomask", "Setup gru/ma_pk_in/mask"]
+
+    for ds_name, xgb_data, gru_data in [("nemsis", nemsis_xgb, nemsis_gru), ("mcmed", mcmed_xgb, mcmed_gru)]:
+        xgb_sums = [(l, s) for l, s in xgb_data.items() if l in _s4_xgb_pipes]
+        if xgb_sums:
+            plot_auprc_lift_by_stratum(xgb_sums, _s4_dir / f"{ds_name}_xgboost_features_by_stratum.png")
+        gru_sums = [(l, s) for l, s in gru_data.items() if l in _s4_gru_pipes]
+        if gru_sums:
+            plot_auprc_lift_by_stratum(gru_sums, _s4_dir / f"{ds_name}_gru_mask_by_stratum.png")
+
+# 4c. SHAP plots are kept from the existing code above — no changes needed.
+
+print("\n" + "=" * 72)
+print("SCENARIO EVALUATION COMPLETE")
+print(f"Results in: {_SCENARIO_ROOT}")
+print("=" * 72)
 # %%

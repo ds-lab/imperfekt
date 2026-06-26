@@ -18,7 +18,7 @@ from config import (  # noqa: E402
 )
 from examples.nemsis.features import feature_group  # noqa: E402
 
-_STRATUM_ORDER = ["Q_complete", "Q_alpha", "Q_beta", "Q_gamma", "Q_delta"]
+_STRATUM_ORDER = ["Q_alpha", "Q_beta", "Q_gamma", "Q_delta"]
 
 _PLAUS_LABEL    = {"pk": "plaus=keep", "pr": "plaus=remove"}
 _IMP_LABEL      = {"in": "no imputation", "il": "LOCF", "is": "SAITS"}
@@ -157,39 +157,36 @@ def plot_delta_auprc_heatmap(
     metric_label = "AUPRC lift" if is_lift else "AUPRC"
     fmt = "{:+.2f}" if is_lift else "{:+.4f}"
 
-    fig_w = max(7.0, 1.3 * len(quad_keys) + 3.0)
-    fig_h = max(2.5, 0.7 * len(present_swaps) + 2.0)
+    fig_w = max(9.0, 2.0 * len(quad_keys) + 4.0)
+    fig_h = max(4.0, 1.1 * len(present_swaps) + 3.0)
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
     cmap = plt.get_cmap("RdBu_r").copy()
     cmap.set_bad(color="#f2f2f2")
     vmax = np.nanmax(np.abs(delta)) if np.isfinite(delta).any() else 1.0
     vmax = vmax or 1.0
     im = ax.imshow(delta, aspect="auto", cmap=cmap, vmin=-vmax, vmax=vmax)
-    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04).set_label(f"Δ {metric_label} vs baseline")
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label(f"Δ {metric_label} vs baseline", fontsize=16)
+    cbar.ax.tick_params(labelsize=14)
 
     ax.set_xticks(np.arange(len(quad_keys)))
-    ax.set_xticklabels(quad_keys, rotation=40, ha="right", fontsize=8)
+    ax.set_xticklabels(quad_keys, rotation=40, ha="right", fontsize=16)
     ax.set_yticks(np.arange(len(present_swaps)))
-    ax.set_yticklabels([r for r, _ in present_swaps], fontsize=8)
-    ax.set_xlabel("Quadrant")
-    base_label = _decode_pipeline_label(baseline).replace("\n", " · ")
-    ax.set_title(
-        f"Δ {metric_label} vs baseline ({base_label})\n({CV_N_SPLITS}×{CV_N_REPEATS} CV)",
-        fontsize=9,
-    )
+    ax.set_yticklabels([r for r, _ in present_swaps], fontsize=16, rotation=90, va="center")
+    ax.set_xlabel("Quadrant", fontsize=16)
 
     for i in range(len(present_swaps)):
         for j in range(len(quad_keys)):
             v = delta[i, j]
             if np.isnan(v):
-                ax.text(j, i, "NA", ha="center", va="center", fontsize=7, color="#888888")
+                ax.text(j, i, "NA", ha="center", va="center", fontsize=18, color="#888888")
                 continue
             color = "white" if abs(v) > 0.6 * vmax else "black"
-            ax.text(j, i, fmt.format(v), ha="center", va="center", fontsize=8, color=color)
+            ax.text(j, i, fmt.format(v), ha="center", va="center", fontsize=20, color=color)
 
     fig.tight_layout()
     save_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(save_path, format="png", dpi=150)
+    fig.savefig(save_path, format="png", dpi=200)
     plt.close(fig)
     print(f"Plot saved to {save_path}")
 
@@ -254,7 +251,6 @@ def plot_auprc_by_stratum(
     ax.set_ylabel("AUPRC (mean ± 95% CI)")
     if show_legend:
         ax.legend(loc="upper left", bbox_to_anchor=(1, 1), borderaxespad=0, fontsize=7)
-    ax.set_title(f"AUPRC by stratum ({CV_N_SPLITS}×{CV_N_REPEATS} CV)")
     fig.tight_layout()
     save_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(save_path, format="png", dpi=150)
@@ -323,7 +319,6 @@ def plot_auroc_by_stratum(
     ax.set_ylabel("AUROC (mean ± 95% CI)")
     if show_legend:
         ax.legend(loc="upper left", bbox_to_anchor=(1, 1), borderaxespad=0, fontsize=7)
-    ax.set_title(f"AUROC by stratum ({CV_N_SPLITS}×{CV_N_REPEATS} CV)")
     fig.tight_layout()
     save_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(save_path, format="png", dpi=150)
@@ -384,7 +379,6 @@ def plot_auprc_lift_by_stratum(
     ax.set_ylabel("AUPRC lift = AUPRC / prevalence (mean ± 95% CI)")
     if show_legend:
         ax.legend(loc="upper left", bbox_to_anchor=(1, 1), borderaxespad=0, fontsize=7)
-    ax.set_title(f"AUPRC lift by stratum ({CV_N_SPLITS}×{CV_N_REPEATS} CV)")
     fig.tight_layout()
     save_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(save_path, format="png", dpi=150)
@@ -441,7 +435,6 @@ def plot_shap_importance_bar(
         ax.set_yticks(y)
         ax.set_yticklabels(features, fontsize=7)
         ax.set_xlabel("Mean |SHAP| (mean ± std across folds)")
-        ax.set_title(f"{pipeline}  [{stratum}]", fontsize=9)
 
         # legend patches
         from matplotlib.patches import Patch
@@ -503,7 +496,6 @@ def plot_shap_stability_scatter(
 
         ax.set_xlabel("Mean |SHAP| (mean across folds)")
         ax.set_ylabel("Std of mean |SHAP| across folds")
-        ax.set_title(f"{pipeline}  [{stratum}]", fontsize=9)
 
         from matplotlib.patches import Patch
         legend_handles = [
@@ -693,7 +685,6 @@ def plot_spearman_orthogonality(
     ax.set_yticklabels(struct_order, fontsize=7)
     ax.set_xlabel("Physiology features (SHAP-ranked)")
     ax.set_ylabel("Structural features (SHAP-ranked)")
-    ax.set_title(f"{pipeline_name}: Spearman orthogonality heatmap\n^ moderate overlap |rho|≥0.3  ^^ high overlap |rho|≥0.5", fontsize=9)
     for i, sf in enumerate(struct_order):
         for j, pf in enumerate(phys_order):
             v = rho_mat[i, j]
@@ -707,3 +698,180 @@ def plot_spearman_orthogonality(
     fig.savefig(heatmap_path, format="png", dpi=150)
     plt.close(fig)
     print(f"[{pipeline_name}] Spearman heatmap saved to {heatmap_path}")
+
+
+# ── Scenario-specific plotting functions ──────────────────────────────────────
+
+
+def plot_cross_dataset_delta_heatmap(
+    datasets: dict[str, dict[str, dict]],
+    save_path: Path,
+    *,
+    baselines: dict[str, str],
+    variants: list[tuple[str, dict[str, str]]],
+    variant_baselines: list[dict[str, str]] | None = None,
+    metric: str = "auprc_lift",
+    row_order: list[str] | None = None,
+) -> None:
+    """Dual-dataset delta heatmap with propagated CI and significance markers.
+
+    Parameters
+    ----------
+    datasets : {"NEMSIS": {pipeline: summary, ...}, "MC-MED": {...}}
+        Summaries keyed by dataset name, each a dict from pipeline label to
+        the summary dict (stratum -> metric -> {mean, ci}).
+    baselines : {"NEMSIS": "Setup ...", "MC-MED": "Setup ..."}
+        Default baseline pipeline label per dataset.
+    variants : [("col_label", {"NEMSIS": "Setup ...", "MC-MED": "Setup ..."}), ...]
+        Each entry defines one sub-column in the heatmap. col_label is the
+        display name (e.g. "LOCF"), and the dict maps dataset to pipeline label.
+    variant_baselines : list[dict[str, str]] | None
+        Optional per-variant baseline override. If provided, must be same length
+        as variants. Each entry maps dataset name to the baseline pipeline for
+        that specific variant column. Use when different variants need different
+        baselines (e.g., XGBoost vs GRU columns).
+    metric : str
+        Which metric to delta (e.g. "auprc_lift", "auprc", "auroc").
+    row_order : list[str] | None
+        Strata to show as rows. Defaults to overall + standard quadrant order.
+    """
+    if row_order is None:
+        row_order = ["overall", "Q_alpha", "Q_beta", "Q_gamma", "Q_delta"]
+
+    dataset_names = list(datasets.keys())
+    n_datasets = len(dataset_names)
+    n_variants = len(variants)
+    n_cols = n_datasets * n_variants
+    n_rows = len(row_order)
+
+    delta_mat = np.full((n_rows, n_cols), np.nan)
+    ci_mat = np.full((n_rows, n_cols), np.nan)
+    sig_mat = np.full((n_rows, n_cols), False)
+
+    col_labels = []
+    for ds_name in dataset_names:
+        for var_label, _ in variants:
+            col_labels.append(f"{ds_name}\n{var_label}")
+
+    for col_idx, (ds_idx, var_idx) in enumerate(
+        [(di, vi) for di in range(n_datasets) for vi in range(n_variants)]
+    ):
+        ds_name = dataset_names[ds_idx]
+        _, var_pipes = variants[var_idx]
+        summ = datasets[ds_name]
+        if variant_baselines and var_idx < len(variant_baselines):
+            baseline_pipe = variant_baselines[var_idx].get(ds_name, baselines[ds_name])
+        else:
+            baseline_pipe = baselines[ds_name]
+        variant_pipe = var_pipes[ds_name]
+
+        base_summ = summ.get(baseline_pipe, {})
+        var_summ = summ.get(variant_pipe, {})
+
+        if not base_summ or not var_summ:
+            continue
+
+        for row_idx, stratum in enumerate(row_order):
+            base_m = base_summ.get(stratum, {}).get(metric)
+            var_m = var_summ.get(stratum, {}).get(metric)
+            if not base_m or not var_m:
+                continue
+            d = var_m["mean"] - base_m["mean"]
+            prop_ci = np.sqrt(var_m["ci"] ** 2 + base_m["ci"] ** 2)
+            delta_mat[row_idx, col_idx] = d
+            ci_mat[row_idx, col_idx] = prop_ci
+            sig_mat[row_idx, col_idx] = abs(d) > prop_ci
+
+    is_lift = metric == "auprc_lift"
+    metric_label = "AUPRC lift" if is_lift else metric.upper()
+    fmt = "{:+.2f}" if is_lift else "{:+.4f}"
+
+    fig_w = max(10.0, 2.4 * n_cols + 3.5)
+    fig_h = max(5.0, 1.1 * n_rows + 3.0)
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    cmap = plt.get_cmap("RdBu_r").copy()
+    cmap.set_bad(color="#f2f2f2")
+    vmax = np.nanmax(np.abs(delta_mat)) if np.isfinite(delta_mat).any() else 1.0
+    vmax = vmax or 1.0
+    im = ax.imshow(delta_mat, aspect="auto", cmap=cmap, vmin=-vmax, vmax=vmax)
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label(f"Δ {metric_label}", fontsize=20)
+    cbar.ax.tick_params(labelsize=14)
+
+    ax.set_xticks(np.arange(n_cols))
+    ax.set_xticklabels(col_labels, rotation=0, ha="center", fontsize=20)
+    ax.set_yticks(np.arange(n_rows))
+    ax.set_yticklabels(row_order, fontsize=20, rotation=90, va="center")
+
+    # Dataset separator lines
+    for i in range(1, n_datasets):
+        ax.axvline(i * n_variants - 0.5, color="black", linewidth=1.5)
+
+    for i in range(n_rows):
+        for j in range(n_cols):
+            v = delta_mat[i, j]
+            if np.isnan(v):
+                ax.text(j, i, "—", ha="center", va="center", fontsize=18, color="#888888")
+                continue
+            marker = "*" if sig_mat[i, j] else "\u2020"
+            color = "white" if abs(v) > 0.6 * vmax else "black"
+            ci_v = ci_mat[i, j]
+            cell_text = f"{fmt.format(v)}{marker}\n±{ci_v:.2f}" if is_lift else f"{fmt.format(v)}{marker}\n±{ci_v:.4f}"
+            ax.text(j, i, cell_text, ha="center", va="center", fontsize=26, color=color)
+
+    fig.tight_layout()
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(save_path, format="png", dpi=200)
+    plt.close(fig)
+    print(f"Plot saved to {save_path}")
+
+
+def render_stratum_axis_table(
+    summary: dict[str, dict],
+    axis_metrics: list[str],
+    save_path: Path,
+    *,
+    strata_order: list[str] | None = None,
+) -> None:
+    """Render a table of axis metrics (mean +/- ci) per stratum from one pipeline summary.
+
+    Parameters
+    ----------
+    summary : dict[str, dict]
+        A single pipeline summary dict (stratum -> metric -> {mean, ci}).
+    axis_metrics : list[str]
+        Metric keys to include as columns.
+    save_path : Path
+        Where to write the CSV.
+    strata_order : list[str] | None
+        Row ordering of strata.
+    """
+    if strata_order is None:
+        strata_order = ["Q_alpha", "Q_beta", "Q_gamma", "Q_delta"]
+
+    rows: list[dict] = []
+    for stratum in strata_order:
+        s_data = summary.get(stratum, {})
+        if not s_data or not isinstance(s_data, dict):
+            continue
+        row: dict = {"stratum": stratum}
+        for m in axis_metrics:
+            val = s_data.get(m)
+            if val:
+                row[f"{m}_mean"] = val["mean"]
+                row[f"{m}_ci"] = val["ci"]
+                row[f"{m}_formatted"] = f"{val['mean']:.4f} ± {val['ci']:.4f}"
+            else:
+                row[f"{m}_mean"] = None
+                row[f"{m}_ci"] = None
+                row[f"{m}_formatted"] = "—"
+        rows.append(row)
+
+    if not rows:
+        print(f"No data for stratum axis table — skipping {save_path.name}")
+        return
+
+    df = pl.DataFrame(rows)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    df.write_csv(save_path)
+    print(f"Stratum axis table saved to {save_path}")

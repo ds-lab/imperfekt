@@ -65,7 +65,11 @@ STRATIFICATION_MODES = {
 # that plot_results.py expects.
 _RUN_DIRS = {}
 for strat_mode in STRATIFICATION_MODES:
-    RUN_DIR = RESULTS_DIR / _fp_tag / strat_mode
+    if strat_mode == "intravariable":
+        a = AXES_INTRAVARIABLE
+    else:
+        a = AXES_INTERVARIABLE
+    RUN_DIR = RESULTS_DIR / _fp_tag / strat_mode / f"{a[0]}_{a[1]}"
     RUN_DIR.mkdir(parents=True, exist_ok=True)
     _RUN_DIRS[strat_mode] = RUN_DIR
 
