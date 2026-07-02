@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "imperfekt"
-version = "0.3.0"
+version = "0.4.0"
 description = "A framework to analyze imperfections (missingness, noise) in time-series datasets."
 readme = "README.md"
 license = "MIT"
