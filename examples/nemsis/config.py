@@ -175,6 +175,10 @@ STRATIFICATION_MODE: str = "intervariable"  # or "intravariable" / "intervariabl
 AXES_INTERVARIABLE = ("avg_indicated_vars_pct", "pattern_entropy")
 AXES_INTRAVARIABLE = ("sbp_indicated_pct", "rr_indicated_pct")
 
+# AXES_INTERVARIABLE = ("co_missingness_concentration", "pattern_entropy")
+# AXES_INTERVARIABLE = ("max_pairwise_co_missingness", "pattern_entropy")
+# AXES_INTRAVARIABLE = ("sbp_indicated_pct", "hr_indicated_pct")
+
 AXES = AXES_INTRAVARIABLE if STRATIFICATION_MODE == "intravariable" else AXES_INTERVARIABLE
 
 # Train-fold undersampling + Bayesian prior correction.

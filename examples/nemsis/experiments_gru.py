@@ -94,7 +94,7 @@ for config_name, config in STAGE_3_CONFIGS.items():
             f" — Setup {run_name} [{', '.join(STRATIFICATION_MODES)}]…"
         )
 
-        do_shap = config_name == "ma_pk_in" and arm_name == "masky"
+        do_shap = config_name == "ma_pk_in" and arm_name == "mask"
         shap_paths = (
             {m: _RUN_DIRS[m] / "shap" / f"{config_name}_{arm_name}.npz" for m in STRATIFICATION_MODES}
             if do_shap
