@@ -16,6 +16,7 @@ This module provides a comprehensive suite of analyses for examining **intervari
    - [Symmetric Correlation](#4-symmetric-correlation-symmetric_correlation)
    - [Symmetric Lagged Cross-Correlation](#5-symmetric-lagged-cross-correlation-symmetric_lagged_cross_correlation)
    - [Asymmetric Correlation](#6-asymmetric-correlation-asymmetric_correlation)
+   - [Composite Score](#7-composite-score-composite_score)
 5. [Missingness Mechanism Classification](#missingness-mechanism-classification)
 6. [Usage Example](#usage-example)
 7. [References](#references)
@@ -57,6 +58,7 @@ IntervariableImperfection
 │   ├── symmetric_correlation()       # Co-imperfection correlation
 │   ├── symmetric_lagged_cross_correlation()  # Lagged co-imperfection
 │   ├── asymmetric_correlation()      # Missing vs observed values
+│   ├── composite_score()             # Quadrant stratification per case
 │   ├── run()                         # Execute all analyses
 │   └── generate_html_report()        # Create HTML summary
 │
@@ -71,6 +73,8 @@ IntervariableImperfection
     ├── sc_symmetric_crosscorrelation: dict
     ├── ac_asymmetric_statistical_results: dict
     ├── ac_asymmetric_crosscorrelation: dict
+    ├── iv_composite_scores: pl.DataFrame
+    ├── iv_pairwise_correlations: pl.DataFrame
     └── plots: IntervariablePlots
 ```
 
@@ -341,6 +345,74 @@ r_{rb}(k) = \text{RankBiserial}(M_X(t), Y(t+k))
 $$
 
 This answers: "When $X$ is imperfect at time $t$, what were the values of $Y$ at time $t \pm k$?"
+
+---
+
+### 7. Composite Score (`composite_score`)
+
+Assigns each case to one of five imperfection strata based on its **cross-variable co-missingness structure**. Two data-adaptively selected orthogonal axes are median-bisected to form a 2×2 grid; cases with zero missingness are placed in Q_complete before the grid logic runs.
+
+#### Strata
+
+| Stratum | Interpretation |
+|---------|----------------|
+| **Q_complete** | No missingness across any variable — no co-imperfection |
+| **Q_alpha** | Low on both axes — mild, diffuse co-missingness |
+| **Q_beta** | High axis_x / low axis_y — concentrated or broad missingness without strong co-dropout patterns |
+| **Q_gamma** | Low axis_x / high axis_y — varied co-dropout patterns despite relatively low overall missingness |
+| **Q_delta** | High on both axes — extensive and structured co-missingness |
+
+#### Candidate Axes
+
+All five metrics are computed per case across all `cols`.
+
+| Metric | Captures |
+|--------|----------|
+| `avg_indicated_vars_pct` | Mean fraction of variables imperfect per row, averaged across all time points |
+| `co_missingness_concentration` | When something is missing, how many variables tend to drop together — mean `indicated_vars_pct` restricted to imperfect rows |
+| `missing_variable_breadth` | Fraction of variables that have *any* missingness for this case; range [0, 1] |
+| `pattern_entropy` | Diversity of co-dropout patterns (which combination of variables is missing per row) — normalized Shannon entropy over row-level missingness bitmasks; 0 = always the same pattern, 1 = maximally varied |
+| `max_pairwise_co_missingness` | Strength of the tightest variable-pair co-dropout — max Jaccard-style overlap `count(A∧B missing) / min(count(A missing), count(B missing))` across all pairs; complements pattern_entropy by capturing pairwise coupling independently of overall pattern diversity |
+
+#### Axis Selection
+
+A single global axis pair is selected across all cases (no per-variable split, since this is already case-level). The pair with the lowest absolute Spearman rank correlation among all metric pairs is chosen, ensuring the two axes carry complementary rather than redundant information.
+
+#### Median Bisection
+
+Each axis is split at its median (computed from cases in Q_alpha through Q_delta, i.e. excluding Q_complete). External medians can be passed to `assign_strata()` for leakage-safe cross-validation — fit medians on a training fold and apply them to held-out data without re-running `composite_score()`.
+
+```python
+# Cross-validation usage
+axis_x = iv_scores["axis_x"][0]
+axis_y = iv_scores["axis_y"][0]
+train, test = iv_scores[:split], iv_scores[split:]
+
+x_med = float(train[axis_x].median())
+y_med = float(train[axis_y].median())
+test_with_strata = IntervariableImperfection.assign_strata(
+    test, axis_x, axis_y, x_med, y_med
+)
+```
+
+#### Output
+
+`results.iv_composite_scores` — one row per case:
+
+| Column | Description |
+|--------|-------------|
+| `id` | Case identifier |
+| `avg_indicated_vars_pct` | Mean row-level imperfection fraction |
+| `co_missingness_concentration` | Mean imperfection fraction restricted to imperfect rows |
+| `missing_variable_breadth` | Fraction of variables with any missingness |
+| `pattern_entropy` | Normalized entropy of co-dropout bitmask distribution |
+| `max_pairwise_co_missingness` | Strongest pairwise variable co-dropout (Jaccard-style) |
+| `axis_x`, `axis_y` | Names of the selected axes |
+| `axis_pair_corr` | Spearman correlation between the selected axes |
+| `axis_x_median_threshold`, `axis_y_median_threshold` | Medians used for bisection |
+| `intervariable_stratum` | Assigned stratum (Q_complete / Q_alpha / Q_beta / Q_gamma / Q_delta) |
+
+`results.iv_pairwise_correlations` — Spearman correlation matrix over all candidate axes, showing which pairs are most and least redundant.
 
 ---
 

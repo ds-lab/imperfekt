@@ -2,35 +2,33 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
-import polars as pl
 import plotly.graph_objects as go
-
+import polars as pl
 
 ############################################################
-#        Per-Entity and Global Interval Statistics         #
+#        Per-Case and Global Interval Statistics           #
 ############################################################
 
 
-def compute_entity_interval_statistics(
+def compute_case_interval_statistics(
     delta_t_df: pl.DataFrame,
     id_col: str = "id",
 ) -> pl.DataFrame:
     """
-    Compute per-entity summary statistics of inter-observation intervals.
+    Compute per-case summary statistics of inter-observation intervals.
 
     Parameters:
         delta_t_df (pl.DataFrame): DataFrame with columns [id_col, ..., "interval_seconds"],
                                    one row per interval (already filtered: not-null, > 0).
-        id_col (str): Entity identifier column.
+        id_col (str): Case identifier column.
 
     Returns:
-        pl.DataFrame: One row per entity with columns:
+        pl.DataFrame: One row per case with columns:
             id, n_intervals, mean_seconds, median_seconds, std_seconds,
             cv, iqr_seconds, min_seconds, max_seconds.
     """
-    entity_stats = (
-        delta_t_df
-        .group_by(id_col)
+    case_stats = (
+        delta_t_df.group_by(id_col)
         .agg(
             pl.len().alias("n_intervals"),
             pl.col("interval_seconds").mean().alias("mean_seconds"),
@@ -43,31 +41,38 @@ def compute_entity_interval_statistics(
         )
         .with_columns(
             (pl.col("q75_seconds") - pl.col("q25_seconds")).alias("iqr_seconds"),
+            (
+                (pl.col("q75_seconds") - pl.col("q25_seconds"))
+                / (pl.col("q75_seconds") + pl.col("q25_seconds"))
+            ).alias("qcod"),
             pl.when(pl.col("mean_seconds") != 0)
             .then(pl.col("std_seconds") / pl.col("mean_seconds"))
             .otherwise(None)
             .alias("cv"),
         )
         .drop(["q25_seconds", "q75_seconds"])
-        .select([
-            id_col,
-            "n_intervals",
-            "mean_seconds",
-            "median_seconds",
-            "std_seconds",
-            "cv",
-            "iqr_seconds",
-            "min_seconds",
-            "max_seconds",
-        ])
+        .select(
+            [
+                id_col,
+                "n_intervals",
+                "mean_seconds",
+                "median_seconds",
+                "std_seconds",
+                "cv",
+                "iqr_seconds",
+                "qcod",
+                "min_seconds",
+                "max_seconds",
+            ]
+        )
         .sort(id_col)
     )
 
-    # Preserve entities that have 0 intervals (single-observation entities)
-    all_entities = delta_t_df.select(pl.col(id_col).unique()).sort(id_col)
-    entity_stats = all_entities.join(entity_stats, on=id_col, how="left")
+    # Preserve cases that have 0 intervals (single-observation cases)
+    all_cases = delta_t_df.select(pl.col(id_col).unique()).sort(id_col)
+    case_stats = all_cases.join(case_stats, on=id_col, how="left")
 
-    return entity_stats
+    return case_stats
 
 
 def compute_global_interval_statistics(
@@ -136,19 +141,18 @@ def compute_dominant_frequency(
     )
 
     bin_counts = (
-        binned
-        .group_by("interval_bin")
+        binned.group_by("interval_bin")
         .agg(pl.len().alias("count"))
         .with_columns(
             (pl.col("interval_bin") * bin_resolution_seconds).alias("interval_seconds_bin_center"),
         )
-        .sort("count", descending=True)
+        .sort(["count", "interval_bin"], descending=[True, False])
     )
 
     n_total = bin_counts["count"].sum()
-    bin_counts = bin_counts.with_columns(
-        (pl.col("count") / n_total).alias("fraction")
-    ).select(["interval_bin", "interval_seconds_bin_center", "count", "fraction"])
+    bin_counts = bin_counts.with_columns((pl.col("count") / n_total).alias("fraction")).select(
+        ["interval_bin", "interval_seconds_bin_center", "count", "fraction"]
+    )
 
     # Dominant bin = mode
     dominant_row = bin_counts.row(0, named=True)
@@ -158,11 +162,7 @@ def compute_dominant_frequency(
     # Adherence: fraction of all intervals within [mode*(1-tol), mode*(1+tol)]
     lo = dominant_interval_seconds * (1 - adherence_tolerance)
     hi = dominant_interval_seconds * (1 + adherence_tolerance)
-    n_adhering = (
-        delta_t_df
-        .filter(pl.col("interval_seconds").is_between(lo, hi))
-        .height
-    )
+    n_adhering = delta_t_df.filter(pl.col("interval_seconds").is_between(lo, hi)).height
     adherence_rate = n_adhering / n_total if n_total > 0 else None
 
     # Shannon entropy of bin distribution
@@ -172,20 +172,192 @@ def compute_dominant_frequency(
     n_unique_bins = len(fractions)
     normalized_entropy = (entropy_bits / np.log2(n_unique_bins)) if n_unique_bins > 1 else 0.0
 
-    frequency_summary = pl.DataFrame({
-        "dominant_interval_seconds": [dominant_interval_seconds],
-        "dominant_interval_bin": [dominant_bin],
-        "adherence_rate": [adherence_rate],
-        "n_total_intervals": [n_total],
-        "n_adhering_intervals": [n_adhering],
-        "interval_entropy_bits": [entropy_bits],
-        "normalized_entropy": [normalized_entropy],
-        "n_unique_bins": [n_unique_bins],
-        "bin_resolution_seconds": [bin_resolution_seconds],
-        "adherence_tolerance": [adherence_tolerance],
-    })
+    frequency_summary = pl.DataFrame(
+        {
+            "dominant_interval_seconds": [dominant_interval_seconds],
+            "dominant_interval_bin": [dominant_bin],
+            "adherence_rate": [adherence_rate],
+            "n_total_intervals": [n_total],
+            "n_adhering_intervals": [n_adhering],
+            "interval_entropy_bits": [entropy_bits],
+            "normalized_entropy": [normalized_entropy],
+            "n_unique_bins": [n_unique_bins],
+            "bin_resolution_seconds": [bin_resolution_seconds],
+            "adherence_tolerance": [adherence_tolerance],
+        }
+    )
 
     return frequency_summary, bin_counts
+
+
+############################################################
+#        Per-Case Entropy and Adherence                    #
+############################################################
+
+
+def compute_case_interval_entropy_adherence(
+    delta_t_df: pl.DataFrame,
+    id_col: str = "id",
+    bin_resolution_seconds: float = 60.0,
+    adherence_tolerance: float = 0.5,
+    min_intervals: int = 2,
+) -> pl.DataFrame:
+    """
+    Compute per-case Shannon entropy and adherence rate of the interval distribution.
+
+    Entropy measures how spread out each case's own interval lengths are.
+    Entropy = 0 means all intervals fall in one bin (perfectly regular for that case,
+    regardless of what that bin length is or what the dataset average looks like).
+
+    Adherence measures how consistently each case follows *its own* dominant interval
+    (not the dataset-wide dominant). A case with a unique but perfectly consistent
+    rhythm scores adherence = 1.0.
+
+    Uses the same binning logic as compute_dominant_frequency() but applied
+    independently to each case's interval sequence.
+
+    Parameters:
+        delta_t_df (pl.DataFrame): DataFrame with columns [id_col, ..., "interval_seconds"],
+                                   one row per interval (not-null, > 0).
+        id_col (str): Case identifier column.
+        bin_resolution_seconds (float): Bin width in seconds for discretizing intervals.
+        adherence_tolerance (float): Fractional tolerance around each case's own dominant
+                                     interval for adherence_rate computation. E.g. 0.5 means
+                                     within [dominant * 0.5, dominant * 1.5].
+        min_intervals (int): Minimum number of intervals required to compute metrics.
+                             Cases with fewer intervals receive NaN for all metrics.
+
+    Returns:
+        pl.DataFrame: One row per case with columns:
+            id, entropy_bits, normalized_entropy, adherence_rate, n_adhering_intervals.
+            Cases with fewer than min_intervals intervals receive NaN for all metrics.
+    """
+    # All cases — needed to preserve those with insufficient intervals
+    all_cases = delta_t_df.select(pl.col(id_col).unique()).sort(id_col)
+
+    # Step 1: bin every interval row
+    binned = delta_t_df.with_columns(
+        (pl.col("interval_seconds") / bin_resolution_seconds)
+        .round(0)
+        .cast(pl.Int64)
+        .alias("interval_bin")
+    )
+
+    # Step 2: per-case per-bin counts
+    case_bin_counts = binned.group_by([id_col, "interval_bin"]).agg(pl.len().alias("bin_count"))
+
+    # Step 3: per-case total intervals
+    case_totals = binned.group_by(id_col).agg(pl.len().alias("n_total"))
+
+    # Step 4: join totals back and compute per-bin fraction
+    case_bin_counts = (
+        case_bin_counts.join(case_totals, on=id_col, how="left")
+        .with_columns((pl.col("bin_count").cast(pl.Float64) / pl.col("n_total")).alias("fraction"))
+        .with_columns(
+            # entropy contribution: -p * log2(p); safe because fraction > 0 by construction
+            (-pl.col("fraction") * pl.col("fraction").log(base=2.0)).alias("entropy_contrib")
+        )
+    )
+
+    # Step 5: per-case entropy, dominant bin, and n_unique_bins
+    case_entropy = (
+        case_bin_counts.group_by(id_col)
+        .agg(
+            pl.col("entropy_contrib").sum().alias("entropy_bits"),
+            pl.col("interval_bin").count().cast(pl.Int64).alias("n_unique_bins"),
+            # dominant bin = the bin_count argmax (sort descending, take first)
+            pl.col("interval_bin")
+            .sort_by(["bin_count", "interval_bin"], descending=True)
+            .first()
+            .alias("dominant_bin"),
+        )
+        .join(case_totals, on=id_col, how="left")
+    )
+
+    # Step 6: normalized entropy — scale to [0, 1]; 0 when n_unique_bins == 1
+    case_entropy = case_entropy.with_columns(
+        pl.when(pl.col("n_unique_bins") > 1)
+        .then(pl.col("entropy_bits") / pl.col("n_unique_bins").cast(pl.Float64).log(base=2.0))
+        .otherwise(0.0)
+        .alias("normalized_entropy")
+    )
+
+    # Step 7: per-case adherence against each case's own dominant interval
+    case_entropy = case_entropy.with_columns(
+        (pl.col("dominant_bin") * bin_resolution_seconds).alias("dominant_interval_seconds")
+    )
+
+    binned_with_dominant = binned.join(
+        case_entropy.select([id_col, "dominant_interval_seconds"]),
+        on=id_col,
+        how="left",
+    )
+
+    adherence_df = (
+        binned_with_dominant.with_columns(
+            pl.col("interval_seconds")
+            .is_between(
+                pl.col("dominant_interval_seconds") * (1.0 - adherence_tolerance),
+                pl.col("dominant_interval_seconds") * (1.0 + adherence_tolerance),
+            )
+            .cast(pl.Int32)
+            .alias("adheres")
+        )
+        .group_by(id_col)
+        .agg(
+            pl.col("adheres").sum().alias("n_adhering_intervals"),
+            pl.len().alias("n_total_for_adherence"),
+        )
+        .with_columns(
+            (
+                pl.col("n_adhering_intervals").cast(pl.Float64) / pl.col("n_total_for_adherence")
+            ).alias("adherence_rate")
+        )
+    )
+
+    # Step 8: assemble and left-join all_cases to preserve those with 0 intervals
+    result = (
+        all_cases.join(
+            case_entropy.select([id_col, "entropy_bits", "normalized_entropy"]),
+            on=id_col,
+            how="left",
+        )
+        .join(
+            adherence_df.select([id_col, "adherence_rate", "n_adhering_intervals"]),
+            on=id_col,
+            how="left",
+        )
+        .join(case_totals, on=id_col, how="left")
+    )
+
+    # Step 9: null out cases with fewer than min_intervals intervals
+    result = (
+        result.with_columns(
+            pl.when(pl.col("n_total").fill_null(0) < min_intervals)
+            .then(None)
+            .otherwise(pl.col("entropy_bits"))
+            .alias("entropy_bits"),
+            pl.when(pl.col("n_total").fill_null(0) < min_intervals)
+            .then(None)
+            .otherwise(pl.col("normalized_entropy"))
+            .alias("normalized_entropy"),
+            pl.when(pl.col("n_total").fill_null(0) < min_intervals)
+            .then(None)
+            .otherwise(pl.col("adherence_rate"))
+            .alias("adherence_rate"),
+            pl.when(pl.col("n_total").fill_null(0) < min_intervals)
+            .then(None)
+            .otherwise(pl.col("n_adhering_intervals").cast(pl.Float64))
+            .alias("n_adhering_intervals"),
+        )
+        .drop("n_total")
+        .select(
+            [id_col, "entropy_bits", "normalized_entropy", "adherence_rate", "n_adhering_intervals"]
+        )
+        .sort(id_col)
+    )
+
+    return result
 
 
 ############################################################
@@ -198,8 +370,8 @@ def plot_interval_frequency_bar(
     dominant_bin: int,
     top_n: int = 20,
     library: str = "matplotlib",
-    renderer: str = None,
-    save_path: str = None,
+    renderer: str | None = None,
+    save_path: str | Path | None = None,
     save_results: bool = False,
 ) -> "go.Figure | plt.Figure":
     """
@@ -246,8 +418,7 @@ def plot_interval_frequency_bar(
         )
         if renderer:
             fig.show(renderer=renderer)
-        if save_results and save_path:
-            save_path = Path(save_path)
+        if save_results and save_path is not None:
             fig.write_image(save_path)
             print(f"Interval frequency bar chart saved to {save_path}")
         return fig
@@ -262,8 +433,7 @@ def plot_interval_frequency_bar(
         ax.set_ylabel(yaxis_title)
         ax.grid(True, alpha=0.3, axis="y")
         fig.tight_layout()
-        if save_results and save_path:
-            save_path = Path(save_path)
+        if save_results and save_path is not None:
             fig.savefig(save_path, dpi=300, bbox_inches="tight")
             print(f"Interval frequency bar chart saved to {save_path}")
         if renderer:

@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pingouin as pg
 import plotly.graph_objects as go
 import polars as pl
@@ -12,9 +13,9 @@ from imperfekt.analysis.utils import pretty_printing, visualization_utils
 
 class PreliminaryPlots:
     def __init__(self):
-        self.violin: dict[str, go.Figure] = {}
+        self.violin: dict[str, go.Figure | plt.Figure] = {}
         self.correlation_heatmap: go.Figure = go.Figure()
-        self.autocorrelation_lag_plot: dict[str, go.Figure] = {}
+        self.autocorrelation_lag_plot: dict[str, go.Figure | plt.Figure] = {}
         self.qq_plot: dict[str, go.Figure | plt.Figure] = {}
 
 
@@ -35,11 +36,11 @@ class Preliminary:
         id_col: str = "id",
         clock_col: str = "clock",
         clock_no_col: str = "clock_no",
-        cols: list = None,
+        cols: list | None = None,
         alpha: float = 0.05,
-        save_path: Path = None,
+        save_path: Path | None = None,
         plot_library: str = "matplotlib",
-        renderer: str = "notebook_connected",
+        renderer: str | None = "notebook_connected",
     ):
         """
         Initializes the Preliminary analysis class.
@@ -105,7 +106,9 @@ class Preliminary:
                 self.df,
                 y=col,
                 title=f"Violin Plot of {col}",
-                save_path=self._path(f"{col}_violin_plot.png"),
+                save_path=self._path(f"{col}_violin_plot.png")
+                if self.save_path is not None
+                else None,
                 save_results=save_results,
                 renderer=self.renderer,
                 library=self.plot_library,
@@ -280,7 +283,7 @@ class Preliminary:
             # Pairwise correlation
             corr_data = []
             for col1 in numeric_cols:
-                row_data = {" ": col1}
+                row_data: dict[str, str | float | None] = {" ": col1}  # add row label for heatmap
                 for col2 in numeric_cols:
                     if col1 == col2:
                         correlation = 1.0
@@ -301,7 +304,9 @@ class Preliminary:
 
         self.results.plots.correlation_heatmap = self._plot_heatmap(
             self.results.correlation,
-            save_path=self._path(f"{use}_correlation_heatmap.png"),
+            save_path=self._path(f"{use}_correlation_heatmap.png")
+            if self.save_path is not None
+            else None,
             save_results=save_results,
         )
 
@@ -340,12 +345,14 @@ class Preliminary:
                 print(self.results.autocorrelation[c])
 
             self.results.plots.autocorrelation_lag_plot[c] = visualization_utils.plot_scatter(
-                x=self.results.autocorrelation[c]["lag"],
-                y=self.results.autocorrelation[c]["autocorr"],
+                x=np.array(self.results.autocorrelation[c]["lag"]),
+                y=np.array(self.results.autocorrelation[c]["autocorr"]),
                 title=f"Lagged Autocorrelation of Imperfection: {c}",
                 xaxis_title="Lag",
                 yaxis_title="Autocorrelation",
-                save_path=self._path(f"{c}_autocorrelation_plot.png"),
+                save_path=self._path(f"{c}_autocorrelation_plot.png")
+                if self.save_path is not None
+                else None,
                 save_results=save_results,
                 renderer=self.renderer,
                 library=self.plot_library,
@@ -371,7 +378,9 @@ class Preliminary:
         self.correlation(use=use, save_results=save_results)
         return self
 
-    def generate_html_report(self, report_path: str = "preliminary_report.html", title: str = None):
+    def generate_html_report(
+        self, report_path: str = "preliminary_report.html", title: str | None = None
+    ):
         """Generates an HTML report from the analysis results."""
         if not self.save_path:
             pretty_printing.rich_warning("⚠️ Cannot generate report without a save_path.")
@@ -389,7 +398,7 @@ class Preliminary:
         pretty_printing.rich_info(f"✅ Report generated at [green]{full_report_path}[/green]")
 
     def _plot_heatmap(
-        self, matrix: pl.DataFrame, save_path: Path, save_results: bool = True
+        self, matrix: pl.DataFrame, save_path: Path | None, save_results: bool = True
     ) -> go.Figure:
         # Handle the case where the correlation matrix has a label column (from pairwise correlation)
         if " " in matrix.columns:
@@ -451,7 +460,7 @@ class Preliminary:
                 pl.cum_count(self.id_col).over(self.id_col).alias(self.clock_no_col)
             )
 
-    def _path(self, subpath: str) -> Path:
+    def _path(self, subpath: str) -> Path | None:
         """Generates a full path for saving results."""
         if self.save_path:
             return self.save_path / subpath

@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -113,21 +115,26 @@ def temporal_mar_mnar_test(
     mask_df: pl.DataFrame,
     id_col: str = "id",
     clock_col: str = "clock",
-    cols: list = None,
+    cols: list | None = None,
     alpha: float = 0.05,
     impute_strategy: str = "mean",
     standardize: bool = True,
-    save_path: str = None,
+    save_path: str | Path | None = None,
     save_results: bool = False,
 ) -> pl.DataFrame:
     """
     Time-series aware MAR/MNAR test based on
     Parameters:
-       df (pl.DataFrame): Input DataFrame
-       id_col (str): Column to group by (e.g., patient ID)
-       clock_col (str): Column representing time (e.g., timestamp)
-       cols (list): List of columns to analyze
-       alpha (float): Significance level for hypothesis testing
+         df (pl.DataFrame): Original DataFrame with values
+         mask_df (pl.DataFrame): DataFrame with same shape as df, but binary indicators of missingness
+         id_col (str): Column name for grouping (e.g., patient ID)
+         clock_col (str): Column name for time ordering
+         cols (list | None): List of columns to test. If None, tests all except id_col and clock_col.
+         alpha (float): Significance level for LRT
+         impute_strategy (str): Strategy for imputing predictors ('zero', 'mean', 'median', 'ffill_within_id')
+         standardize (bool): Whether to standardize predictors before modeling
+         save_path (str | Path | None): Directory to save plots. If None, plots are not saved.
+         save_results (bool): Whether to save results to disk in save_path. If False, results are only returned as a DataFrame.
     Returns:
        polars.DataFrame: Results of the MAR/MNAR test
     """
@@ -261,7 +268,21 @@ def temporal_mar_mnar_test(
 
     if len(results) == 0:
         pretty_printing.rich_warning("No results for MAR-MNAR testing.")
-        return {"temporal_mar_mnar_results": []}
+        return pl.DataFrame(
+            {
+                "column": [],
+                "lrt_statistic": [],
+                "p_value": [],
+                "decision": [],
+                "sample_size": [],
+                "missing_count": [],
+                "coef_lag1_mnar": [],
+                "auc_mar": [],
+                "auc_mnar": [],
+                "loglik_mar": [],
+                "loglik_mnar": [],
+            }
+        )
 
     return pl.DataFrame(results)
 
@@ -279,22 +300,26 @@ def plot_missingness_vs_lag_quantiles(
     id_col="id",
     clock_col="clock",
     q=10,
-    save_path: str = None,
+    save_path: str | Path | None = None,
     save_results: bool = True,
 ):
     # convert polars -> pandas if needed
     if hasattr(df, "to_pandas"):
-        df = df.sort([id_col, clock_col]).to_pandas()
+        pandas_df = df.sort([id_col, clock_col]).to_pandas()
     if hasattr(mask_df, "to_pandas"):
-        mask_df = mask_df.sort([id_col, clock_col]).to_pandas()
+        pandas_mask_df = mask_df.sort([id_col, clock_col]).to_pandas()
 
     lag_col = f"{var}_lag1"
-    if lag_col not in df.columns:
+    if lag_col not in pandas_df.columns:
         raise ValueError(f"{lag_col} not found. Create lag first.")
 
     # build a working frame
     work = pd.DataFrame(
-        {id_col: df[id_col], "lag": df[lag_col], "missing": mask_df[var].astype(int)}
+        {
+            id_col: pandas_df[id_col],
+            "lag": pandas_df[lag_col],
+            "missing": pandas_mask_df[var].astype(int),
+        }
     ).dropna(subset=["lag"])  # only rows with a valid lag
 
     # global quantile bins

@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import numpy as np
 import plotly.figure_factory as ff
 import plotly.graph_objects as go
@@ -12,7 +14,7 @@ from scipy.stats import chi2_contingency
 
 def chi2_intervariable_imperfection_statistics(
     mask_df: pl.DataFrame, col_i: str, col_j: str
-) -> float:
+) -> dict:
     """
     Calculate chi-squared statistics for imperfection association between two columns.
     Computes the chi-squared statistic, p-value, degrees of freedom, observed counts,
@@ -79,8 +81,8 @@ def chi2_intervariable_imperfection_statistics(
 
 def chi2_intervariable_imperfection_matrix(
     mask_df: pl.DataFrame,
-    cols: list[str] = None,
-    save_path: str = None,
+    cols: list[str] | None = None,
+    save_path: str | Path | None = None,
     save_results: bool = True,
 ) -> pl.DataFrame:
     """
@@ -88,13 +90,12 @@ def chi2_intervariable_imperfection_matrix(
 
     Parameters:
         mask_df (pl.DataFrame): DataFrame with binary values indicating imperfection (1 for missing/noisy/indicated, 0 for present/normal/expected).
-        cols (list): List of column names to include in the matrix.
-        save_path (str): Path to save the resulting DataFrame as a CSV file. If None, the DataFrame will not be saved.
+        cols (list[str] | None): List of column names to include in the matrix. If None, all columns except id_col, clock_col, and clock_no_col will be used.
+        save_path (str | Path | None): Path to save the resulting DataFrame as a CSV file. If None, the DataFrame will not be saved.
         save_results (bool): Whether to save the results to the specified path.
 
     Returns:
         pl.DataFrame: A DataFrame containing the chi-squared statistics for imperfection association.
-                      The statistics are stored in a struct for each pair of variables.
     """
     if cols is None:
         cols = mask_df.columns
@@ -155,7 +156,7 @@ def lagged_cross_correlation(
     id_col: str = "id",
     clock_no_col: str = "clock_no",
     max_lag: int = 10,
-):
+) -> pl.DataFrame:
     """
     Compute lagged cross-correlation between imperfection indicators of two variables.
     The function computes the cross-correlation for lags from -max_lag to +max_lag, where negative lags indicate
@@ -178,8 +179,7 @@ def lagged_cross_correlation(
         save_results (bool): Whether to save the results (default: True).
 
     Returns:
-        lags (np.ndarray): Array of lag values (negative to positive).
-        crosscorrs (np.ndarray): Cross-correlation at each lag.
+        pl.DataFrame: A DataFrame with columns "lag" and "crosscorr" containing the lag values and corresponding cross-correlation coefficients.
     """
     if max_lag < 1:
         raise ValueError("max_lag must be at least 1.")
@@ -226,21 +226,21 @@ def lagged_cross_correlation(
 
 def co_imperfection_heatmap(
     corr_matrix: pl.DataFrame,
-    renderer: str = "browser",
-    save_path: str = None,
+    renderer: str | None = "browser",
+    save_path: str | Path | None = None,
     save_results: bool = True,
-) -> None:
+) -> go.Figure:
     """
     Visualizes the correlation matrix of imperfection using Plotly.
 
     Parameters:
         corr_matrix (pl.DataFrame): DataFrame containing the correlation matrix of imperfection extracted by `symmetric_correlation`.
         renderer (str): Renderer to use for displaying the plot. Default is "browser".
-        save_path (str): Path to save the figure. If None, the figure will not be saved.
+        save_path (str | Path | None): Path to save the figure. If None, the figure will not be saved.
         save_results (bool): Whether to save the figure to the specified path. Default is False.
 
     Returns:
-        None: Displays the heatmap visualization.
+        figure: A Plotly figure object representing the heatmap of the correlation matrix of imperfection.
     """
     cols = corr_matrix.columns
     corr_matrix_values = corr_matrix.to_pandas().values
@@ -281,25 +281,25 @@ def co_imperfection_heatmap(
 
 def co_imperfection_dendogram(
     corr_matrix: pl.DataFrame,
-    renderer: str = "browser",
-    save_path: str = None,
+    renderer: str | None = "browser",
+    save_path: str | Path | None = None,
     save_results: bool = True,
-) -> None:
+) -> go.Figure:
     """
     Visualizes the co-imperfection dendrogram using scipy and plotly.
 
     Parameters:
         corr_matrix (pl.DataFrame): DataFrame containing the correlation matrix of imperfection extracted by `symmetric_correlation`.
         renderer (str): Renderer to use for displaying the plot. Default is "browser".
-        save_path (str): Path to save the figure. If None, the figure will not be saved.
+        save_path (str | Path | None): Path to save the figure. If None, the figure will not be saved.
         save_results (bool): Whether to save the figure to the specified path. Default is False.
     Returns:
-        None: Displays the dendrogram visualization.
+        figure: A Plotly figure object representing the dendrogram of the correlation matrix of imperfection.
     """
-    corr_matrix = corr_matrix.to_pandas()
+    pd_corr_matrix = corr_matrix.to_pandas()
 
     # 1) Compute the raw distance matrix
-    dist = 1.0 - corr_matrix.values
+    dist = 1.0 - pd_corr_matrix.values
 
     # 2) Force exact symmetry (average with its transpose)
     dist = (dist + dist.T) / 2.0
@@ -313,9 +313,9 @@ def co_imperfection_dendogram(
 
     # 5) Create the dendrogram
     fig = ff.create_dendrogram(
-        corr_matrix.values,
+        pd_corr_matrix.values,
         orientation="bottom",
-        labels=corr_matrix.columns.tolist(),
+        labels=pd_corr_matrix.columns.tolist(),
         linkagefun=lambda x: linkage,
     )
     fig.update_layout(

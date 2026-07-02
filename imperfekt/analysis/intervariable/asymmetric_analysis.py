@@ -1,4 +1,5 @@
 from datetime import timedelta
+from pathlib import Path
 
 import numpy as np
 import polars as pl
@@ -101,6 +102,8 @@ def extract_observations_on_conditional(
         .rename({c + "_real": c for c in df.columns if c not in {id_col, clock_col, indicated_col}})
         .collect()
     )
+    if type(result_df) is not pl.DataFrame:
+        raise ValueError("Expected result_df to be a Polars DataFrame after collection.")
 
     return result_df
 
@@ -153,6 +156,8 @@ def extract_observations_on_conditional_window(
         )
         .collect()
     )
+    if type(imperfect_df) is not pl.DataFrame:
+        raise ValueError("Expected imperfect_df to be a Polars DataFrame after collection.")
 
     if imperfect_df.is_empty():
         return df.clear().with_columns(pl.Series("imperfect_time", [], dtype=df[clock_col].dtype))
@@ -207,7 +212,7 @@ def asymmetric_missing_observation_lagged_correlation(
     id_col: str = "id",
     clock_no_col: str = "clock_no",
     max_lag: int = 10,
-):
+) -> pl.DataFrame:
     """
     Compute lagged rank biserial correlation between missing indicators of one variable and
     observations of another. This is an asymmetric analysis where we compare the missing
@@ -226,9 +231,7 @@ def asymmetric_missing_observation_lagged_correlation(
         max_lag (int): Maximum lag (both positive and negative) to compute.
 
     Returns:
-        tuple: (lags, crosscorrs)
-            lags (np.ndarray): Array of lag values (negative to positive).
-            crosscorrs (np.ndarray): Cross-correlation at each lag.
+        pl.DataFrame: DataFrame with columns 'lag' and 'crosscorr' indicating the lag and corresponding rank biserial correlation.
     """
     if indicated_col not in mask_df.columns:
         raise ValueError(f"Column '{indicated_col}' not found in mask DataFrame.")
@@ -306,8 +309,8 @@ def get_singular_correlation_from_lagged(ccfs: pl.DataFrame):
 def asymmetric_missing_observation_matrix(
     df: pl.DataFrame,
     mask_df: pl.DataFrame,
-    missing_cols: list[str] = None,
-    observation_cols: list[str] = None,
+    missing_cols: list[str] | None = None,
+    observation_cols: list[str] | None = None,
     id_col: str = "id",
     clock_no_col: str = "clock_no",
     max_lag: int = 10,
@@ -421,11 +424,11 @@ def asymmetric_statistical_comparison(
     clock_col: str = "clock",
     clock_no_col: str = "clock_no",
     statistical_tests: bool = True,
-    save_path: str = None,
+    save_path: str | Path | None = None,
     save_results: bool = True,
     plot_library: str = "matplotlib",
-    renderer: str = None,
-) -> dict:
+    renderer: str | None = None,
+) -> tuple:
     """
     Comprehensive statistical comparison between observed values when a variable is missing
     vs. when it's not missing. Combines correlation analysis with conditional distribution analysis.
@@ -439,13 +442,13 @@ def asymmetric_statistical_comparison(
         clock_col (str): Time column.
         clock_no_col (str): Time ordering column.
         statistical_tests (bool): Whether to perform statistical tests (t-test, etc.).
-        save_path (str): Path to save results (if any).
+        save_path (str | Path | None): Path to save results (if any).
         save_results (bool): Whether results should be stored at save_path.
         plot_library (str): Library to use for plotting (e.g., "matplotlib", "plotly").
-        renderer (str): Renderer to use for plots (e.g., "notebook", "browser").
+        renderer (str | None): Renderer to use for plots (e.g., "notebook", "browser").
 
     Returns:
-        dict: Comprehensive analysis results including:
+        tuple: Comprehensive analysis results including:
             - correlation: Direct correlation between missing indicator and observations (lag=0)
             - conditional_stats: Statistics for observations when missing vs. not missing
             - statistical_tests: Results of statistical tests if requested
@@ -543,7 +546,11 @@ def asymmetric_statistical_comparison(
     if save_path and save_results:
         # Write results to CSV
         results_df = pl.DataFrame([results])
-        results_df.write_csv(save_path / "statistical_comparison_results.csv")
+        results_df.write_csv(
+            save_path / "statistical_comparison_results.csv"
+            if isinstance(save_path, Path)
+            else f"{save_path}/statistical_comparison_results.csv"
+        )
         print(f"Statistical comparison results saved to {save_path}")
 
     hist_overlay_fig = visualization_utils.plot_overlay_histograms(
@@ -559,7 +566,9 @@ def asymmetric_statistical_comparison(
         histnorm="probability",
         library=plot_library,
         renderer=renderer,
-        save_path=save_path / f"{observation_col}_o_{indicated_col}_i_overlay_histogram.png",
+        save_path=save_path / f"{observation_col}_o_{indicated_col}_i_overlay_histogram.png"
+        if isinstance(save_path, Path)
+        else f"{save_path}/{observation_col}_o_{indicated_col}_i_overlay_histogram.png",
         save_results=save_results,
     )
 
@@ -574,7 +583,9 @@ def asymmetric_statistical_comparison(
         yaxis_title=f"{observation_col}",
         library=plot_library,
         renderer=renderer,
-        save_path=save_path / f"{observation_col}_o_{indicated_col}_i_boxplot.png",
+        save_path=save_path / f"{observation_col}_o_{indicated_col}_i_boxplot.png"
+        if isinstance(save_path, Path)
+        else f"{save_path}/{observation_col}_o_{indicated_col}_i_boxplot.png",
         save_results=save_results,
     )
 
@@ -657,7 +668,7 @@ if __name__ == "__main__":
     print("\n=== Comprehensive Statistical Comparison ===")
     # Detailed statistical analysis comparing observations when A is missing vs present
     try:
-        comparison = asymmetric_statistical_comparison(
+        comparison, _, _ = asymmetric_statistical_comparison(
             df=df,
             mask_df=mask_df,
             indicated_col="A",

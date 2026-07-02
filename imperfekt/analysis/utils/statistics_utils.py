@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import numpy as np
 import polars as pl
 import scipy.stats as stats
@@ -8,7 +10,7 @@ def check_ttest_assumptions(
     df1: pl.DataFrame,
     df2: pl.DataFrame,
     col1: str,
-    col2: str = None,
+    col2: str | None = None,
     alpha: float = 0.05,
     print_info: bool = True,
 ) -> dict:
@@ -73,8 +75,8 @@ def check_ttest_assumptions(
 def t_test_two_subgroups(
     df1: pl.DataFrame,
     df2: pl.DataFrame,
-    col1: str = None,
-    col2: str = None,
+    col1: str | None = None,
+    col2: str | None = None,
     print_info: bool = True,
 ) -> tuple:
     if col1 is None:
@@ -133,13 +135,13 @@ def t_test_two_subgroups(
 def mwu_two_subgroups(
     df1: pl.DataFrame,
     df2: pl.DataFrame,
-    col1: str = None,
-    col2: str = None,
+    col1: str | None = None,
+    col2: str | None = None,
     alpha: float = 0.05,
     print_info: bool = True,
-    save_path: str = None,
+    save_path: str | Path | None = None,
     save_results: bool = True,
-) -> tuple:
+) -> dict:
     if col1 is None:
         raise ValueError("col1 must be specified")
     if col2 is None:

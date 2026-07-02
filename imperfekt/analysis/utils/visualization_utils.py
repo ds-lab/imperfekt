@@ -9,13 +9,13 @@ import polars as pl
 def plot_histogram(
     df: pl.DataFrame,
     x: str,
-    title: str = None,
+    title: str | None = None,
     nbins: int = 50,
-    xaxis_title: str = None,
-    yaxis_title: str = None,
+    xaxis_title: str | None = None,
+    yaxis_title: str | None = None,
     library: str = "matplotlib",
-    renderer: str = None,
-    save_path: str = None,
+    renderer: str | None = None,
+    save_path: str | Path | None = None,
     save_results: bool = False,
 ) -> "go.Figure | plt.Figure":
     """
@@ -111,15 +111,15 @@ def plot_histogram(
 def plot_boxplot(
     df: pl.DataFrame,
     y: str,
-    x: str = None,
-    title: str = None,
-    yaxis_title: str = None,
-    xaxis_title: str = None,
-    category_order: str = None,
-    boxpoints: str = None,
+    x: str | None = None,
+    title: str | None = None,
+    yaxis_title: str | None = None,
+    xaxis_title: str | None = None,
+    category_order: list[str] | None = None,
+    boxpoints: str | None = None,
     library: str = "matplotlib",
-    renderer: str = None,
-    save_path: str = None,
+    renderer: str | None = None,
+    save_path: str | Path | None = None,
     save_results: bool = False,
 ) -> "go.Figure | plt.Figure":
     """
@@ -128,22 +128,22 @@ def plot_boxplot(
     Parameters:
         df (pl.DataFrame): DataFrame containing the data to plot.
         y (str): Column name to plot on the y-axis.
-        x (str): Column name to plot on the x-axis (for grouped boxplots), default is None.
-        title (str): Title of the plot.
-        yaxis_title (str): Title for the y-axis.
-        xaxis_title (str): Title for the x-axis.
-        category_order (list[str]): Order of categories for the x-axis, default is None.
-        boxpoints (str): Type of boxpoints to show, default is None. Options include 'all', 'outliers', 'suspectedoutliers', 'false'.
+        x (str | None): Column name to plot on the x-axis (for grouped boxplots), default is None.
+        title (str | None): Title of the plot.
+        yaxis_title (str | None): Title for the y-axis.
+        xaxis_title (str | None): Title for the x-axis.
+        category_order (list[str] | None): Order of categories for the x-axis, default is None.
+        boxpoints (str | None): Type of boxpoints to show, default is None. Options include 'all', 'outliers', 'suspectedoutliers', 'false'.
                         If set to None, no boxpoints will be shown.
         library (str): Visualization library to use, default is "matplotlib". Other options include "matplotlib".
-        renderer (str): Renderer for displaying the plot, default is "notebook_connected". Set to None to disable rendering.
+        renderer (str | None): Renderer for displaying the plot, default is "notebook_connected". Set to None to disable rendering.
                         Available renderers:
                         ['plotly_mimetype', 'jupyterlab', 'nteract', 'vscode',
                         'notebook', 'notebook_connected', 'kaggle', 'azure', 'colab',
                         'cocalc', 'databricks', 'json', 'png', 'jpeg', 'jpg', 'svg',
                         'pdf', 'browser', 'firefox', 'chrome', 'chromium', 'iframe',
                         'iframe_connected', 'sphinx_gallery', 'sphinx_gallery_png']
-        save_path (str): Path to save the plot image, default is None.
+        save_path (str | Path | None): Path to save the plot image, default is None.
         save_results (bool): Whether to save the plot image, default is True.
 
     Returns:
@@ -219,7 +219,7 @@ def plot_boxplot(
 
             box_plot = ax.boxplot(
                 box_data,
-                labels=labels,
+                tick_labels=labels,
                 patch_artist=True,
                 showmeans=True,
                 meanline=True,
@@ -268,14 +268,14 @@ def plot_boxplot(
 def plot_violin(
     df: pl.DataFrame,
     y: str,
-    x: str = None,
-    title: str = None,
-    yaxis_title: str = None,
-    xaxis_title: str = None,
-    category_order: str = None,
+    x: str | None = None,
+    title: str | None = None,
+    yaxis_title: str | None = None,
+    xaxis_title: str | None = None,
+    category_order: str | None = None,
     library: str = "matplotlib",
-    renderer: str = None,
-    save_path: str = None,
+    renderer: str | None = None,
+    save_path: str | Path | None = None,
     save_results: bool = False,
 ) -> "go.Figure | plt.Figure":
     """
@@ -284,13 +284,13 @@ def plot_violin(
     Parameters:
         df (pl.DataFrame): DataFrame containing the data to plot.
         y (str): Column name to plot on the y-axis.
-        x (str): Column name to plot on the x-axis (for grouped violin plots), default is None.
-        title (str): Title of the plot.
-        yaxis_title (str): Title for the y-axis.
-        xaxis_title (str): Title for the x-axis.
-        category_order (list[str]): Order of categories for the x-axis, default is None.
+        x (str | None): Column name to plot on the x-axis (for grouped violin plots), default is None.
+        title (str | None): Title of the plot.
+        yaxis_title (str | None): Title for the y-axis.
+        xaxis_title (str | None): Title for the x-axis.
+        category_order (list[str] | None): Order of categories for the x-axis, default is None.
         library (str): Visualization library to use, default is "matplotlib". Other options include "plotly".
-        renderer (str): Renderer for displaying the plot, default is "notebook_connected". Set to None to disable rendering.
+        renderer (str | None): Renderer for displaying the plot, default is "notebook_connected". Set to None to disable rendering.
     """
     # Input validation
     if y not in df.columns:
@@ -389,12 +389,12 @@ def plot_scatter(
     x: np.ndarray,
     y: np.ndarray,
     mode: str = "lines+markers",
-    title: str = None,
-    xaxis_title: str = None,
-    yaxis_title: str = None,
+    title: str | None = None,
+    xaxis_title: str | None = None,
+    yaxis_title: str | None = None,
     library: str = "matplotlib",
-    renderer: str = None,
-    save_path: str = None,
+    renderer: str | None = None,
+    save_path: str | Path | None = None,
     save_results: bool = False,
 ) -> "go.Figure | plt.Figure":
     """
@@ -403,8 +403,8 @@ def plot_scatter(
         x (np.ndarray): Data to plot on the x-axis.
         y (np.ndarray): Data to plot on the y-axis.
         mode (str): Mode for the scatter plot, default is 'lines+markers'. Other options include 'markers', 'lines', etc.
-        title (str): Title of the plot.
-        xaxis_title (str): Title for the x-axis.
+        title (str | None): Title of the plot.
+        xaxis_title (str | None): Title for the x-axis.
         yaxis_title (str): Title for the y-axis.
         library (str): Visualization library to use, default is "matplotlib". Other options include "matplotlib".
         renderer (str): Renderer for displaying the plot, default is "notebook_connected". Set to None to disable rendering.
@@ -490,15 +490,15 @@ def plot_scatter(
 def plot_overlay_histograms(
     dfs: list[pl.DataFrame],
     x: str,
-    group_names: list[str] = None,
-    title: str = None,
+    group_names: list[str] | None = None,
+    title: str | None = None,
     nbins: int = 50,
-    xaxis_title: str = None,
-    yaxis_title: str = None,
-    histnorm: str = None,
+    xaxis_title: str | None = None,
+    yaxis_title: str | None = None,
+    histnorm: str | None = None,
     library: str = "matplotlib",
-    renderer: str = None,
-    save_path: str = None,
+    renderer: str | None = None,
+    save_path: str | Path | None = None,
     save_results: bool = False,
 ) -> "go.Figure | plt.Figure":
     """
@@ -698,13 +698,13 @@ def plot_overlay_histograms(
 def plot_multi_boxplot(
     dfs: list[pl.DataFrame],
     y: str,
-    group_names: list[str] = None,
-    title: str = None,
-    yaxis_title: str = None,
-    boxpoints: str = None,
+    group_names: list[str] | None = None,
+    title: str | None = None,
+    yaxis_title: str | None = None,
+    boxpoints: str | None = None,
     library: str = "matplotlib",
-    renderer: str = None,
-    save_path: str = None,
+    renderer: str | None = None,
+    save_path: str | Path | None = None,
     save_results: bool = False,
 ) -> "go.Figure | plt.Figure":
     """
@@ -725,7 +725,7 @@ def plot_multi_boxplot(
                         'cocalc', 'databricks', 'json', 'png', 'jpeg', 'jpg', 'svg',
                         'pdf', 'browser', 'firefox', 'chrome', 'chromium', 'iframe',
                         'iframe_connected', 'sphinx_gallery', 'sphinx_gallery_png']
-        save_path (str): Path to save the plot image, default is None.
+        save_path (str | Path | None): Path to save the plot image, default is None.
         save_results (bool): Whether to save the plot image, default is True.
 
     Returns:
@@ -864,8 +864,8 @@ def plot_qq(
     xaxis_title: str = "Theoretical Quantiles",
     yaxis_title: str = "Sample Quantiles",
     library: str = "matplotlib",
-    renderer: str = None,
-    save_path: str = None,
+    renderer: str | None = None,
+    save_path: str | Path | None = None,
     save_results: bool = False,
 ) -> "plt.Figure":
     """
@@ -874,12 +874,12 @@ def plot_qq(
     Parameters:
         data (np.ndarray): Data to compare against the theoretical distribution.
         dist (str): Theoretical distribution to compare against, default is "norm" (normal distribution).
-        title (str): Title of the plot.
-        xaxis_title (str): Title for the x-axis.
-        yaxis_title (str): Title for the y-axis.
+        title (str | None): Title of the plot.
+        xaxis_title (str | None): Title for the x-axis.
+        yaxis_title (str | None): Title for the y-axis.
         library (str): Visualization library to use, default is "matplotlib".
-        renderer (str): Renderer for displaying the plot, default is "notebook_connected". Set to None to disable rendering.
-        save_path (str): Path to save the plot image, default is None.
+        renderer (str | None): Renderer for displaying the plot, default is "notebook_connected". Set to None to disable rendering.
+        save_path (str | Path | None): Path to save the plot image, default is None.
         save_results (bool): Whether to save the plot image, default is True.
 
     Returns:

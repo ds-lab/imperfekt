@@ -29,7 +29,7 @@ class IntervariableHTMLReportGenerator:
         self.analysis = analysis_instance
 
     def generate_report(
-        self, report_path: str = "intervariable_report.html", title: str = None
+        self, report_path: str = "intervariable_report.html", title: str | None = None
     ) -> Path:
         """
         Generates an HTML report from the analysis results.
@@ -53,7 +53,7 @@ class IntervariableHTMLReportGenerator:
         return full_report_path
 
     # Update the _generate_html_content method to include all sections
-    def _generate_html_content(self, title: str = None) -> str:
+    def _generate_html_content(self, title: str | None = None) -> str:
         """Generates the complete HTML content for the report."""
         # Get current timestamp
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")

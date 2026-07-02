@@ -29,11 +29,7 @@ def _compute_intervals(df: pl.DataFrame, id_col: str, clock_col: str) -> pl.Data
         )
     else:
         interval_expr = (
-            pl.col(clock_col)
-            .diff()
-            .over(id_col)
-            .cast(pl.Float64)
-            .alias("interval_seconds")
+            pl.col(clock_col).diff().over(id_col).cast(pl.Float64).alias("interval_seconds")
         )
 
     return sorted_df.with_columns(interval_expr)
@@ -70,21 +66,15 @@ def add_interval_features(
     interval_df = _compute_intervals(df, id_col, clock_col)
 
     # Entity-level mean and std of intervals
-    entity_stats = (
-        interval_df
-        .group_by(id_col)
-        .agg(
-            pl.col("interval_seconds").mean().alias("_entity_mean"),
-            pl.col("interval_seconds").std().alias("_entity_std"),
-        )
+    entity_stats = interval_df.group_by(id_col).agg(
+        pl.col("interval_seconds").mean().alias("_entity_mean"),
+        pl.col("interval_seconds").std().alias("_entity_std"),
     )
 
     interval_df = interval_df.join(entity_stats, on=id_col, how="left")
 
     interval_df = interval_df.with_columns(
-        pl.when(
-            pl.col("_entity_std").is_not_null() & (pl.col("_entity_std") > 0)
-        )
+        pl.when(pl.col("_entity_std").is_not_null() & (pl.col("_entity_std") > 0))
         .then((pl.col("interval_seconds") - pl.col("_entity_mean")) / pl.col("_entity_std"))
         .otherwise(None)
         .alias("interval_z_score"),
@@ -92,9 +82,7 @@ def add_interval_features(
 
     # Local CV: rolling std / rolling mean over the last 5 intervals
     local_cv_expr = (
-        pl.when(
-            pl.col("interval_seconds").rolling_mean(window_size=5).over(id_col) > 0
-        )
+        pl.when(pl.col("interval_seconds").rolling_mean(window_size=5).over(id_col) > 0)
         .then(
             pl.col("interval_seconds").rolling_std(window_size=5).over(id_col)
             / pl.col("interval_seconds").rolling_mean(window_size=5).over(id_col)
@@ -149,34 +137,21 @@ def add_windowed_acceleration(
         The DataFrame with four new columns added.
     """
     accel_col = "interval_acceleration"
-    mean_col = f"rolling_mean_acceleration_{window_size}"
-    abs_col = f"rolling_abs_acceleration_{window_size}"
-    std_col = f"rolling_std_acceleration_{window_size}"
+    mean_col = "rolling_mean_acceleration"
+    abs_col = "rolling_abs_acceleration"
+    std_col = "rolling_std_acceleration"
     new_cols = [accel_col, mean_col, abs_col, std_col]
 
     interval_df = _compute_intervals(df, id_col, clock_col)
 
     interval_df = interval_df.with_columns(
-        pl.col("interval_seconds")
-        .diff()
-        .over(id_col)
-        .alias(accel_col)
+        pl.col("interval_seconds").diff().over(id_col).alias(accel_col)
     )
 
     interval_df = interval_df.with_columns(
-        pl.col(accel_col)
-        .rolling_mean(window_size=window_size)
-        .over(id_col)
-        .alias(mean_col),
-        pl.col(accel_col)
-        .abs()
-        .rolling_mean(window_size=window_size)
-        .over(id_col)
-        .alias(abs_col),
-        pl.col(accel_col)
-        .rolling_std(window_size=window_size)
-        .over(id_col)
-        .alias(std_col),
+        pl.col(accel_col).rolling_mean(window_size=window_size).over(id_col).alias(mean_col),
+        pl.col(accel_col).abs().rolling_mean(window_size=window_size).over(id_col).alias(abs_col),
+        pl.col(accel_col).rolling_std(window_size=window_size).over(id_col).alias(std_col),
     )
 
     result = interval_df.select([id_col, clock_col] + new_cols)

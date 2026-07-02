@@ -1,9 +1,12 @@
+import itertools
 import traceback
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import numpy as np
 import plotly.graph_objects as go
 import polars as pl
+from scipy.stats import spearmanr
 
 from imperfekt.analysis.intervariable import (
     asymmetric_analysis,
@@ -18,31 +21,33 @@ from imperfekt.config.global_settings import VITALS
 
 class IntervariablePlots:
     def __init__(self):
-        self.rs_case_level_histogram: go.Figure | plt.Figure = None
-        self.rs_case_level_boxplot: go.Figure | plt.Figure = None
-        self.mcar_upset_plot: go.Figure = None
-        self.sc_lag_scatter_plot: dict[str, go.Figure | plt.Figure] = {}
-        self.sc_correlation_heatmap: go.Figure | plt.Figure = None
-        self.sc_correlation_dendogram: go.Figure | plt.Figure = None
-        self.ac_multi_histogram: dict[str, go.Figure | plt.Figure] = {}
-        self.ac_multi_boxplot: dict[str, go.Figure | plt.Figure] = {}
-        self.ac_lag_scatter_plot: dict[str, go.Figure | plt.Figure] = {}
+        self.rs_case_level_histogram: go.Figure | plt.Figure | None = None
+        self.rs_case_level_boxplot: go.Figure | plt.Figure | None = None
+        self.mcar_upset_plot: go.Figure | None = None
+        self.sc_lag_scatter_plot: dict[str, go.Figure | plt.Figure | None] = {}
+        self.sc_correlation_heatmap: go.Figure | plt.Figure | None = None
+        self.sc_correlation_dendogram: go.Figure | plt.Figure | None = None
+        self.ac_multi_histogram: dict[str, go.Figure | plt.Figure | None] = {}
+        self.ac_multi_boxplot: dict[str, go.Figure | plt.Figure | None] = {}
+        self.ac_lag_scatter_plot: dict[str, go.Figure | plt.Figure | None] = {}
 
 
 class IntervariableResults:
     def __init__(self):
         # Analytical results
-        self.rs_overall_statistics: pl.DataFrame = None
-        self.rs_case_level_statistics: pl.DataFrame = None
-        self.rs_empty_statistics: pl.DataFrame = None
-        self.rs_empty_case_level_statistics: pl.DataFrame = None
-        self.mcar_results: pl.DataFrame = None
-        self.mar_mnar_results: pl.DataFrame = None
-        self.sc_symmetric_correlation: pl.DataFrame = None
-        self.sc_chi2_intervariable_matrix: pl.DataFrame = None
+        self.rs_overall_statistics: pl.DataFrame | None = None
+        self.rs_case_level_statistics: pl.DataFrame | None = None
+        self.rs_empty_statistics: tuple | None = None
+        self.rs_empty_case_level_statistics: pl.DataFrame | None = None
+        self.mcar_results: dict = {}
+        self.mar_mnar_results: pl.DataFrame | None = None
+        self.sc_symmetric_correlation: pl.DataFrame | None = None
+        self.sc_chi2_intervariable_matrix: pl.DataFrame | None = None
         self.sc_symmetric_crosscorrelation: dict[str, pl.DataFrame] = {}
         self.ac_asymmetric_statistical_results: dict[str, pl.DataFrame] = {}
         self.ac_asymmetric_crosscorrelation: dict[str, pl.DataFrame] = {}
+        self.iv_composite_scores: pl.DataFrame | None = None
+        self.iv_pairwise_correlations: pl.DataFrame | None = None
         # Plots
         self.plots = IntervariablePlots()
 
@@ -100,15 +105,20 @@ class IntervariableImperfection:
         self,
         df: pl.DataFrame,
         imperfection: str = "missingness",
-        mask_df: pl.DataFrame = None,
+        mask_df: pl.DataFrame | None = None,
         id_col: str = "id",
         clock_col: str = "clock",
         clock_no_col: str = "clock_no",
-        cols: list = None,
+        cols: list | None = None,
         alpha: float = 0.05,
-        save_path: Path = None,
+        save_path: Path | None = None,
         plot_library: str = "matplotlib",
-        renderer: str = "notebook_connected",
+        renderer: str | None = "notebook_connected",
+        plausibility_method: str | None = "iqr",
+        plausibility_threshold: float = 1.5,
+        plausibility_scope: str = "global",
+        plausibility_missing_as: str = "ignore",
+        plausibility_reference_ranges: dict | None = None,
     ):
         if not renderer and not save_path:
             pretty_printing.rich_warning(
@@ -126,7 +136,9 @@ class IntervariableImperfection:
 
         # Binary indicator mask for imperfection
         self.imperfection = imperfection
-        if imperfection == "missingness" or mask_df is None:
+        if mask_df is not None:
+            self.mask = mask_df
+        elif imperfection == "missingness":
             self.mask = masking.create_missingness_mask(
                 df=self.df,
                 id_col=self.id_col,
@@ -134,13 +146,24 @@ class IntervariableImperfection:
                 clock_no_col=self.clock_no_col,
                 cols=self.cols,
             )
+        elif imperfection == "plausibility":
+            self.mask = masking.create_plausibility_mask(
+                df=self.df,
+                id_col=self.id_col,
+                clock_col=self.clock_col,
+                clock_no_col=self.clock_no_col,
+                cols=self.cols,
+                method=plausibility_method,
+                threshold=plausibility_threshold,
+                scope=plausibility_scope,
+                missing_as=plausibility_missing_as,
+                reference_ranges=plausibility_reference_ranges,
+            )
         else:
-            if mask_df is not None:
-                self.mask = mask_df
-            else:
-                raise ValueError(
-                    f"Unsupported imperfection type: {imperfection}. Supported types: 'missingness'."
-                )
+            raise ValueError(
+                f"Unsupported imperfection type: {imperfection!r}. "
+                "Supported types: 'missingness', 'plausibility'."
+            )
 
         self.alpha = alpha
         # Result persistence
@@ -185,10 +208,10 @@ class IntervariableImperfection:
                 id_col=self.id_col,
                 clock_col=self.clock_col,
                 clock_no_col=self.clock_no_col,
-                save_path=self._path(f"{new_path_level_name}/all_null_rows_stats.csv"),
+                save_path=self._path(f"{new_path_level_name}/all_null_rows_stats.csv") if self.save_path else None,
                 save_results=save_results,
             )
-            if self.renderer:
+            if self.renderer and self.results.rs_empty_statistics is not None:
                 pretty_printing.rich_info(
                     f"All null rows: {self.results.rs_empty_statistics[0]}, Percentage: {self.results.rs_empty_statistics[1]:.4f}%\n"
                 )
@@ -242,28 +265,29 @@ class IntervariableImperfection:
             id_col=self.id_col,
             clock_col=self.clock_col,
             clock_no_col=self.clock_no_col,
-            save_path=self._path(f"{new_path_level_name}/row_completeness_stats.csv"),
+            save_path=self._path(f"{new_path_level_name}/row_completeness_stats.csv") if self.save_path else None,
             save_results=save_results,
         )
 
-        if self.renderer:
+        if self.renderer and self.results.rs_overall_statistics is not None:
             print("Row Completeness Stats:")
             print(
                 self.results.rs_overall_statistics.describe(interpolation="linear"),
                 "\n",
             )
 
-        visualization_utils.plot_histogram(
-            self.results.rs_overall_statistics,
-            x="indicated_vars_pct",
-            title="Imperfect Variables Per Row Percentage",
-            xaxis_title="Imperfect Variables Percentage",
-            yaxis_title="#Cases",
-            renderer=self.renderer,
-            save_path=self._path(f"{new_path_level_name}/indicated_vars_pct_histogram.png"),
-            save_results=save_results,
-            library=self.plot_library,
-        )
+        if self.results.rs_overall_statistics is not None:
+            visualization_utils.plot_histogram(
+                self.results.rs_overall_statistics,
+                x="indicated_vars_pct",
+                title="Imperfect Variables Per Row Percentage",
+                xaxis_title="Imperfect Variables Percentage",
+                yaxis_title="#Cases",
+                renderer=self.renderer,
+                save_path=self._path(f"{new_path_level_name}/indicated_vars_pct_histogram.png"),
+                save_results=save_results,
+                library=self.plot_library,
+            )
 
         # 4. Imperfect-variable stats per ID
         self.results.rs_case_level_statistics = row_statistics.analyze_row_imperfection_per_id(
@@ -272,7 +296,7 @@ class IntervariableImperfection:
             id_col=self.id_col,
             clock_col=self.clock_col,
             clock_no_col=self.clock_no_col,
-            save_path=self._path(f"{new_path_level_name}/row_completeness_per_id_stats.csv"),
+            save_path=self._path(f"{new_path_level_name}/row_completeness_per_id_stats.csv") if self.save_path else None,
             save_results=save_results,
         )
 
@@ -320,7 +344,7 @@ class IntervariableImperfection:
             save_results (bool): Whether to save the results to files. Defaults to True.
 
         Returns:
-            dict: A dictionary containing the results of Little's MCAR test.
+            pl.DataFrame: A DataFrame containing the results of Little's MCAR test.
         """
         new_path_level_name = "mcar_test"
         if self.save_path and save_results:
@@ -358,13 +382,14 @@ class IntervariableImperfection:
         )
 
         if self.save_path and save_results:
-            # Save the results to a CSV file if a path is provided
-            patterns_csv = self.results.mcar_results["patterns"].write_csv(None, separator="\t")
-            with open(self._path(f"{new_path_level_name}/little_mcar_test_results.csv"), "w") as f:
-                f.write("mcar_test:\n")
-                f.write(str(self.results.mcar_results["little_mcar_test"]) + "\n")
-                f.write("Patterns:\n")
-                f.write(patterns_csv)
+            out_path = self._path(f"{new_path_level_name}/little_mcar_test_results.csv")
+            if out_path:
+                patterns_csv = self.results.mcar_results["patterns"].write_csv(None, separator="\t")
+                with open(out_path, "w") as f:
+                    f.write("mcar_test:\n")
+                    f.write(str(self.results.mcar_results["little_mcar_test"]) + "\n")
+                    f.write("Patterns:\n")
+                    f.write(patterns_csv)
 
         return self
 
@@ -509,6 +534,7 @@ class IntervariableImperfection:
                             max_lag=max_lag,
                         )
                     )
+
                     if self.renderer:
                         print(f"Cross-correlation between {col_x} and {col_y}:")
                         print(
@@ -523,8 +549,8 @@ class IntervariableImperfection:
 
                     self.results.plots.sc_lag_scatter_plot[pair_key] = (
                         visualization_utils.plot_scatter(
-                            x=self.results.sc_symmetric_crosscorrelation[pair_key]["lag"],
-                            y=self.results.sc_symmetric_crosscorrelation[pair_key]["crosscorr"],
+                            x=self.results.sc_symmetric_crosscorrelation[pair_key]["lag"].to_numpy(),
+                            y=self.results.sc_symmetric_crosscorrelation[pair_key]["crosscorr"].to_numpy(),
                             title=f"{col_x} - {col_y} Cross-Correlation",
                             xaxis_title="Lags",
                             yaxis_title="Phi coefficient",
@@ -552,6 +578,8 @@ class IntervariableImperfection:
                 ),
             )
             for k, v in self.results.sc_symmetric_crosscorrelation.items():
+                if v is None:
+                    continue
                 all_ccfs = pl.concat(
                     [
                         all_ccfs,
@@ -691,8 +719,8 @@ class IntervariableImperfection:
                     # Visualize lagged correlations
                     self.results.plots.ac_lag_scatter_plot[pair_key] = (
                         visualization_utils.plot_scatter(
-                            x=self.results.ac_asymmetric_crosscorrelation[pair_key]["lag"],
-                            y=self.results.ac_asymmetric_crosscorrelation[pair_key]["crosscorr"],
+                            x=self.results.ac_asymmetric_crosscorrelation[pair_key]["lag"].to_numpy(),
+                            y=self.results.ac_asymmetric_crosscorrelation[pair_key]["crosscorr"].to_numpy(),
                             title=f"Asymmetric Correlation: Missing {indicated_col} vs Observed {obs_col}",
                             xaxis_title="Lag",
                             yaxis_title="Rank-Biserial Correlation",
@@ -722,14 +750,16 @@ class IntervariableImperfection:
             )
             for k, v in self.results.ac_asymmetric_crosscorrelation.items():
                 # replace all nulls in v with 0
+                if v is None:
+                    continue
                 all_ccfs = pl.concat(
                     [
                         all_ccfs,
                         pl.DataFrame(
                             {
                                 "col_pair": k,
-                                "lag": v["lag"],
-                                "crosscorr": v["crosscorr"],
+                                "lag": v["lag"].to_numpy(),
+                                "crosscorr": v["crosscorr"].to_numpy(),
                             }
                         ),
                     ],
@@ -842,7 +872,7 @@ class IntervariableImperfection:
             print(f"🚩Error building intervariable summary: {e}")
 
     def generate_html_report(
-        self, report_path: str = "intervariable_report.html", title: str = None
+        self, report_path: str = "intervariable_report.html", title: str | None = None
     ):
         """Generates an HTML report from the analysis results."""
         if not self.save_path:
@@ -860,7 +890,7 @@ class IntervariableImperfection:
 
         pretty_printing.rich_info(f"✅ Report generated at [green]{full_report_path}[/green]")
 
-    def _path(self, subpath: str) -> Path:
+    def _path(self, subpath: str) -> Path | None:
         if self.save_path:
             return self.save_path / subpath
         return None
@@ -885,8 +915,14 @@ class IntervariableImperfection:
                 rs = self.results.rs_overall_statistics
                 _add("rs_indicated_vars_pct_mean", rs["indicated_vars_pct"].mean())
                 _add("rs_indicated_vars_pct_median", rs["indicated_vars_pct"].median())
-                _add("rs_indicated_vars_pct_p25", rs["indicated_vars_pct"].quantile(0.25, interpolation="nearest"))
-                _add("rs_indicated_vars_pct_p75", rs["indicated_vars_pct"].quantile(0.75, interpolation="nearest"))
+                _add(
+                    "rs_indicated_vars_pct_p25",
+                    rs["indicated_vars_pct"].quantile(0.25, interpolation="nearest"),
+                )
+                _add(
+                    "rs_indicated_vars_pct_p75",
+                    rs["indicated_vars_pct"].quantile(0.75, interpolation="nearest"),
+                )
                 _add("rs_indicated_vars_pct_max", rs["indicated_vars_pct"].max())
             except Exception:
                 pass
@@ -910,7 +946,11 @@ class IntervariableImperfection:
                     _add(f"mar_mnar_{col}_p_value", row.get("p_value"))
                     auc_mar = row.get("auc_mar")
                     auc_mnar = row.get("auc_mnar")
-                    auc_delta = (auc_mnar - auc_mar) if (auc_mar is not None and auc_mnar is not None) else None
+                    auc_delta = (
+                        (auc_mnar - auc_mar)
+                        if (auc_mar is not None and auc_mnar is not None)
+                        else None
+                    )
                     _add(f"mar_mnar_{col}_auc_delta", auc_delta)
             except Exception:
                 pass
@@ -930,6 +970,8 @@ class IntervariableImperfection:
         if self.results.ac_asymmetric_crosscorrelation:
             try:
                 for pair_key, ccf_df in self.results.ac_asymmetric_crosscorrelation.items():
+                    if ccf_df is None:
+                        continue
                     lag0_rows = ccf_df.filter(pl.col("lag") == 0)
                     if not lag0_rows.is_empty():
                         val = lag0_rows["crosscorr"][0]
@@ -949,6 +991,227 @@ class IntervariableImperfection:
             summary.write_csv(self.save_path / "intervariable_summary.csv")
 
         return summary
+
+    # Axes where a *lower* value means *more* imperfect (none for intervariable — all higher = more imperfect)
+    INVERTED_AXES: frozenset = frozenset()
+
+    @staticmethod
+    def assign_strata(
+        df: pl.DataFrame,
+        axis_x: str,
+        axis_y: str,
+        x_median: float,
+        y_median: float,
+    ) -> pl.DataFrame:
+        """
+        Assign each row to an intervariable imperfection quadrant by median-bisecting two axes.
+
+        Returns df with an added "intervariable_stratum" column
+        (Q_complete / Q_alpha / Q_beta / Q_gamma / Q_delta / null).
+
+        Q_complete is assigned to cases with avg_indicated_vars_pct == 0 (no missingness).
+        All axes: higher = more imperfect (no inverted axes).
+
+        Parameters:
+            df (pl.DataFrame): Input DataFrame containing the axis columns and avg_indicated_vars_pct.
+            axis_x (str): Column name for the x-axis metric.
+            axis_y (str): Column name for the y-axis metric.
+            x_median (float): Median threshold for the x-axis.
+            y_median (float): Median threshold for the y-axis.
+        """
+        x_high = pl.col(axis_x) > x_median
+        y_high = pl.col(axis_y) > y_median
+        return df.with_columns(
+            pl.when(pl.col("avg_indicated_vars_pct") == 0)
+            .then(pl.lit("Q_complete"))
+            .when(pl.col(axis_x).is_null() | pl.col(axis_y).is_null())
+            .then(pl.lit(None))
+            .when(~x_high & ~y_high)
+            .then(pl.lit("Q_alpha"))
+            .when(x_high & ~y_high)
+            .then(pl.lit("Q_beta"))
+            .when(~x_high & y_high)
+            .then(pl.lit("Q_gamma"))
+            .when(x_high & y_high)
+            .then(pl.lit("Q_delta"))
+            .otherwise(pl.lit(None))
+            .alias("intervariable_stratum")
+        )
+
+    def composite_score(
+        self,
+        save_results: bool = True,
+    ) -> "IntervariableImperfection":
+        """
+        Assign each case to one of five intervariable imperfection strata.
+
+        Strata: Q_complete (no missingness), Q_alpha / Q_beta / Q_gamma / Q_delta
+        (quadrants from median-bisecting the two most orthogonal candidate axes).
+
+        Candidate axes (per case, across all variables):
+            avg_indicated_vars_pct      : mean row-level imperfection
+            co_missingness_concentration: avg imperfection on rows that have any
+            missing_variable_breadth    : fraction of variables ever missing
+            pattern_entropy             : entropy of co-dropout bitmask patterns
+            max_pairwise_co_missingness : strongest pairwise Jaccard co-dropout
+
+        Runs row_statistics() automatically if not already done.
+
+        Results stored in:
+            self.results.iv_composite_scores       — one row per case
+            self.results.iv_pairwise_correlations  — correlation table used to select axes
+
+        Parameters:
+            save_results (bool): Whether to save CSVs to save_path.
+
+        Returns:
+            self: Supports method chaining.
+        """
+        new_path_level_name = "composite_score"
+        path = None
+        if self.save_path and save_results:
+            path = self.save_path / new_path_level_name
+            path.mkdir(parents=True, exist_ok=True)
+
+        if self.results.rs_case_level_statistics is None:
+            self.row_statistics(save_results=save_results)
+
+        base = row_statistics.compute_case_intervariable_metrics(
+            mask_df=self.mask,
+            cols=self.cols,
+            id_col=self.id_col,
+            clock_col=self.clock_col,
+            clock_no_col=self.clock_no_col,
+        )
+        if base is None:
+            pretty_printing.rich_warning(
+                "Could not compute intervariable metrics for composite score (no complete cases?)."
+            )
+            return self
+
+        candidate_axes = [
+            "avg_indicated_vars_pct",
+            "co_missingness_concentration",
+            "missing_variable_breadth",
+            "pattern_entropy",
+            "max_pairwise_co_missingness",
+        ]
+
+        def _pair_corr(df: pl.DataFrame, col_x: str, col_y: str) -> tuple:
+            pair_df = df.select([col_x, col_y]).drop_nulls([col_x, col_y])
+            n = pair_df.height
+            if n < 3:
+                return float("nan"), n
+            x = pair_df[col_x].to_numpy()
+            y = pair_df[col_y].to_numpy()
+            if np.nanstd(x) == 0 or np.nanstd(y) == 0:
+                return float("nan"), n
+            return float(spearmanr(x, y).statistic), n
+
+        # Axis selection and median computation are done on imperfect cases only.
+        # Q_complete cases (avg_indicated_vars_pct == 0) are structurally excluded from
+        # quadrant assignment and would bias the median thresholds if included.
+        imperfect_base = base.filter(pl.col("avg_indicated_vars_pct") > 0)
+
+        corr_rows = []
+        present_axes = [a for a in candidate_axes if a in imperfect_base.columns]
+        for ax_x, ax_y in itertools.combinations(present_axes, 2):
+            corr, n_complete = _pair_corr(imperfect_base, ax_x, ax_y)
+            corr_rows.append(
+                {
+                    "axis_1": ax_x,
+                    "axis_2": ax_y,
+                    "corr": corr,
+                    "abs_corr": float(abs(corr)) if not np.isnan(corr) else float("nan"),
+                    "n_complete_cases": n_complete,
+                }
+            )
+
+        corr_table = pl.DataFrame(corr_rows).sort(
+            ["abs_corr", "n_complete_cases"], descending=[False, True], nulls_last=True
+        )
+        self.results.iv_pairwise_correlations = corr_table
+
+        valid_pairs = corr_table.filter(pl.col("corr").is_not_null())
+        if valid_pairs.height > 0:
+            selected = valid_pairs.row(0, named=True)
+            axis_x = selected["axis_1"]
+            axis_y = selected["axis_2"]
+            selected_corr = float(selected["corr"])
+        else:
+            axis_x = "avg_indicated_vars_pct"
+            axis_y = "missing_variable_breadth"
+            selected_corr = float("nan")
+            pretty_printing.rich_warning(
+                "Could not compute pairwise Spearman correlations for axis selection "
+                "(too few complete cases or zero-variance metrics). "
+                f"Falling back to default axes: {axis_x} × {axis_y}."
+            )
+
+        complete_mask = pl.col(axis_x).is_not_null() & pl.col(axis_y).is_not_null()
+        complete_df = imperfect_base.filter(complete_mask)
+
+        scores = base.clone()
+        if complete_df.height < 2:
+            scores = scores.with_columns(
+                pl.lit(axis_x).alias("axis_x"),
+                pl.lit(axis_y).alias("axis_y"),
+                pl.lit(None).cast(pl.Float64).alias("axis_pair_corr"),
+                pl.lit(None).cast(pl.Float64).alias("axis_x_median_threshold"),
+                pl.lit(None).cast(pl.Float64).alias("axis_y_median_threshold"),
+                pl.lit(None).cast(pl.Utf8).alias("intervariable_stratum"),
+            )
+        else:
+            x_median = float(complete_df.select(pl.col(axis_x).cast(pl.Float64).median()).item() or 0.0)
+            y_median = float(complete_df.select(pl.col(axis_y).cast(pl.Float64).median()).item() or 0.0)
+            scores = self.assign_strata(scores, axis_x, axis_y, x_median, y_median)
+            scores = scores.with_columns(
+                pl.lit(axis_x).alias("axis_x"),
+                pl.lit(axis_y).alias("axis_y"),
+                pl.lit(selected_corr).alias("axis_pair_corr"),
+                pl.lit(x_median).alias("axis_x_median_threshold"),
+                pl.lit(y_median).alias("axis_y_median_threshold"),
+            )
+
+        scores = scores.select(
+            [
+                self.id_col,
+                "avg_indicated_vars_pct",
+                "co_missingness_concentration",
+                "missing_variable_breadth",
+                "pattern_entropy",
+                "max_pairwise_co_missingness",
+                "axis_x",
+                "axis_y",
+                "axis_pair_corr",
+                "axis_x_median_threshold",
+                "axis_y_median_threshold",
+                "intervariable_stratum",
+            ]
+        )
+        self.results.iv_composite_scores = scores
+
+        if self.renderer:
+            stratified = scores.filter(pl.col("intervariable_stratum").is_not_null())
+            total = len(stratified)
+            prevalence = (
+                stratified
+                .group_by("intervariable_stratum")
+                .agg(pl.len().alias("n"))
+                .with_columns((pl.col("n") / total * 100).round(1).alias("pct"))
+                .sort("intervariable_stratum")
+            )
+            pretty_printing.rich_info(
+                f"Intervariable composite score — selected axes: {axis_x} × {axis_y} "
+                f"(corr={selected_corr:.3f})"
+            )
+            print(prevalence)
+
+        if save_results and path:
+            scores.write_csv(path / "case_scores.csv")
+            corr_table.write_csv(path / "pairwise_axis_correlations.csv")
+
+        return self
 
     def _generate_clock_no_col(self):
         self.df = self.df.sort([self.id_col, self.clock_col])
@@ -993,6 +1256,7 @@ if __name__ == "__main__":
     base_B = datetime(2023, 1, 2, 8, 0, 0)
 
     from datetime import timedelta
+
     times_A = [base_A + timedelta(seconds=60 * i) for i in range(10)]
     times_B = [base_B + timedelta(seconds=60 * i) for i in range(10)]
 
@@ -1004,10 +1268,9 @@ if __name__ == "__main__":
     bp_A = [120.0, 118.0, 122.0, 119.0, 121.0, None, 117.0, 123.0, 120.0, 119.0]
     bp_B = [115.0, 116.0, 114.0, 117.0, 115.0, 118.0, 116.0, 119.0, None, 114.0]
 
-    rows = (
-        [("A", times_A[i], hr_A[i], bp_A[i], i) for i in range(10)]
-        + [("B", times_B[i], hr_B[i], bp_B[i], i) for i in range(10)]
-    )
+    rows = [("A", times_A[i], hr_A[i], bp_A[i], i) for i in range(10)] + [
+        ("B", times_B[i], hr_B[i], bp_B[i], i) for i in range(10)
+    ]
 
     df = pl.DataFrame(
         rows,

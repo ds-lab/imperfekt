@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import numpy as np
 import plotly.graph_objects as go
 import polars as pl
@@ -9,7 +11,7 @@ from imperfekt.analysis.utils import pretty_printing
 
 def get_patterns(
     mask_df: pl.DataFrame,
-    cols: list[str] = None,
+    cols: list[str] | None = None,
 ) -> pl.DataFrame:
     """
     Extract patterns from the DataFrame based on the mask DataFrame.
@@ -36,7 +38,7 @@ def little_mcar(
     mask_df: pl.DataFrame,
     id_col: str = "id",
     clock_col: str = "clock",
-    cols: list[str] = None,
+    cols: list[str] | None = None,
     alpha: float = 0.05,
 ) -> dict:
     """
@@ -69,7 +71,9 @@ def little_mcar(
         )
     # Sum flags across columns to get one integer pattern per row
     flag_cols = [f"flag_{j}" for j in range(m)]
-    df = df.with_columns(sum(pl.col(f) for f in flag_cols).alias("mdp")).drop(flag_cols)
+    df = df.with_columns(pl.sum_horizontal(pl.col(f) for f in flag_cols).alias("mdp")).drop(
+        flag_cols
+    )
 
     # Remap patterns to consecutive indices 0..num_patterns−1
     uniq = df.select("mdp").unique().sort("mdp").to_series().to_list()
@@ -133,9 +137,9 @@ def mcar_test(
     mask_df: pl.DataFrame,
     id_col: str = "id",
     clock_col: str = "clock",
-    cols: list[str] = None,
+    cols: list[str] | None = None,
     alpha: float = 0.05,
-) -> tuple[dict, tuple]:
+) -> dict:
     """
     Perform Little's MCAR test on the specified columns of a DataFrame.
     Answers the questions:
@@ -151,12 +155,7 @@ def mcar_test(
         alpha (float): The significance level for the test.
 
     Returns:
-        tuple:
-            dict: Results of the MCAR test.
-                little_mcar_test: Result of Little's MCAR test answers the question “Across all variables together, is there any systematic structure to who is imperfect?”
-                    - The p-values of t-tests for each pair of features. Null hypothesis for cell `pvalues[h,j]`: data in feature `h` is Missing Completely At Random (MCAR) with respect to feature `j` for all `h,j` in `{1,2,...m}`.
-                patterns: DataFrame containing the patterns.
-            tuple: Shape (rows, columns) of the DataFrame after excluding non-numeric columns.
+        dict: A dictionary containing the results of Little's MCAR test and the patterns of imperfection.
     """
     if cols is None:
         cols = df.columns
@@ -201,12 +200,12 @@ def mcar_test(
 
 def upset(
     mask_df: pl.DataFrame,
-    cols: list[str] = None,
+    cols: list[str] | None = None,
     id_col: str = "id",
     clock_col: str = "clock",
     clock_no_col: str = "clock_no",
-    renderer: str = "browser",
-    save_path: str = None,
+    renderer: str | None = "browser",
+    save_path: str | Path | None = None,
     save_results: bool = True,
 ) -> go.Figure:
     """
@@ -219,7 +218,7 @@ def upset(
         clock_col (str): Column name for the clock column. Default is "clock".
         clock_no_col (str): Column name for the clock number column. Default is "clock_no".
         renderer (str): Renderer to use for displaying the plot. Default is "browser".
-        save_path (str): Path to save the figure. If None, the figure will not be saved.
+        save_path (str | Path | None): Path to save the figure. If None, the figure will not be saved.
         save_results (bool): Whether to save the figure to the specified path. Default is False.
 
     Returns:
@@ -229,7 +228,7 @@ def upset(
         cols = [c for c in mask_df.columns if c not in [id_col, clock_col, clock_no_col]]
     mask_df = mask_df.select(cols)
     pd_df = mask_df.to_pandas().astype(bool)
-    upset = upsetty.Upset.generate_plot(pd_df)
+    upset = upsetty.Upset.generate_plot(pd_df)  # ty:ignore[invalid-argument-type]
     if renderer:
         upset.show(renderer=renderer, width=1600, height=600)
     if save_results and save_path:

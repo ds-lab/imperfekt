@@ -10,7 +10,7 @@ import polars as pl
 def extract_values_near_indicated(
     df: pl.DataFrame,
     mask_df: pl.DataFrame,
-    col: str = None,
+    col: str,
     id_col: str = "id",
     clock_col: str = "clock",
     window: timedelta = timedelta(minutes=5),
@@ -23,7 +23,7 @@ def extract_values_near_indicated(
     Parameters:
         df (pl.DataFrame): The DataFrame containing the data.
         mask_df (pl.DataFrame): A DataFrame with a mask indicating imperfect values (1=missing/noisy/indicated, 0=observed/normal).
-        col (str): The name of the column to analyze for imperfect values.
+        col (str | None): The name of the column to analyze for imperfect values.
         id_col (str): The name of the column containing unique identifiers for grouping. Default is 'id'.
         clock_col (str): The name of the column containing time information.
         window (timedelta): The time window around each imperfect instance to consider for aggregation.
