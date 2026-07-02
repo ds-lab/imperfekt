@@ -23,6 +23,7 @@ from plotting import (
     plot_cross_dataset_delta_heatmap,
     plot_delta_auprc_heatmap,
     plot_shap_importance_bar,
+    plot_shap_importance_pct_heatmap,
     plot_shap_stability_scatter,
     plot_spearman_orthogonality,
     render_stratum_axis_table,
@@ -36,7 +37,8 @@ from examples.nemsis.cv import (
 from config import AXES_INTRAVARIABLE, AXES_INTERVARIABLE
 
 # ── Toggle flags ──────────────────────────────────────────────────────────────
-ENABLE_SHAP = True  # Set to False to skip SHAP analysis (expensive)
+ENABLE_SHAP = False  # Set to False to skip SHAP analysis (expensive)
+ENABLE_SCENARIO_5 = False  # Set to False to skip Scenario 5 (miscellaneous evaluations)
 
 # ── Pipeline filters for Scenario 5 by-stratum plots ─────────────────────────
 # Set to None to include all pipelines found in CSV.
@@ -59,6 +61,8 @@ GRU_PIPELINES: list[str] | None = [
 # ── Constants ─────────────────────────────────────────────────────────────────
 _STRATUM_ORDER = ["Q_alpha", "Q_beta", "Q_gamma", "Q_delta"]
 _HEATMAP_ROWS = ["overall", "Q_alpha", "Q_beta", "Q_gamma", "Q_delta"]
+_FULL_STRATA_ORDER = ["overall", "Q_complete", "Q_alpha", "Q_beta", "Q_gamma", "Q_delta"]
+_FULL_RES_METRICS = ["auprc", "auprc_lift", "auroc", "brier_skill_score"]
 
 _AXIS_METRICS = {
     "intervariable": [
@@ -106,6 +110,96 @@ def _filter_pipelines(
 def _gru_shap_filename(label: str) -> str:
     _, config_name, arm_name = label.removeprefix("Setup ").split("/")
     return f"{config_name}_{arm_name}.npz"
+
+
+def _render_full_results_latex(
+    data: dict[str, dict],
+    label: str,
+    caption: str,
+    output_path: Path,
+) -> None:
+    """Write a full-results LaTeX longtable for one (model, dataset) combo."""
+    _METRIC_HEADERS = {
+        "auprc": "AUPRC",
+        "auprc_lift": "AUPRC Lift",
+        "auroc": "AUROC",
+        "brier_skill_score": "BSS",
+    }
+
+    def _fmt(metric_dict: dict | None) -> str:
+        if metric_dict is None:
+            return "--"
+        m, ci = metric_dict["mean"], metric_dict.get("ci")
+        if m is None or (isinstance(m, float) and m != m):
+            return "--"
+        if ci is None or (isinstance(ci, float) and ci != ci):
+            return f"{m:.4f}"
+        return f"{m:.4f} ({ci:.4f})"
+
+    col_spec = "ll" + "r" * len(_FULL_RES_METRICS)
+    header_row = " & ".join(
+        ["Pipeline", "Stratum"]
+        + [_METRIC_HEADERS[m] for m in _FULL_RES_METRICS]
+    )
+
+    lines: list[str] = []
+    lines.append(r"{\footnotesize")
+    lines.append(r"\begin{longtable}{" + col_spec + "}")
+    lines.append(r"\caption{" + caption + r"}")
+    lines.append(r"\label{" + label + r"} \\")
+    lines.append(r"\toprule")
+    lines.append(header_row + r" \\")
+    lines.append(r"\midrule")
+    lines.append(r"\endfirsthead")
+    lines.append(r"\toprule")
+    lines.append(header_row + r" \\")
+    lines.append(r"\midrule")
+    lines.append(r"\endhead")
+    lines.append(r"\bottomrule")
+    lines.append(r"\endfoot")
+
+    for pipe_idx, (pipe_name, summary) in enumerate(data.items()):
+        if pipe_name.startswith("_"):
+            continue
+        for st_idx, stratum in enumerate(_FULL_STRATA_ORDER):
+            stratum_data = summary.get(stratum, {})
+            if not isinstance(stratum_data, dict):
+                stratum_data = {}
+            cells = [_fmt(stratum_data.get(m)) for m in _FULL_RES_METRICS]
+            pipe_cell = pipe_name.replace("_", r"\_") if st_idx == 0 else ""
+            stratum_display = stratum.replace("_", r"\_")
+            lines.append(
+                " & ".join([pipe_cell, stratum_display] + cells) + r" \\"
+            )
+        if pipe_idx < len(data) - 1:
+            lines.append(r"\midrule")
+
+    lines.append(r"\end{longtable}")
+    lines.append(r"}")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("\n".join(lines) + "\n")
+
+    csv_rows: list[dict] = []
+    for pipe_name, summary in data.items():
+        if pipe_name.startswith("_"):
+            continue
+        for stratum in _FULL_STRATA_ORDER:
+            stratum_data = summary.get(stratum, {})
+            if not isinstance(stratum_data, dict):
+                stratum_data = {}
+            row: dict = {"pipeline": pipe_name, "stratum": stratum}
+            for m in _FULL_RES_METRICS:
+                md = stratum_data.get(m)
+                if md and md.get("mean") is not None:
+                    row[f"{m}_mean"] = md["mean"]
+                    row[f"{m}_ci"] = md.get("ci")
+                else:
+                    row[f"{m}_mean"] = None
+                    row[f"{m}_ci"] = None
+            csv_rows.append(row)
+    csv_path = output_path.with_suffix(".csv")
+    pl.DataFrame(csv_rows).write_csv(csv_path)
 
 
 def _build_feature_distribution_tables(
@@ -177,17 +271,49 @@ for _mode in ("intervariable", "intravariable"):
     print(f"  Stratification mode: {_mode}")
     print(f"{'─' * 72}")
 
+    # ── SCENARIO 0: Full-Results LaTeX Tables ────────────────────────────────
+    print(f"  [{_mode}] Scenario 0: Full-Results LaTeX Tables")
+    _s0_dir = _mode_dir / "scenario_0"
+    _s0_dir.mkdir(parents=True, exist_ok=True)
+
+    for ds_label, xgb_data, gru_data in [
+        ("nemsis", nemsis_xgb, nemsis_gru),
+        ("mcmed", mcmed_xgb, mcmed_gru),
+    ]:
+        _render_full_results_latex(
+            xgb_data,
+            label=f"tab:full_res_xgboost_{ds_label}",
+            caption=f"Full XGBoost results on {ds_label.upper()} ({_mode}, {_axes_tag})",
+            output_path=_s0_dir / f"full_res_xgboost_{ds_label}.tex",
+        )
+        _render_full_results_latex(
+            gru_data,
+            label=f"tab:full_res_gru_{ds_label}",
+            caption=f"Full GRU results on {ds_label.upper()} ({_mode}, {_axes_tag})",
+            output_path=_s0_dir / f"full_res_gru_{ds_label}.tex",
+        )
+
     # ── SCENARIO 1: Stratum Characterisation ──────────────────────────────────
     print(f"  [{_mode}] Scenario 1: Stratum Characterisation Tables")
     _s1_dir = _mode_dir / "scenario_1"
     _s1_dir.mkdir(parents=True, exist_ok=True)
 
-    for ds_label, xgb_data in [("nemsis", nemsis_xgb), ("mcmed", mcmed_xgb)]:
+    for ds_label, xgb_data, gru_data in [
+        ("nemsis", nemsis_xgb, nemsis_gru),
+        ("mcmed", mcmed_xgb, mcmed_gru),
+    ]:
         _baseline = xgb_data.get("Setup ma_pk_in/base", {})
         if _baseline:
+            _gru_any = next(iter(gru_data.values()), {})
+            _sizes = {
+                s: int(round(m["total"]["mean"]))
+                for s, m in _gru_any.items()
+                if isinstance(m, dict) and m.get("total")
+            } or None
             render_stratum_axis_table(
                 _baseline, _AXIS_METRICS[_mode],
                 _s1_dir / f"{ds_label}_stratum_axis_metrics.csv",
+                stratum_sizes=_sizes,
             )
 
     # ── SCENARIO 2: Imputation ────────────────────────────────────────────────
@@ -340,7 +466,7 @@ for _mode in ("intervariable", "intravariable"):
     _s4_dir = _mode_dir / "scenario_4"
     _s4_dir.mkdir(parents=True, exist_ok=True)
 
-    # 4a. Cross-model heatmap (XGBoost +miss vs GRU +mask)
+    # 4a. Cross-model heatmap (XGBoost +miss vs GRU +miss)
     _s4_combined_nemsis = {**nemsis_xgb, **nemsis_gru}
     _s4_combined_mcmed = {**mcmed_xgb, **mcmed_gru}
     _s4_datasets = {"NEMSIS": _s4_combined_nemsis, "MC-MED": _s4_combined_mcmed}
@@ -350,7 +476,7 @@ for _mode in ("intervariable", "intravariable"):
         baselines={"NEMSIS": "Setup ma_pk_in/base", "MC-MED": "Setup ma_pk_in/base"},
         variants=[
             ("XGBoost\n+miss", {"NEMSIS": "Setup ma_pk_in/base+miss", "MC-MED": "Setup ma_pk_in/base+miss"}),
-            ("GRU\n+mask", {"NEMSIS": "Setup gru/ma_pk_in/mask", "MC-MED": "Setup gru/ma_pk_in/mask"}),
+            ("GRU\n+miss", {"NEMSIS": "Setup gru/ma_pk_in/mask", "MC-MED": "Setup gru/ma_pk_in/mask"}),
         ],
         variant_baselines=[
             {"NEMSIS": "Setup ma_pk_in/base", "MC-MED": "Setup ma_pk_in/base"},
@@ -396,6 +522,20 @@ for _mode in ("intervariable", "intravariable"):
                 gru_sums,
                 _s4_dir / f"{ds_name}_gru_mask_by_stratum.png",
             )
+
+    # 4c. SHAP importance percentage heatmap (reads pre-computed CSVs)
+    _shap_pct_csvs = {
+        "NEMSIS": _s4_dir / "shap" / "nemsis" / "xgboost_shap_importance.csv",
+        "MC-MED": _s4_dir / "shap" / "mcmed" / "xgboost_shap_importance.csv",
+    }
+    if all(p.exists() for p in _shap_pct_csvs.values()):
+        plot_shap_importance_pct_heatmap(
+            _shap_pct_csvs,
+            _s4_dir / "shap_importance_pct_heatmap.png",
+            row_order=_HEATMAP_ROWS,
+        )
+    else:
+        print(f"  [{_mode}] Skipping SHAP pct heatmap (CSVs not found)")
 
     # ── 4c: SHAP Interpretability ─────────────────────────────────────────────
     if ENABLE_SHAP:
@@ -557,6 +697,9 @@ for _mode in ("intervariable", "intravariable"):
                 print(f"    [{ds_name}] No GRU SHAP .npz files found")
 
     # ── SCENARIO 5: Miscellaneous Evaluations ─────────────────────────────────
+    if not ENABLE_SCENARIO_5:
+        print(f"  [{_mode}] Scenario 5: SKIPPED (ENABLE_SCENARIO_5=False)")
+        continue
     print(f"  [{_mode}] Scenario 5: Miscellaneous Evaluations")
     _s5_dir = _mode_dir / "scenario_5"
     _s5_dir.mkdir(parents=True, exist_ok=True)

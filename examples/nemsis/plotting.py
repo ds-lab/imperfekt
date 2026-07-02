@@ -678,20 +678,20 @@ def plot_spearman_orthogonality(
     cmap = plt.get_cmap("coolwarm").copy()
     cmap.set_bad(color="#f2f2f2")
     im = ax.imshow(rho_mat, aspect="auto", cmap=cmap, vmin=-1.0, vmax=1.0)
-    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04).set_label("Spearman rho")
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label("Spearman rho", fontsize=16)
+    cbar.ax.tick_params(labelsize=14)
     ax.set_xticks(np.arange(len(phys_order)))
-    ax.set_xticklabels(phys_order, rotation=40, ha="right", fontsize=7)
+    ax.set_xticklabels(phys_order, rotation=40, ha="right", fontsize=16)
     ax.set_yticks(np.arange(len(struct_order)))
-    ax.set_yticklabels(struct_order, fontsize=7)
-    ax.set_xlabel("Physiology features (SHAP-ranked)")
-    ax.set_ylabel("Structural features (SHAP-ranked)")
+    ax.set_yticklabels(struct_order, fontsize=16)
     for i, sf in enumerate(struct_order):
         for j, pf in enumerate(phys_order):
             v = rho_mat[i, j]
             e = effect_lookup.get((sf, pf), "")
             marker = {"moderate_overlap": "^", "high_overlap": "^^"}.get(e, "")
             ax.text(j, i, "NA" if np.isnan(v) else f"{v:.2f}{marker}",
-                    ha="center", va="center", fontsize=7, color="black")
+                    ha="center", va="center", fontsize=18, color="black")
 
     heatmap_path = figures_dir / f"spearman_heatmap_{safe}.png"
     fig.tight_layout()
@@ -826,12 +826,117 @@ def plot_cross_dataset_delta_heatmap(
     print(f"Plot saved to {save_path}")
 
 
+def plot_shap_importance_pct_heatmap(
+    shap_csvs: dict[str, Path],
+    save_path: Path,
+    *,
+    pipeline: str = "Setup ma_pk_in/base+miss",
+    structural_group: str = "structural_miss",
+    row_order: list[str] | None = None,
+) -> None:
+    """Heatmap showing percentage of total |SHAP| importance from structural features.
+
+    Parameters
+    ----------
+    shap_csvs : {"NEMSIS": Path, "MC-MED": Path}
+        Paths to xgboost_shap_importance.csv per dataset.
+    save_path : Path
+        Output image path.
+    pipeline : str
+        Pipeline to filter to.
+    structural_group : str
+        The feature_group value identifying imperfection features.
+    row_order : list[str] | None
+        Strata to show as rows.
+    """
+    if row_order is None:
+        row_order = ["overall", "Q_alpha", "Q_beta", "Q_gamma", "Q_delta"]
+
+    dataset_names = list(shap_csvs.keys())
+    n_cols = len(dataset_names)
+    n_rows = len(row_order)
+
+    pct_mat = np.full((n_rows, n_cols), np.nan)
+    ci_mat = np.full((n_rows, n_cols), np.nan)
+
+    for col_idx, ds_name in enumerate(dataset_names):
+        csv_path = shap_csvs[ds_name]
+        if not csv_path.exists():
+            continue
+        df = pl.read_csv(csv_path).filter(pl.col("pipeline") == pipeline)
+
+        for row_idx, stratum in enumerate(row_order):
+            sdf = df.filter(pl.col("stratum") == stratum)
+            if sdf.is_empty():
+                continue
+
+            structural = sdf.filter(pl.col("feature_group") == structural_group)
+            rest = sdf.filter(pl.col("feature_group") != structural_group)
+
+            a = structural["mean_abs_shap_mean"].sum()
+            r = rest["mean_abs_shap_mean"].sum()
+            b = a + r
+            if b == 0:
+                continue
+
+            pct = (a / b) * 100
+
+            sigma_a = np.sqrt((structural["mean_abs_shap_std"] ** 2).sum())
+            sigma_r = np.sqrt((rest["mean_abs_shap_std"] ** 2).sum())
+            sigma_pct = (100 / b**2) * np.sqrt(r**2 * sigma_a**2 + a**2 * sigma_r**2)
+
+            pct_mat[row_idx, col_idx] = pct
+            ci_mat[row_idx, col_idx] = sigma_pct
+
+    col_labels = [f"{ds}\nXGBoost" for ds in dataset_names]
+
+    fig_w = max(6.0, 2.8 * n_cols + 2.5)
+    fig_h = max(5.0, 1.1 * n_rows + 2.5)
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+
+    cmap = plt.get_cmap("OrRd").copy()
+    cmap.set_bad(color="#f2f2f2")
+    vmin = 0.0
+    vmax = np.nanmax(pct_mat) if np.isfinite(pct_mat).any() else 100.0
+    vmax = max(vmax, 1.0)
+    im = ax.imshow(pct_mat, aspect="auto", cmap=cmap, vmin=vmin, vmax=vmax)
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label("% total |SHAP| from DI features", fontsize=16)
+    cbar.ax.tick_params(labelsize=14)
+
+    ax.set_xticks(np.arange(n_cols))
+    ax.set_xticklabels(col_labels, rotation=0, ha="center", fontsize=20)
+    ax.set_yticks(np.arange(n_rows))
+    ax.set_yticklabels(row_order, fontsize=20, rotation=90, va="center")
+
+    for i in range(1, n_cols):
+        ax.axvline(i - 0.5, color="black", linewidth=1.5)
+
+    for i in range(n_rows):
+        for j in range(n_cols):
+            v = pct_mat[i, j]
+            if np.isnan(v):
+                ax.text(j, i, "—", ha="center", va="center", fontsize=18, color="#888888")
+                continue
+            color = "white" if v > 0.6 * vmax else "black"
+            ci_v = ci_mat[i, j]
+            cell_text = f"{v:.1f}%\n±{ci_v:.1f}%"
+            ax.text(j, i, cell_text, ha="center", va="center", fontsize=26, color=color)
+
+    fig.tight_layout()
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(save_path, format="png", dpi=200)
+    plt.close(fig)
+    print(f"Plot saved to {save_path}")
+
+
 def render_stratum_axis_table(
     summary: dict[str, dict],
     axis_metrics: list[str],
     save_path: Path,
     *,
     strata_order: list[str] | None = None,
+    stratum_sizes: dict[str, int] | None = None,
 ) -> None:
     """Render a table of axis metrics (mean +/- ci) per stratum from one pipeline summary.
 
@@ -845,6 +950,9 @@ def render_stratum_axis_table(
         Where to write the CSV.
     strata_order : list[str] | None
         Row ordering of strata.
+    stratum_sizes : dict[str, int] | None
+        Fallback stratum → n_encounters map (used when ``total`` is absent
+        from *summary*).
     """
     if strata_order is None:
         strata_order = ["Q_alpha", "Q_beta", "Q_gamma", "Q_delta"]
@@ -855,6 +963,13 @@ def render_stratum_axis_table(
         if not s_data or not isinstance(s_data, dict):
             continue
         row: dict = {"stratum": stratum}
+        total = s_data.get("total")
+        if total:
+            row["n_encounters"] = int(round(total["mean"]))
+        elif stratum_sizes and stratum in stratum_sizes:
+            row["n_encounters"] = stratum_sizes[stratum]
+        else:
+            row["n_encounters"] = None
         for m in axis_metrics:
             val = s_data.get(m)
             if val:
@@ -872,6 +987,13 @@ def render_stratum_axis_table(
         return
 
     df = pl.DataFrame(rows)
+    cohort_total = df["n_encounters"].sum()
+    if cohort_total and cohort_total > 0:
+        df = df.with_columns(
+            (pl.col("n_encounters") / cohort_total * 100)
+            .round(1)
+            .alias("pct_of_cohort")
+        )
     save_path.parent.mkdir(parents=True, exist_ok=True)
     df.write_csv(save_path)
     print(f"Stratum axis table saved to {save_path}")
