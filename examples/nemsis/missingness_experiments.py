@@ -2,45 +2,30 @@
 import polars as pl
 
 from imperfekt import Imperfekt
-from config import COHORT_MIN_READINGS, COHORT_WINDOW_MINUTES, VITAL_COLS, load_cohort
+from config import VITAL_COLS, load_cohort, RESULTS_DIR
 
 pl.Config.set_tbl_cols(8)
 pl.Config.set_tbl_rows(25)
 
 df = load_cohort()
-# %%
-df_filtered = df.with_columns(
-    pl.col("clock").min().over("id").alias("_start_clock")
-).with_columns(
-    ((pl.col("clock") - pl.col("_start_clock")).dt.total_minutes()).alias("_minutes_from_start")
-).filter(pl.col("_minutes_from_start") <= COHORT_WINDOW_MINUTES).drop(["_start_clock", "_minutes_from_start"])
-
-valid_keys = (
-    df_filtered.group_by("id")
-    .agg(pl.col("clock").count().alias("_num_vitals"))
-    .filter(pl.col("_num_vitals") >= COHORT_MIN_READINGS)
-    .select("id")
-)
-
-df_filtered = df_filtered.join(valid_keys, on="id", how="inner")
+print(f"Cohort: {df['id'].n_unique()} stays, {len(df)} observations")
 
 # label per id (constant within a case)
-labels = df_filtered.select(["id", "label"]).unique("id")
+labels = df.select(["id", "label"]).unique("id")
 
 print("=== Label prevalence per id ===")
-print(df_filtered.select(["id", "label"]).unique("id").group_by("label").agg(pl.len().alias("n_cases")).with_columns(
+print(df.select(["id", "label"]).unique("id").group_by("label").agg(pl.len().alias("n_cases")).with_columns(
     (pl.col("n_cases") / pl.col("n_cases").sum() * 100).round(1).alias("pct_cases")
 ).sort("label"))
-print(df_filtered["id"].n_unique(), "unique IDs")
 
 # %%
 imp = Imperfekt(
     imperfection="missingness",
-    df=df_filtered,
+    df=df,
     id_col="id",
     clock_col="clock",
     cols=VITAL_COLS,
-    save_path=None,
+    save_path=RESULTS_DIR / "missingness_experiments",
     renderer=None,
     plot_library="matplotlib",
 )
@@ -48,7 +33,7 @@ imp = Imperfekt(
 # ── Intravariable ────────────────────────────────────────────────────────────
 
 # %%
-imp.intravariable.composite_score(save_results=False)
+imp.intravariable.composite_score(save_results=True)
 
 intra_scores = imp.intravariable.results.iv_composite_scores
 assert intra_scores is not None
@@ -112,7 +97,7 @@ intra_dist(intra_scores)
 # ── Intervariable ────────────────────────────────────────────────────────────
 
 # %%
-imp.intervariable.composite_score(save_results=False)
+imp.intervariable.composite_score(save_results=True)
 
 inter_scores = imp.intervariable.results.iv_composite_scores
 assert inter_scores is not None

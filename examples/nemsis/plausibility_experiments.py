@@ -4,8 +4,7 @@ from typing import TypedDict
 import polars as pl
 
 from imperfekt import Imperfekt
-from config import COHORT_MIN_READINGS, COHORT_WINDOW_MINUTES, VITAL_COLS, load_cohort
-
+from config import VITAL_COLS, load_cohort, RESULTS_DIR
 pl.Config.set_tbl_cols(8)
 
 class Modus(TypedDict):
@@ -15,26 +14,11 @@ class Modus(TypedDict):
     ranges: bool
 
 df = load_cohort()
+print(f"Cohort: {df['id'].n_unique()} stays, {len(df)} observations")
 
 # %%
-df_filtered = df.with_columns(
-    pl.col("clock").min().over("id").alias("_start_clock")
-).with_columns(
-    ((pl.col("clock") - pl.col("_start_clock")).dt.total_minutes()).alias("_minutes_from_start")
-).filter(pl.col("_minutes_from_start") <= COHORT_WINDOW_MINUTES).drop(["_start_clock", "_minutes_from_start"])
-
-valid_keys = (
-    df_filtered.group_by("id")
-    .agg(pl.col("clock").count().alias("_num_vitals"))
-    .filter(pl.col("_num_vitals") >= COHORT_MIN_READINGS)
-    .select("id")
-)
-
-df_filtered = df_filtered.join(valid_keys, on="id", how="inner")
-
-# %%
-# Sanity check: actual value ranges in the filtered cohort
-print(df_filtered.select(VITAL_COLS).describe())
+# Sanity check: actual value ranges in the cohort
+print(df.select(VITAL_COLS).describe())
 
 # %%
 REFERENCE_RANGES = {
@@ -46,11 +30,11 @@ REFERENCE_RANGES = {
 
 # method=None means ranges-only detection (no statistical method)
 MODI: list[Modus] = [
-    {"method": "iqr",  "threshold": 1.5, "missing_as": "ignore", "ranges": False},
-    {"method": "iqr",  "threshold": 1.5, "missing_as": "ignore", "ranges": True},
-    {"method": "mad",  "threshold": 3.5, "missing_as": "ignore", "ranges": False},
-    {"method": "mad",  "threshold": 3.5, "missing_as": "ignore", "ranges": True},
-    {"method": None,   "threshold": 1.5, "missing_as": "ignore", "ranges": True},
+  #  {"method": "iqr",  "threshold": 1.5, "missing_as": "ignore", "ranges": False},
+   # {"method": "iqr",  "threshold": 1.5, "missing_as": "ignore", "ranges": True},
+   {"method": "mad",  "threshold": 3.5, "missing_as": "ignore", "ranges": False},
+ #   {"method": "mad",  "threshold": 3.5, "missing_as": "ignore", "ranges": True},
+  #  {"method": None,   "threshold": 1.5, "missing_as": "ignore", "ranges": True},
 ]
 
 # %%
@@ -67,11 +51,11 @@ for modus in MODI:
 
     imp = Imperfekt(
         imperfection="plausibility",
-        df=df_filtered,
+        df=df,
         id_col="id",
         clock_col="clock",
         cols=VITAL_COLS,
-        save_path=None,
+        save_path=RESULTS_DIR / "plausibility_experiments",
         renderer=None,
         plot_library="matplotlib",
         plausibility_method=method,
@@ -80,7 +64,7 @@ for modus in MODI:
         plausibility_reference_ranges=REFERENCE_RANGES if use_ranges else None,
         plausibility_scope="global",
     )
-    imp.intravariable.column_statistics(save_results=False)
+    imp.intravariable.column_statistics(save_results=True)
 
     stats = imp.intravariable.results.cs_overall_statistics
     if stats is not None:
