@@ -5,10 +5,9 @@ import scipy.stats as stats
 from imperfekt.analysis.utils import pretty_printing
 from imperfekt.analysis.utils.kruskal_wallis import kruskal_wallis_effect_size_ci
 from imperfekt.analysis.utils.statistics_utils import (
-    cliffs_delta,
+    cliffs_delta_ci,
     hodges_lehmann,
     hodges_lehmann_ci,
-    mwu_effect_size_ci,
 )
 
 # Minimum defined values a metric needs in every group to be testable
@@ -170,7 +169,8 @@ def compare_groups(
         alpha (float): Significance level (recorded; the caller decides on q).
         facet_col (str | None): Column to facet by (e.g. "variable"), or None.
         aspect (str): Aspect label recorded in the output.
-        n_bootstrap (int): Bootstrap resamples for the effect-size CI.
+        n_bootstrap (int): Bootstrap resamples for the Kruskal-Wallis eta-squared CI.
+            Unused for two groups, where Cliff's delta gets an analytic interval.
         random_state (int): Seed for the bootstrap and for Hodges-Lehmann subsampling.
 
     Returns:
@@ -242,9 +242,7 @@ def compare_groups(
                 row["statistic"] = float(mwu.statistic)
                 row["p_value"] = float(mwu.pvalue)
 
-                es = mwu_effect_size_ci(
-                    x, y, n_bootstrap=n_bootstrap, random_state=random_state
-                )
+                es = cliffs_delta_ci(x, y)
                 row["effect_size"] = float(es["effect_size"])
                 row["effect_size_name"] = "cliffs_delta"
                 row["ci_lower"] = float(es["ci_lower"])
@@ -298,7 +296,6 @@ def posthoc_pairwise(
     facet_col: str | None = None,
     facet_value=None,
     aspect: str = "",
-    n_bootstrap: int = 1000,
     random_state: int = 42,
 ) -> pl.DataFrame:
     """
@@ -319,8 +316,7 @@ def posthoc_pairwise(
         facet_col (str | None): Column to facet by, or None.
         facet_value: The facet value to restrict to.
         aspect (str): Aspect label recorded in the output.
-        n_bootstrap (int): Bootstrap resamples for each pair's effect-size CI.
-        random_state (int): Seed for the bootstrap.
+        random_state (int): Reserved for reproducibility of any sampling.
 
     Returns:
         pl.DataFrame: aspect, variable, metric, group_1, group_2, p_value,
@@ -358,7 +354,7 @@ def posthoc_pairwise(
     for i, g1 in enumerate(usable):
         for g2 in usable[i + 1 :]:
             x, y = samples[g1], samples[g2]
-            es = mwu_effect_size_ci(x, y, n_bootstrap=n_bootstrap, random_state=random_state)
+            es = cliffs_delta_ci(x, y)
             delta = float(es["effect_size"])
             rows.append(
                 {

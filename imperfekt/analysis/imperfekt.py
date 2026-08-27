@@ -238,7 +238,6 @@ class Imperfekt:
         cheap_mode: bool = False,
         analysis_mode: str = "metrics",  # 'full' or 'metrics'
         n_bootstrap: int = 1000,
-        posthoc_n_bootstrap: int = 200,
     ):
         """
         Runs a grouped analysis based on an annotation dataframe.
@@ -259,10 +258,9 @@ class Imperfekt:
             analysis_mode (str): The mode of analysis to run. Can be 'full' or 'metrics'. Defaults to 'metrics'.
                                  In 'metrics' mode the case-level metrics are compared between
                                  groups; see _check_group_differences for the method.
-            n_bootstrap (int): Bootstrap resamples for each effect-size CI ('metrics' mode).
-            posthoc_n_bootstrap (int): Bootstrap resamples per post-hoc pair ('metrics' mode,
-                                 more than two groups). Lower by default because the pair count
-                                 grows quadratically with the number of groups.
+            n_bootstrap (int): Bootstrap resamples for the Kruskal-Wallis effect-size CI
+                                 ('metrics' mode, more than two groups). The two-group effect
+                                 size gets an analytic interval and does not bootstrap.
 
         Returns:
             None, updates the dict under <imperfect_object>.group_results.
@@ -398,7 +396,6 @@ class Imperfekt:
             self._check_group_differences(
                 save_results=save_results,
                 n_bootstrap=n_bootstrap,
-                posthoc_n_bootstrap=posthoc_n_bootstrap,
             )
         pretty_printing.rich_info("Grouped analysis complete.")
 
@@ -440,7 +437,6 @@ class Imperfekt:
         self,
         save_results: bool = True,
         n_bootstrap: int = 1000,
-        posthoc_n_bootstrap: int = 200,
     ):
         """
         Test whether the case-level imperfection metrics differ between groups.
@@ -465,11 +461,9 @@ class Imperfekt:
 
         Parameters:
             save_results (bool): Whether to save CSVs and figures to save_path.
-            n_bootstrap (int): Bootstrap resamples for each omnibus effect-size CI.
-            posthoc_n_bootstrap (int): Bootstrap resamples per post-hoc pair. Lower than
-                n_bootstrap by default because the number of pairs grows quadratically
-                with the group count, and post-hoc intervals are supporting detail
-                rather than the headline estimate.
+            n_bootstrap (int): Bootstrap resamples for the Kruskal-Wallis eta-squared CI.
+                Unused for two groups: Cliff's delta gets an analytic interval, which is
+                both exact and far cheaper than bootstrapping a rank statistic.
 
         Returns:
             None. Updates the attributes listed above.
@@ -535,9 +529,7 @@ class Imperfekt:
         )
         self.group_comparison_results = results
 
-        self.group_comparison_posthoc = self._run_group_posthoc(
-            results, aspect_frames, n_bootstrap=posthoc_n_bootstrap
-        )
+        self.group_comparison_posthoc = self._run_group_posthoc(results, aspect_frames)
         self.group_comparison_plots = self._plot_group_differences(results, path, save_results)
 
         if save_results and path:
@@ -552,7 +544,6 @@ class Imperfekt:
         self,
         results: pl.DataFrame,
         aspect_frames: dict,
-        n_bootstrap: int = 1000,
     ) -> pl.DataFrame:
         """
         Pairwise post-hoc tests for metrics whose omnibus survived FDR correction.
@@ -564,7 +555,6 @@ class Imperfekt:
         Parameters:
             results (pl.DataFrame): The FDR-corrected comparison frame.
             aspect_frames (dict): aspect -> (group frames, facet column).
-            n_bootstrap (int): Bootstrap resamples for each pair's effect-size CI.
 
         Returns:
             pl.DataFrame: Pairwise comparisons with FDR-corrected q-values.
@@ -585,7 +575,6 @@ class Imperfekt:
                     facet_col=facet_col,
                     facet_value=row["variable"],
                     aspect=row["aspect"],
-                    n_bootstrap=n_bootstrap,
                 )
             )
 
