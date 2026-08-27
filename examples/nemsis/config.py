@@ -1,5 +1,5 @@
 DATASET_NAME = "nemsis" # "nemsis" or "mcmed"
-NEMSIS_YEAR = "2024" # "2024", "2025" or combo ("2024+2025")
+NEMSIS_YEAR = "2025" # "2024", "2025" or combo ("2024+2025")
 
 COHORT_WINDOW_MINUTES = 20
 COHORT_MIN_READINGS = 5

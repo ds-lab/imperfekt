@@ -16,7 +16,7 @@ This module provides a comprehensive suite of analyses for examining **intravari
    - [Autocorrelation](#4-autocorrelation-autocorrelation)
    - [Windowed Significance](#5-windowed-significance-windowed_significance)
    - [DateTime Statistics](#6-datetime-statistics-date_time_statistics)
-   - [Composite Score](#7-composite-score-composite_score)
+   - [Case-Level Metrics](#7-case-level-metrics-case_metrics)
 5. [Usage Example](#usage-example)
 6. [References](#references)
 
@@ -58,7 +58,7 @@ IntravariableImperfection
 │   ├── autocorrelation()             # Temporal autocorrelation of imperfection
 │   ├── windowed_significance()       # Values near imperfect instances
 │   ├── date_time_statistics()        # Temporal distribution patterns
-│   ├── composite_score()             # Per-(case × variable) quadrant stratification
+│   ├── case_metrics()                # Per-(case × variable) metrics (+ optional strata)
 │   ├── run()                         # Execute all analyses
 │   └── generate_html_report()        # Create HTML summary
 │
@@ -355,59 +355,77 @@ Analyzes imperfection patterns by calendar/clock time to detect **provider-level
 
 ---
 
-### 7. Composite Score (`composite_score`)
+### 7. Case-Level Metrics (`case_metrics`)
 
-Assigns each (case × variable) pair to one of five imperfection strata, enabling subgroup analysis of model performance broken down by missingness pattern per variable.
+Computes the four canonical case-level intravariable metrics — one row per (case × variable) —
+and optionally assigns each pair to an imperfection stratum.
 
-#### Strata
+Runs `column_statistics()` and `gap_statistics()` automatically if not already done.
+
+#### Metrics
+
+With $T$ the timestamps of a case and $\mathcal{T}_i$ those where variable $i$ is imperfect:
+
+| Metric | Formula | Range | High imperfection |
+|--------|---------|-------|-------------------|
+| `indicated_pct` | $\lvert\mathcal{T}_i\rvert / T$ | $[0, 100]$ | higher |
+| `indicated_centroid` | $\dfrac{1}{\lvert\mathcal{T}_i\rvert}\sum_{t \in \mathcal{T}_i}\dfrac{t - t_{\min}}{t_{\max} - t_{\min}}$ | $[0, 1]$ | positional, not ordered |
+| `gap_adh_rate` | $\dfrac{1}{\lvert\Delta t_{\text{gap}}\rvert}\sum_{l}\mathbb{I}(\lvert l - \delta^{*}_{\text{gap}}\rvert \le \epsilon\,\delta^{*}_{\text{gap}})$ | $[0, 1]$ | **lower** (inverted) |
+| `gap_entropy` | $\dfrac{-\sum_k p_k \log_2 p_k}{\log_2 K_{\text{gap}}}$ | $[0, 1]$ | higher |
+
+`indicated_centroid` describes *where* the imperfection sits on the case's normalized timeline
+($\approx 0$ front-loaded, $\approx 0.5$ symmetric, $\approx 1$ back-loaded) rather than how much
+of it there is, which is why it has no "more imperfect" direction.
+
+> **Limitation — gaps at the start or end of a case's timeline**: `time_length` (gap duration in
+> seconds) is `null` for any gap with no preceding or following observation within the same case.
+> Without a bracketing observation the gap boundary is unanchored and its duration undefined.
+> `gap_adh_rate` and `gap_entropy` therefore require at least one gap with a finite duration —
+> both are `null` for a case with only boundary gaps.
+
+#### Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `bin_resolution_seconds` | 60.0 | Bin width for entropy/adherence computation |
+| `adherence_tolerance` | 0.5 | Fractional tolerance $\epsilon$ for `gap_adh_rate` |
+| `stratify` | `False` | Also assign imperfection strata (see below) |
+| `save_results` | `True` | Write CSVs to `save_path` |
+
+#### Optional stratification (`stratify=True`)
 
 | Stratum | Meaning |
 |---------|---------|
 | `Q_complete` | No imperfection for this case and variable |
-| `Q_alpha` | Low irregularity on both selected axes |
+| `Q_alpha` | Low imperfection on both selected axes |
 | `Q_beta` | High on axis X, low on axis Y |
 | `Q_gamma` | Low on axis X, high on axis Y |
-| `Q_delta` | High irregularity on both axes |
+| `Q_delta` | High imperfection on both axes |
 
-#### Candidate Axes (per case, per variable)
+**Axis selection.** Before computing correlations, axes that are near-constant (more than 50 % of
+values equal to the median) are excluded for that variable, as they cannot meaningfully bisect the
+population. All pairwise Spearman rank correlations are then computed across the remaining axes,
+and the pair with the **lowest absolute correlation** (most orthogonal) is selected. Selection is
+performed independently per variable. The full correlation table is stored in
+`results.cm_pairwise_correlations`.
 
-All metrics below are computed per (case × variable). Only a subset is eligible for axis selection (see [Axis Selection](#axis-selection) below).
+**Median bisection.** The selected axes are split at their medians — computed over imperfect cases
+only, so `Q_complete` cases do not bias the thresholds — to produce the four quadrants. Medians are
+passed as parameters to `assign_strata()`, enabling leakage-free cross-validation: fit medians on
+the training fold, apply to the held-out test fold.
 
-| Metric | Captures | Min. gaps required |
-|--------|----------|--------------------|
-| `indicated_pct` | Overall missingness burden | — |
-| `gap_cv` | CV of gap lengths (std / mean) | ≥ 2 |
-| `gap_qcod` | Quartile CoD of gap lengths — robust analog to CV: $(Q_{75}-Q_{25})/(Q_{75}+Q_{25})$ | ≥ 4 |
-| `gap_burstiness_coeff` | Goh & Barabási burstiness of gap lengths [[4]](#references) | ≥ 3 |
-| `gap_adherence_rate` | Fraction of gaps near the case's own dominant gap length (inverted: lower = more imperfect) | ≥ 1 |
-| `gap_normalized_entropy` | Shannon entropy of the gap length distribution | ≥ 1 |
-| `max_gap_fraction` | Largest single gap as fraction of total observation window | ≥ 1 |
-| `gap_onset_cv` | CV of the spacing between consecutive gap start times | ≥ 3 |
-| `gap_missing_centroid` | Mean clock-position of missing ticks on the case–variable's normalized $[0, 1]$ observation timeline ($\approx 0$ = front-loaded, $\approx 0.5$ = symmetric, $\approx 1$ = back-loaded) | — |
-| `mc_p11` | Markov $P(1 \to 1)$: probability that imperfection persists into the next time step | — |
-
-> **Limitation — gaps at the start or end of a case's timeline**: `time_length` (gap duration in seconds) is `null` for any gap that has no preceding or following observation within the same case, i.e. the imperfect run starts at the very first record or ends at the very last record. Because there is no bracketing observation to anchor the gap boundary, its duration is undefined. All metrics that rely on `time_length` (`gap_cv`, `gap_qcod`, `gap_burstiness_coeff`, `gap_adherence_rate`, `gap_normalized_entropy`, `max_gap_fraction`, `gap_onset_cv`) therefore require at least one gap with a finite duration — those metrics are `null` for a case that has only boundary gaps or only a single gap with an undefined length.
-
-#### Axis Selection
-
-Only the five axes that are structurally defined for every imperfect case are eligible for axis selection:
-
-- `indicated_pct`, `gap_adherence_rate`, `gap_normalized_entropy`, `max_gap_fraction`, `gap_missing_centroid`
-
-Axes derived from gap length distributions (`gap_cv`, `gap_qcod`, `gap_burstiness_coeff`, `gap_onset_cv`, `mc_p11`) require multiple gaps and produce `null` for cases with only one gap, making them unsuitable for axis selection across the full imperfect population. They are included in `iv_composite_scores` for reference but not used to split cases into quadrants.
-
-Before computing correlations, axes that are near-constant (more than 50 % of values equal to the median) are excluded for that variable, as they cannot meaningfully bisect the population.
-
-All pairwise Spearman rank correlations are computed across the eligible axes. The pair with the **lowest absolute correlation** (most orthogonal) is selected as the two stratification axes. Selection is performed independently per variable. The full correlation table is stored in `results.iv_pairwise_correlations`.
-
-#### Median Bisection
-
-The selected axes are split at their medians to produce the four quadrants. Medians are passed as parameters to `assign_strata()`, enabling leakage-free cross-validation: fit medians on the training fold, apply to the held-out test fold.
+> **Stratification is off by default.** The quadrant thresholds are fitted to whichever cohort is
+> passed in, so labels from separately-fitted cohorts are **not** comparable. To compare cohorts,
+> either compare the raw metrics (see [Group Comparison](../README.md)) or fit thresholds once on
+> the pooled data and apply them with `assign_strata()`.
 
 #### Output
 
-- `results.iv_composite_scores` — one row per (case × variable) with all metrics, selected axes, thresholds, and `imperfection_stratum`
-- `results.iv_pairwise_correlations` — dict keyed by variable name, each a correlation table used for axis selection
+- `results.cm_case_metrics` — one row per (case × variable) with the four metrics. With
+  `stratify=True`, additionally `axis_x`, `axis_y`, `axis_pair_corr`,
+  `axis_x_median_threshold`, `axis_y_median_threshold` and `imperfection_stratum`.
+- `results.cm_pairwise_correlations` — dict keyed by variable name, each a correlation table used
+  for axis selection. `None` unless `stratify=True`.
 
 ---
 

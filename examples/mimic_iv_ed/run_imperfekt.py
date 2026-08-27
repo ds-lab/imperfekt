@@ -30,6 +30,6 @@ imp = Imperfekt(
 imp.irregularity.run(save_results=SAVE_RESULTS)
 
 # %%
-imp.irregularity.results.cs_case_scores
+imp.irregularity.results.cm_case_metrics
 
 # %%

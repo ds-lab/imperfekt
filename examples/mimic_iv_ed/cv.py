@@ -33,8 +33,8 @@ def compute_irregularity_strata(
     the dynamically selected orthogonal axis names.
 
     Returns:
-      case_metrics  - full cs_case_scores DataFrame (stay_id, cv,
-                      adherence_rate, burstiness_coeff, axis_x, axis_y, …)
+      case_metrics  - full cm_case_metrics DataFrame (stay_id, interval_cv,
+                      interval_qcod, interval_adh_rate, axis_x, axis_y, …)
                       The library-generated irregularity_stratum column is
                       present but must NOT be used for CV evaluation — it was
                       computed from global medians and would leak test data.
@@ -48,7 +48,7 @@ def compute_irregularity_strata(
         save_path=strata_dir,
     )
     ireg.run(save_results=True)
-    case_metrics = ireg.results.cs_case_scores
+    case_metrics = ireg.results.cm_case_metrics
     axis_x = case_metrics["axis_x"][0]
     axis_y = case_metrics["axis_y"][0]
     return case_metrics, (axis_x, axis_y)
@@ -192,7 +192,7 @@ def run_cv(
         # Join test strata onto test rows to get a per-row stratum label aligned
         # with y_test/y_proba, then group by stratum without repeated is_in scans.
         # Also join cv/qcod/adherence_rate for irregularity characterisation per stratum.
-        ireg_cols = ["stay_id", "cv", "qcod", "adherence_rate"]
+        ireg_cols = ["stay_id", "interval_cv", "interval_qcod", "interval_adh_rate"]
         available_ireg = [c for c in ireg_cols if c in case_metrics.columns]
         test_strata_ireg = test_strata.join(
             case_metrics.select(available_ireg),
@@ -214,7 +214,7 @@ def run_cv(
         ireg_lookup: dict[str, dict[str, float]] = {}
         for row in test_strata_ireg.iter_rows(named=True):
             sid = row["stay_id"]
-            ireg_lookup[sid] = {c: row[c] for c in ("cv", "qcod", "adherence_rate") if c in row}
+            ireg_lookup[sid] = {c: row[c] for c in ("interval_cv", "interval_qcod", "interval_adh_rate") if c in row}
 
         stay_ids_arr = test["stay_id"].to_numpy()
 
@@ -224,7 +224,7 @@ def run_cv(
             mask = strata_arr == stratum_label
             m_s = _compute_metrics(y_test[mask], y_proba[mask])
             if m_s:
-                for ireg_metric in ("cv", "qcod", "adherence_rate"):
+                for ireg_metric in ("interval_cv", "interval_qcod", "interval_adh_rate"):
                     vals = [
                         ireg_lookup[sid][ireg_metric]
                         for sid in stay_ids_arr[mask]
@@ -259,9 +259,9 @@ def summarise_cv(fold_metrics: dict[str, list], pipeline_name: str) -> dict[str,
             "auroc",
             "brier_skill_score",
             "n_pos_pct",
-            "cv",
-            "qcod",
-            "adherence_rate",
+            "interval_cv",
+            "interval_qcod",
+            "interval_adh_rate",
         ):
             vals = np.array([f[metric] for f in folds if metric in f and not np.isnan(f[metric])])
             if len(vals) == 0:
@@ -301,9 +301,9 @@ def save_cv_results(
         "auroc",
         "brier_skill_score",
         "n_pos_pct",
-        "cv",
-        "qcod",
-        "adherence_rate",
+        "interval_cv",
+        "interval_qcod",
+        "interval_adh_rate",
     )
 
     rows = []

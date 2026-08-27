@@ -99,10 +99,8 @@ def t_test_two_subgroups(
 
     if stdd1 == 0 or stdd2 == 0:
         raise ValueError("Standard deviation of one or both groups is zero, cannot perform t-test.")
-    if stdd1 == stdd2:
-        equal_var = True
-    else:
-        equal_var = False
+    equal_var = np.isclose(stdd1, stdd2, rtol=1e-5)
+    
     stat = stats.ttest_ind(
         df1_filtered[col1].to_numpy(),
         df2_filtered[col2].to_numpy(),
@@ -208,6 +206,137 @@ def rank_biserial_correlation(x, y):
     # RBC = (2*U1 - n1*n2) / (n1*n2)
     rbc = (2 * u_stat - n1 * n2) / (n1 * n2)
     return rbc
+
+
+def cliffs_delta(x, y) -> float:
+    """
+    Cliff's delta: P(x > y) - P(x < y), bounded in [-1, 1].
+
+    Named alias of rank-biserial correlation, for understandability.
+
+    Parameters:
+        x, y: Arrays of data for the two groups.
+
+    Returns:
+        float: Cliff's delta.
+    """
+    return rank_biserial_correlation(x, y)
+
+
+def hodges_lehmann(
+    x: np.ndarray,
+    y: np.ndarray,
+    max_pairs: int = 25_000_000,
+    random_state: int = 42,
+) -> float:
+    """
+    Hodges-Lehmann estimator: the median of all pairwise differences x_i - y_j.
+
+    This is the location-shift estimator consistent with the Mann-Whitney U test —
+    it answers "by how much does x exceed y" in the metric's own units, without
+    assuming normality.
+    
+    Parameters:
+        x, y: Arrays of data for the two groups.
+        max_pairs (int): Maximum number of pairwise differences to materialise.
+        random_state (int): Seed for the subsampling.
+
+    Returns:
+        float: Median pairwise difference, or nan if either sample is empty.
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    x = x[~np.isnan(x)]
+    y = y[~np.isnan(y)]
+    if len(x) == 0 or len(y) == 0:
+        return float("nan")
+
+    if len(x) * len(y) > max_pairs:
+        # Subsample both sides proportionally so the pair grid fits in max_pairs.
+        rng = np.random.default_rng(random_state)
+        side = int(np.sqrt(max_pairs))
+        if len(x) > side:
+            x = rng.choice(x, size=side, replace=False)
+        if len(y) > side:
+            y = rng.choice(y, size=side, replace=False)
+
+    return float(np.median(x[:, None] - y[None, :]))
+
+
+def hodges_lehmann_ci(
+    x: np.ndarray,
+    y: np.ndarray,
+    alpha: float = 0.05,
+    max_pairs: int = 25_000_000,
+    random_state: int = 42,
+) -> tuple[float, float]:
+    """
+    Distribution-free confidence interval for the Hodges-Lehmann location shift.
+
+    Parameters:
+        x, y: Arrays of data for the two groups.
+        alpha (float): Significance level; the interval has coverage 1 - alpha.
+        max_pairs (int): Maximum number of pairwise differences to materialise.
+        random_state (int): Seed for the subsampling.
+
+    Returns:
+        tuple[float, float]: (lower, upper) bounds, or (nan, nan) if undefined.
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    x = x[~np.isnan(x)]
+    y = y[~np.isnan(y)]
+    if len(x) == 0 or len(y) == 0:
+        return float("nan"), float("nan")
+
+    if len(x) * len(y) > max_pairs:
+        rng = np.random.default_rng(random_state)
+        side = int(np.sqrt(max_pairs))
+        if len(x) > side:
+            x = rng.choice(x, size=side, replace=False)
+        if len(y) > side:
+            y = rng.choice(y, size=side, replace=False)
+
+    n1, n2 = len(x), len(y)
+    diffs = np.sort((x[:, None] - y[None, :]).ravel())
+    n_pairs = len(diffs)
+
+    z = stats.norm.ppf(1 - alpha / 2)
+    # Normal approximation to the null distribution of U, with continuity correction.
+    mean_u = n1 * n2 / 2
+    sd_u = np.sqrt(n1 * n2 * (n1 + n2 + 1) / 12)
+    k = int(np.floor(mean_u - z * sd_u))
+
+    if k < 0:
+        # Too few pairs for the approximation to bite — the interval is the full range.
+        return float(diffs[0]), float(diffs[-1])
+
+    lower_idx = min(k, n_pairs - 1)
+    upper_idx = max(n_pairs - 1 - k, 0)
+    return float(diffs[lower_idx]), float(diffs[upper_idx])
+
+
+def benjamini_hochberg(p_values) -> np.ndarray:
+    """
+    Benjamini-Hochberg FDR-adjusted p-values (q-values).
+
+    Parameters:
+        p_values: Sequence of raw p-values, possibly containing nan.
+
+    Returns:
+        np.ndarray: q-values, same length and order as the input.
+    """
+    p = np.asarray(p_values, dtype=float)
+    q = np.full(p.shape, np.nan)
+    valid = ~np.isnan(p)
+    if not valid.any():
+        return q
+
+    from statsmodels.stats.multitest import multipletests
+
+    _, q_valid, _, _ = multipletests(p[valid], method="fdr_bh")
+    q[valid] = q_valid
+    return q
 
 
 def mwu_effect_size_ci(

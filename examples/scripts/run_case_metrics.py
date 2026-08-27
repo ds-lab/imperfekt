@@ -7,9 +7,9 @@ Q_gamma / Q_delta) using the least-correlated pair of metrics as axes,
 median-bisected per variable / cohort.
 
 Three analyses are demonstrated:
-  1. Irregularity composite score   — temporal observation spacing
-  2. Intravariable composite score  — per-variable missingness pattern (one stratum per case × variable)
-  3. Intervariable composite score  — cross-variable co-missingness structure (one stratum per case)
+  1. Irregularity case metrics   — temporal observation spacing
+  2. Intravariable case metrics  — per-variable missingness pattern (one stratum per case × variable)
+  3. Intervariable case metrics  — cross-variable co-missingness structure (one stratum per case)
 
 Replace the synthetic dataset block with your own data load and adjust
 SAVE_RESULTS_PATH / RENDERER as needed.
@@ -27,7 +27,7 @@ from imperfekt.analysis.irregularity.irregularity import Irregularity
 pl.Config.set_tbl_cols(20)
 pl.Config.set_tbl_rows(30)
 
-SAVE_RESULTS_PATH = Path("results/composite_score")
+SAVE_RESULTS_PATH = Path("results/case_metrics")
 RENDERER = None  # set to "notebook_connected" or "browser" for plots
 SAVE_RESULTS = True
 
@@ -98,17 +98,17 @@ irr = Irregularity(
     renderer=RENDERER,
 )
 
-irr = irr.composite_score(save_results=SAVE_RESULTS)
+irr = irr.case_metrics(stratify=True, save_results=SAVE_RESULTS)
 
 # %%
 print("\n=== Irregularity: case scores (selected columns) ===")
 print(
-    irr.results.cs_case_scores.select(
+    irr.results.cm_case_metrics.select(
         [
             "id",
-            "cv",
-            "burstiness_coeff",
-            "adherence_rate",
+            "interval_cv",
+            "interval_qcod",
+            "interval_adh_rate",
             "axis_x",
             "axis_y",
             "axis_pair_corr",
@@ -119,11 +119,11 @@ print(
 
 # %%
 print("\n=== Irregularity: pairwise axis correlations ===")
-print(irr.results.cs_pairwise_correlations)
+print(irr.results.cm_pairwise_correlations)
 
 # %%
 print("\n=== Irregularity: stratum prevalence ===")
-scores = irr.results.cs_case_scores
+scores = irr.results.cm_case_metrics
 total = scores.height
 print(
     scores.filter(pl.col("irregularity_stratum").is_not_null())
@@ -140,8 +140,8 @@ print(
 # train = scores[:split]
 # test  = scores[split:]
 #
-# x_median_train = float(train[irr.results.cs_case_scores["axis_x"][0]].median())
-# y_median_train = float(train[irr.results.cs_case_scores["axis_y"][0]].median())
+# x_median_train = float(train[irr.results.cm_case_metrics["axis_x"][0]].median())
+# y_median_train = float(train[irr.results.cm_case_metrics["axis_y"][0]].median())
 #
 # test_with_strata = Irregularity.assign_strata(
 #     test, axis_x, axis_y, x_median_train, y_median_train
@@ -162,21 +162,20 @@ iv = IntravariableImperfection(
 )
 
 # column_statistics and gap_statistics are required prerequisites;
-# composite_score() calls them automatically if not yet run.
-iv = iv.composite_score(save_results=SAVE_RESULTS)
+# case_metrics() calls them automatically if not yet run.
+iv = iv.case_metrics(stratify=True, save_results=SAVE_RESULTS)
 
 # %%
 print("\n=== Intravariable: case scores per variable ===")
 print(
-    iv.results.iv_composite_scores.select(
+    iv.results.cm_case_metrics.select(
         [
             "id",
             "variable",
             "indicated_pct",
-            "gap_cv",
-            "gap_burstiness_coeff",
-            "gap_adherence_rate",
-            "mc_p11",
+            "indicated_centroid",
+            "gap_adh_rate",
+            "gap_entropy",
             "axis_x",
             "axis_y",
             "axis_pair_corr",
@@ -187,9 +186,9 @@ print(
 
 # %%
 print("\n=== Intravariable: stratum prevalence per variable ===")
-composite = iv.results.iv_composite_scores
+intra_metrics = iv.results.cm_case_metrics
 for var in cols:
-    var_scores = composite.filter(pl.col("variable") == var)
+    var_scores = intra_metrics.filter(pl.col("variable") == var)
     total_var = var_scores.height
     print(
         f"\n  {var}  (axis: "
@@ -206,7 +205,7 @@ for var in cols:
 
 # %%
 print("\n=== Intravariable: pairwise axis correlations (heartrate) ===")
-print(iv.results.iv_pairwise_correlations[cols[0]])
+print(iv.results.cm_pairwise_correlations[cols[0]])
 
 # %%
 # Cross-validation usage: fit medians on train, apply to held-out test
@@ -237,19 +236,19 @@ ivv = IntervariableImperfection(
 )
 
 # row_statistics() is called automatically if not yet run.
-ivv = ivv.composite_score(save_results=SAVE_RESULTS)
+ivv = ivv.case_metrics(stratify=True, save_results=SAVE_RESULTS)
 
 # %%
 print("\n=== Intervariable: case scores ===")
 print(
-    ivv.results.iv_composite_scores.select(
+    ivv.results.cm_case_metrics.select(
         [
             "id",
-            "avg_indicated_vars_pct",
-            "co_missingness_concentration",
-            "missing_variable_breadth",
+            "avg_indicated_pct",
+            "co_concentration",
+            "breadth",
             "pattern_entropy",
-            "max_pairwise_co_missingness",
+            "max_pair_overlap",
             "axis_x",
             "axis_y",
             "axis_pair_corr",
@@ -260,7 +259,7 @@ print(
 
 # %%
 print("\n=== Intervariable: stratum prevalence ===")
-iv_scores = ivv.results.iv_composite_scores
+iv_scores = ivv.results.cm_case_metrics
 total_iv = iv_scores.height
 print(
     iv_scores.filter(pl.col("intervariable_stratum").is_not_null())
@@ -272,7 +271,7 @@ print(
 
 # %%
 print("\n=== Intervariable: pairwise axis correlations ===")
-print(ivv.results.iv_pairwise_correlations)
+print(ivv.results.cm_pairwise_correlations)
 
 # %%
 # Cross-validation usage: fit medians on train, apply to held-out test

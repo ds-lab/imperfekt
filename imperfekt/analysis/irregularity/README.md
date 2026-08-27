@@ -15,7 +15,7 @@ This module provides a suite of analyses for quantifying the **irregularity of t
    - [Burstiness](#3-burstiness-burstiness)
    - [Interval Autocorrelation](#4-interval-autocorrelation-interval_autocorrelation)
    - [Case Entropy & Adherence](#5-case-entropy--adherence-case_entropy_adherence)
-   - [Composite Irregularity Score](#6-composite-irregularity-score-composite_score)
+   - [Case-Level Irregularity Metrics](#6-case-level-irregularity-metrics-case_metrics)
 5. [Usage Example](#usage-example)
 6. [References](#references)
 
@@ -53,7 +53,7 @@ Irregularity
 │   ├── burstiness()                  # Burstiness coefficient per case and globally
 │   ├── interval_autocorrelation()    # Autocorrelation of the interval sequence
 │   ├── case_entropy_adherence()    # Per-case Shannon entropy and adherence rate
-│   ├── composite_score()             # Orthogonal axis stratification into Q_alpha–Q_delta quadrants
+│   ├── case_metrics()                # Case-level metrics (+ optional Q_alpha–Q_delta quadrants)
 │   ├── run()                         # Execute all analyses
 │   └── assign_strata() [static]      # Apply pre-computed median thresholds to assign quadrants
 │
@@ -66,8 +66,8 @@ Irregularity
     ├── bu_global_burstiness: pl.DataFrame
     ├── ia_autocorrelation: pl.DataFrame
     ├── ea_case_entropy_adherence: pl.DataFrame
-    ├── cs_case_scores: pl.DataFrame
-    ├── cs_pairwise_correlations: pl.DataFrame
+    ├── cm_case_metrics: pl.DataFrame
+    ├── cm_pairwise_correlations: pl.DataFrame
     └── plots: IrregularityPlots
         ├── ins_cv_violin
         ├── domf_interval_frequency_bar
@@ -261,40 +261,46 @@ where $\delta_i^* = b_i^* \cdot r$ is the center of case $i$'s own dominant bin 
 
 ---
 
-### 6. Composite Irregularity Score (`composite_score`)
+### 6. Case-Level Irregularity Metrics (`case_metrics`)
 
-Assigns each case to one of four irregularity regimes using **Orthogonal Axis Stratification**: the axis pair with the lowest absolute Spearman correlation is selected, then both axes are median-bisected to form four quadrants.
+Computes the four canonical case-level irregularity metrics — one row per case — and
+optionally assigns each case to an irregularity quadrant.
 
-Runs `interval_statistics()` and `burstiness()` automatically if not already done. Reuses `case_entropy_adherence()` results if already computed.
+Runs `interval_statistics()` automatically if not already done. Reuses
+`case_entropy_adherence()` results if already computed.
 
-#### Candidate axes
+#### Metrics
 
-| Axis | High irregularity direction | Description |
-|------|-----------------------------|-------------|
-| `cv` | higher | Coefficient of variation of interval lengths |
-| `burstiness_coeff` | higher | Burstiness coefficient |
-| `adherence_rate` | lower (inverted) | Fraction of intervals near the case's own dominant rhythm |
-| `qcod` | higher | Quartile coefficient of dispersion |
+Over the inter-observation intervals $\Delta t$ of a case:
 
-All pairwise Spearman correlations are computed first. The axis pair with the smallest absolute correlation (most independent) is selected for quadrant assignment.
+| Metric | Formula | Range | High irregularity |
+|--------|---------|-------|-------------------|
+| `interval_cv` | $\sigma(\Delta t) / \mu(\Delta t)$ | $\ge 0$, unbounded | higher |
+| `interval_qcod` | $\dfrac{Q_3(\Delta t) - Q_1(\Delta t)}{Q_3(\Delta t) + Q_1(\Delta t)}$ | $[0, 1]$ | higher |
+| `interval_adh_rate` | $\dfrac{1}{\lvert\Delta t\rvert}\sum_{l \in \Delta t}\mathbb{I}(\lvert l - \delta^{*}\rvert \le \epsilon\,\delta^{*})$ | $[0, 1]$ | **lower** (inverted) |
+| `interval_entropy` | $\dfrac{-\sum_k p_k \log_2 p_k}{\log_2 K_{\text{interval}}}$ | $[0, 1]$ | higher |
+
+where $\delta^{*}$ is the case's dominant interval bin, $\epsilon$ the adherence tolerance,
+$K_{\text{interval}}$ the number of distinct interval bins and $p_k$ the empirical frequency of bin $k$.
+
+`interval_cv` is the only unbounded metric in the framework; the rank-based comparisons in
+[Group Comparison](../README.md) handle that without transformation.
 
 #### Parameters
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `bin_resolution_seconds` | 60.0 | Bin width for entropy/adherence computation |
-| `adherence_tolerance` | 0.5 | Fractional tolerance for adherence rate |
+| `adherence_tolerance` | 0.5 | Fractional tolerance $\epsilon$ for `interval_adh_rate` |
 | `min_intervals` | 2 | Minimum intervals for entropy/adherence |
+| `stratify` | `False` | Also assign irregularity quadrants (see below) |
+| `save_results` | `True` | Write CSVs to `save_path` |
 
-#### Method
+#### Optional stratification (`stratify=True`)
 
-**Step 1 — Axis selection:**
-
-Compute all pairwise Spearman rank correlations between `cv`, `burstiness_coeff`, `adherence_rate`, and `qcod`. Select the pair $(x, y)$ with the smallest $|\rho|$.
-
-**Step 2 — Median-bisection:**
-
-Compute the median of each selected axis over all complete cases, then assign quadrants:
+**Orthogonal Axis Stratification**: all pairwise Spearman rank correlations between the four
+metrics are computed, the pair $(x, y)$ with the smallest $\lvert\rho\rvert$ (most independent)
+is selected, and both axes are median-bisected:
 
 | Quadrant | Axis-x | Axis-y |
 |----------|--------|--------|
@@ -303,34 +309,45 @@ Compute the median of each selected axis over all complete cases, then assign qu
 | $Q_{\gamma}$ | low irregularity | high irregularity |
 | $Q_{\delta}$ | high irregularity | high irregularity |
 
-For `adherence_rate`, "high irregularity" means **below** the median (lower adherence = more irregular).
+For `interval_adh_rate`, "high irregularity" means **below** the median. Unlike the intra- and
+inter-variable modules there is no `Q_complete` — every case with at least two observations has
+an observation rhythm.
 
-`normalized_entropy` and `burstiness_coeff` are retained per case for within-quadrant characterisation but are not used for axis selection.
+> **Stratification is off by default.** The quadrant thresholds are fitted to whichever cohort is
+> passed in, so labels from separately-fitted cohorts are **not** comparable — a $Q_{\delta}$ in
+> one cohort is not a $Q_{\delta}$ in another. To compare cohorts, either compare the raw metrics
+> (see [Group Comparison](../README.md)) or fit thresholds once on the pooled data and apply them
+> with `assign_strata()`.
 
 #### Output
 
-**`cs_case_scores`** — one row per case:
+**`cm_case_metrics`** — one row per case:
 
 | Field | Description |
 |-------|-------------|
-| `cv` | Per-case coefficient of variation |
-| `qcod` | Per-case quartile coefficient of dispersion |
-| `burstiness_coeff` | Per-case burstiness coefficient |
-| `normalized_entropy` | Per-case normalized Shannon entropy |
-| `adherence_rate` | Per-case adherence to own dominant rhythm |
+| `interval_cv` | Per-case coefficient of variation of intervals |
+| `interval_qcod` | Per-case quartile coefficient of dispersion |
+| `interval_adh_rate` | Per-case adherence to own dominant rhythm |
+| `interval_entropy` | Per-case normalized Shannon entropy of intervals |
+
+With `stratify=True`, these additional columns are appended:
+
+| Field | Description |
+|-------|-------------|
 | `axis_x`, `axis_y` | Names of the selected least-correlated axis pair |
 | `axis_pair_corr` | Spearman correlation of the selected pair |
 | `axis_x_median_threshold` | Median threshold used to bisect axis-x |
 | `axis_y_median_threshold` | Median threshold used to bisect axis-y |
 | `irregularity_stratum` | $Q_{\alpha}$ / $Q_{\beta}$ / $Q_{\gamma}$ / $Q_{\delta}$ |
 
-**`cs_pairwise_correlations`** — all pairwise axis correlations used for selection, sorted by ascending `abs_corr`.
+**`cm_pairwise_correlations`** — all pairwise axis correlations used for selection, sorted by
+ascending `abs_corr`. `None` unless `stratify=True`.
 
 ---
 
 ### 7. Quadrant Assignment Helper (`assign_strata`)
 
-A `@staticmethod` that applies pre-computed median thresholds to any DataFrame and returns it with an `irregularity_stratum` column added. Used internally by `composite_score()` and available for external callers that need to assign quadrants to a held-out subset (e.g. a CV test fold) using thresholds derived from a training subset.
+A `@staticmethod` that applies pre-computed median thresholds to any DataFrame and returns it with an `irregularity_stratum` column added. Used internally by `case_metrics(stratify=True)` and available for external callers that need to assign quadrants to a held-out subset (e.g. a CV test fold) using thresholds derived from a training subset.
 
 ```python
 Irregularity.assign_strata(df, axis_x, axis_y, x_median, y_median)
@@ -385,7 +402,7 @@ analysis = Irregularity(
     renderer="notebook_connected",
 )
 
-# Run all analyses (including composite score and stratification)
+# Run all analyses (including case metrics and stratification)
 analysis.run(
     save_results=True,
     bin_resolution_seconds=60.0,
@@ -397,16 +414,16 @@ analysis.run(
 print(analysis.results.ins_case_statistics)       # CV and interval stats per case
 print(analysis.results.bu_case_burstiness)        # Burstiness per case
 print(analysis.results.ea_case_entropy_adherence) # Entropy and adherence per case
-print(analysis.results.cs_case_scores)            # Quadrant strata (Q_alpha–Q_delta) and per-case metrics
-print(analysis.results.cs_pairwise_correlations)   # Axis selection correlation table
+print(analysis.results.cm_case_metrics)            # Per-case metrics (+ quadrant strata)
+print(analysis.results.cm_pairwise_correlations)   # Axis selection correlation table
 print(analysis.results.domf_frequency_summary)      # Global dominant frequency
 print(analysis.results.ia_autocorrelation)          # Global interval autocorrelation
 
 # Run individual analyses and chain
-analysis.interval_statistics().burstiness().case_entropy_adherence().composite_score()
+analysis.interval_statistics().case_entropy_adherence().case_metrics(stratify=True)
 
 # Apply pre-fit thresholds to a held-out subset (e.g. a CV test fold)
-case_metrics = analysis.results.cs_case_scores  # contains axis_x, axis_y columns
+case_metrics = analysis.results.cm_case_metrics  # contains axis_x, axis_y columns
 axis_x = case_metrics["axis_x"][0]
 axis_y = case_metrics["axis_y"][0]
 train_median_x = train_df[axis_x].median()

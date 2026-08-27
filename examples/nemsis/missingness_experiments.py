@@ -50,9 +50,11 @@ imp = Imperfekt(
 # ── Intravariable ────────────────────────────────────────────────────────────
 
 # %%
-imp.intravariable.composite_score(save_results=False)
+# stratify=True is valid here: this is one pooled cohort, so the quadrant
+# thresholds are fitted once and every case is labelled on the same scale.
+imp.intravariable.case_metrics(stratify=True, save_results=False)
 
-intra_scores = imp.intravariable.results.iv_composite_scores
+intra_scores = imp.intravariable.results.cm_case_metrics
 assert intra_scores is not None
 
 # Selected axis pair per variable
@@ -66,7 +68,7 @@ print(
 
 # All pairwise rho values (including non-selected pairs)
 print("\n=== Intravariable: all axis-pair correlations (rho) ===")
-for var, corr_tbl in imp.intravariable.results.iv_pairwise_correlations.items():
+for var, corr_tbl in imp.intravariable.results.cm_pairwise_correlations.items():
     print(f"\n-- variable: {var} --")
     print(corr_tbl.sort("abs_corr"))
 
@@ -77,9 +79,8 @@ null_strata = intra_scores.filter(
 print(f"Imperfect cases with null stratum: {null_strata.height}")
 if null_strata.height > 0:
     print(null_strata.select([
-        "PcrKey", "variable", "indicated_pct",
-        "max_gap_fraction", "gap_missing_centroid",
-        "gap_normalized_entropy", "gap_adherence_rate",
+        "PcrKey", "variable", "indicated_pct", "indicated_centroid",
+        "gap_entropy", "gap_adh_rate",
         "axis_x", "axis_y", "imperfection_stratum",
     ]).head(20))
 
@@ -94,8 +95,8 @@ def intra_dist(df: pl.DataFrame) -> None:
             pl.len().alias("n"),
             (pl.col("label").sum() / pl.len() * 100).round(1).alias("label1_pct"),
             pl.col("indicated_pct").mean().round(2).alias("mean_indicated_pct"),
-            pl.col("gap_missing_centroid").mean().round(3).alias("mean_centroid"),
-            pl.col("max_gap_fraction").mean().round(3).alias("mean_max_gap_fraction"),
+            pl.col("indicated_centroid").mean().round(3).alias("mean_centroid"),
+            pl.col("gap_adh_rate").mean().round(3).alias("mean_gap_adh_rate"),
         )
         .with_columns(
             (pl.col("n") / pl.col("n").sum().over("variable") * 100)
@@ -116,9 +117,9 @@ intra_dist(intra_scores)
 # ── Intervariable ────────────────────────────────────────────────────────────
 
 # %%
-imp.intervariable.composite_score(save_results=False)
+imp.intervariable.case_metrics(stratify=True, save_results=False)
 
-inter_scores = imp.intervariable.results.iv_composite_scores
+inter_scores = imp.intervariable.results.cm_case_metrics
 assert inter_scores is not None
 
 # Selected axis pair (single pair for the whole cohort)
@@ -131,7 +132,7 @@ print(
 
 # All pairwise rho values (including non-selected pairs)
 print("\n=== Intervariable: all axis-pair correlations (rho) ===")
-inter_pair_corrs = imp.intervariable.results.iv_pairwise_correlations
+inter_pair_corrs = imp.intervariable.results.cm_pairwise_correlations
 if inter_pair_corrs is not None:
     print(inter_pair_corrs.sort("abs_corr"))
 
@@ -158,3 +159,55 @@ def inter_dist(df: pl.DataFrame) -> None:
 
 # %%
 inter_dist(inter_scores)
+
+# ── Group comparison: do the metrics differ by outcome label? ────────────────
+
+# %%
+# run_grouped_analysis(analysis_mode="metrics") computes the case-level metrics
+# per group and then tests every metric across groups: Mann-Whitney with Cliff's
+# delta and a Hodges-Lehmann median difference for two groups, Kruskal-Wallis
+# with DSCF post-hoc for more, with Benjamini-Hochberg FDR across the whole family.
+imp_grouped = Imperfekt(
+    imperfection="missingness",
+    df=df_filtered,
+    id_col="PcrKey",
+    clock_col="clock",
+    cols=["sbp", "hr", "o2sat", "rr"],
+    save_path=Path("results/nemsis_group_comparison"),
+    renderer=None,
+    plot_library="matplotlib",
+)
+imp_grouped.run_grouped_analysis(
+    annotation_col="label",
+    save_results=True,
+    analysis_mode="metrics",
+)
+
+# %%
+pl.Config.set_tbl_cols(100)
+pl.Config.set_tbl_rows(50)
+
+print("\n=== Group comparison: effect sizes, largest first ===")
+print(
+    imp_grouped.group_comparison_results
+    .filter(pl.col("skipped_reason").is_null())
+    .with_columns(pl.col("effect_size").abs().alias("abs_effect"))
+    .sort("abs_effect", descending=True)
+    .select([
+        "aspect", "variable", "metric", "effect_size", "ci_lower", "ci_upper",
+        "q_value", "significant", "direction", "hodges_lehmann",
+    ])
+)
+
+print("\n=== Group descriptives (median [IQR] per group) ===")
+print(
+    imp_grouped.group_comparison_descriptives.select([
+        "aspect", "variable", "metric", "group", "n", "pct_defined",
+        "median", "q25", "q75", "mean", "std",
+    ])
+)
+
+skipped = imp_grouped.group_comparison_results.filter(pl.col("skipped_reason").is_not_null())
+if skipped.height:
+    print("\n=== Metrics that could not be tested ===")
+    print(skipped.select(["aspect", "variable", "metric", "skipped_reason"]))

@@ -5,7 +5,6 @@ from pathlib import Path
 
 import numpy as np
 import polars as pl
-from scipy.stats import spearmanr
 
 from imperfekt.analysis.intravariable import (
     autocorrelation,
@@ -15,7 +14,13 @@ from imperfekt.analysis.intravariable import (
     markov_chain_summary,
     windowed_significance,
 )
-from imperfekt.analysis.utils import masking, pretty_printing, statistics_utils, visualization_utils
+from imperfekt.analysis.utils import (
+    masking,
+    pretty_printing,
+    statistics_utils,
+    stratification,
+    visualization_utils,
+)
 
 
 class IntravariablePlots:
@@ -49,8 +54,8 @@ class IntravariableResults:
         self.ws_observations_around_indicated: dict = {}
         self.ws_mwu_result: pl.DataFrame | None = None
         self.dt_date_time_statistics: dict = {}
-        self.iv_composite_scores: pl.DataFrame | None = None
-        self.iv_pairwise_correlations: dict[str, pl.DataFrame] = {}
+        self.cm_case_metrics: pl.DataFrame | None = None
+        self.cm_pairwise_correlations: dict[str, pl.DataFrame] | None = None
         # Plots
         self.plots = IntravariablePlots()
 
@@ -99,6 +104,21 @@ class IntravariableImperfection:
         )
         intravariable_imperfection.run(save_results=True)
     """
+
+    # --- Class-level configuration ---------------------------------------------
+
+    # Canonical case-level intravariable metrics, one row per (case, variable).
+    CASE_METRIC_COLS: list[str] = [
+        "indicated_pct",
+        "indicated_centroid",
+        "gap_adh_rate",
+        "gap_entropy",
+    ]
+    # Axes where a *lower* value means *more* imperfect (all others: higher = more imperfect)
+    INVERTED_AXES: frozenset = frozenset({"gap_adh_rate"})
+    # Output column of assign_strata, and the metric identifying zero-imperfection rows
+    STRATUM_COL: str = "imperfection_stratum"
+    COMPLETE_COL: str = "indicated_pct"
 
     def __init__(
         self,
@@ -636,9 +656,6 @@ class IntravariableImperfection:
             self.results.plots.dt_month_daytime_heatmap[c] = heatmap_fig
         return self
 
-    # Axes where a *lower* value means *more* imperfect (all others: higher = more imperfect)
-    INVERTED_AXES: frozenset = frozenset({"gap_adherence_rate"})
-
     @staticmethod
     def assign_strata(
         df: pl.DataFrame,
@@ -650,12 +667,16 @@ class IntravariableImperfection:
         """
         Assign each row to an imperfection quadrant by median-bisecting two axes.
 
-        Returns df with an added "imperfection_stratum" column
-        (Q_alpha / Q_beta / Q_gamma / Q_delta, or null for rows with nulls on either axis).
+        Returns df with an added "imperfection_stratum" column: Q_complete for rows with
+        no imperfection, Q_alpha / Q_beta / Q_gamma / Q_delta for the quadrants, or null
+        for rows with nulls on either axis.
 
         Axis direction:
-            gap_adherence_rate — lower = more imperfect (inverted)
-            all other axes    — higher = more imperfect
+            gap_adh_rate   — lower = more imperfect (inverted)
+            all other axes — higher = more imperfect
+
+        Thin wrapper over stratification.assign_strata() supplying this module's
+        conventions.
 
         Parameters:
             df (pl.DataFrame): Input DataFrame containing the axis columns.
@@ -664,79 +685,65 @@ class IntravariableImperfection:
             x_median (float): Median threshold for the x-axis.
             y_median (float): Median threshold for the y-axis.
         """
-        x_high = (
-            pl.col(axis_x) <= x_median
-            if axis_x in IntravariableImperfection.INVERTED_AXES
-            else pl.col(axis_x) > x_median
-        )
-        y_high = (
-            pl.col(axis_y) <= y_median
-            if axis_y in IntravariableImperfection.INVERTED_AXES
-            else pl.col(axis_y) > y_median
-        )
-        return df.with_columns(
-            pl.when(pl.col("indicated_pct") == 0)
-            .then(pl.lit("Q_complete"))
-            .when(pl.col(axis_x).is_null() | pl.col(axis_y).is_null())
-            .then(pl.lit(None))
-            .when(~x_high & ~y_high)
-            .then(pl.lit("Q_alpha"))
-            .when(x_high & ~y_high)
-            .then(pl.lit("Q_beta"))
-            .when(~x_high & y_high)
-            .then(pl.lit("Q_gamma"))
-            .when(x_high & y_high)
-            .then(pl.lit("Q_delta"))
-            .otherwise(pl.lit(None))
-            .alias("imperfection_stratum")
+        return stratification.assign_strata(
+            df,
+            axis_x,
+            axis_y,
+            x_median,
+            y_median,
+            stratum_col=IntravariableImperfection.STRATUM_COL,
+            inverted_axes=IntravariableImperfection.INVERTED_AXES,
+            complete_col=IntravariableImperfection.COMPLETE_COL,
         )
 
-    def composite_score(
+    def case_metrics(
         self,
         bin_resolution_seconds: float = 60.0,
         adherence_tolerance: float = 0.5,
-        min_observations: int = 10,
+        stratify: bool = False,
         save_results: bool = True,
     ) -> "IntravariableImperfection":
         """
-        Assign each (case, variable) pair to one of four imperfection quadrants.
+        Compute the case-level intravariable imperfection metrics, one row per (case, variable).
 
-        For each variable independently:
-          1. Collect per-case imperfection metrics as candidate axes.
-          2. Select the axis pair with the lowest absolute Spearman correlation
-             (most orthogonal dimensions of imperfection for that variable).
-          3. Median-bisect the selected axes to assign Q_alpha / Q_beta / Q_gamma / Q_delta.
+        Metrics (T = timestamps, T_i = timestamps where the variable is imperfect):
+            indicated_pct      : |T_i| / T — overall imperfection burden, on [0, 100]
+            indicated_centroid : mean position of T_i on the normalized [0,1] timeline
+                                 (~0 front-loaded, ~0.5 symmetric, ~1 back-loaded)
+            gap_adh_rate       : fraction of gaps within the adherence tolerance of the
+                                 case's dominant gap length (inverted: low = more imperfect)
+            gap_entropy        : Shannon entropy of the gap-length distribution,
+                                 normalized by log2 of the number of distinct gap bins
 
-        Candidate axes (per case, per variable):
-            indicated_pct       : overall missingness burden
-            gap_cv              : CV of gap lengths
-            gap_qcod            : quartile CoD of gap lengths
-            gap_burstiness_coeff: Goh & Barabási burstiness
-            gap_adherence_rate  : fraction near dominant gap length (inverted axis)
-            gap_normalized_entropy: entropy of gap length distribution
-            max_gap_fraction    : max gap / observation window
-            gap_onset_cv        : CV of inter-onset intervals
-            gap_missing_centroid: tick-mean clock-position on normalized [0,1] timeline
-                                  (~0 front-loaded, ~0.5 symmetric, ~1 back-loaded)
-            mc_p11              : Markov P(1→1) persistence probability
+        With stratify=True, each (case, variable) is additionally assigned to an
+        imperfection quadrant via Orthogonal Axis Stratification: for each variable
+        independently, the axis pair with the lowest absolute Spearman correlation is
+        selected (the two least redundant dimensions of imperfection) and median-bisected
+        into Q_alpha / Q_beta / Q_gamma / Q_delta, with Q_complete for cases that have no
+        imperfection at all.
 
-        Requires column_statistics() and gap_statistics() to have been run.
-        Runs per-case Markov P(1→1) internally.
+        Stratification is off by default. The quadrant labels are fitted to whichever
+        cohort is passed in, so labels from separately-fitted cohorts are not comparable
+        — use assign_strata() with externally-fitted thresholds when you need that.
+
+        Requires column_statistics() and gap_statistics(); both are run automatically
+        if they have not been.
 
         Results stored in:
-            self.results.iv_composite_scores        — one row per (case × variable)
-            self.results.iv_pairwise_correlations   — dict keyed by variable name
+            self.results.cm_case_metrics          — one row per (case × variable)
+            self.results.cm_pairwise_correlations — dict keyed by variable name,
+                                                    None unless stratify=True
 
         Parameters:
             bin_resolution_seconds (float): Bin width for entropy/adherence computation.
             adherence_tolerance (float): Fractional tolerance for gap adherence rate.
-            min_observations (int): Min observations per case for Markov P(1→1).
+            stratify (bool): Also assign imperfection quadrants. Defaults to False.
             save_results (bool): Whether to save CSVs to save_path.
 
         Returns:
             self: Supports method chaining.
         """
-        new_path_level_name = "composite_score"
+        new_path_level_name = "case_metrics"
         path = None
         if self.save_path and save_results:
             path = self.save_path / new_path_level_name
@@ -776,42 +783,34 @@ class IntravariableImperfection:
             adherence_tolerance=adherence_tolerance,
         )
 
-        # --- per-case Markov P(1→1) ---
-        p11 = markov_chain_summary.compute_case_markov_p11(
-            mask_df=self.mask,
-            cols=self.cols,
-            id_col=self.id_col,
-            clock_no_col=self.clock_no_col,
-            min_observations=min_observations,
+        # --- join and reduce to the canonical metric set ---
+        # compute_case_gap_metrics also returns gap_cv / gap_qcod / gap_burstiness_coeff /
+        # gap_onset_cv / max_gap_fraction. Those require 2-4 gaps to be defined and are null
+        # for cases with fewer, which makes them unusable both as bisection axes
+        base = indicated_long.join(
+            gap_metrics.select(
+                [
+                    self.id_col,
+                    "variable",
+                    pl.col("gap_missing_centroid").alias("indicated_centroid"),
+                    pl.col("gap_adherence_rate").alias("gap_adh_rate"),
+                    pl.col("gap_normalized_entropy").alias("gap_entropy"),
+                ]
+            ),
+            on=[self.id_col, "variable"],
+            how="left",
         )
 
-        # --- join all metrics ---
-        base = indicated_long.join(gap_metrics, on=[self.id_col, "variable"], how="left").join(
-            p11, on=[self.id_col, "variable"], how="left"
-        )
+        metric_cols = [self.id_col, "variable", *self.CASE_METRIC_COLS]
 
-        # Only axes that are structurally defined for every imperfect case (indicated_pct > 0).
-        # Axes derived from gap length distributions (gap_cv, gap_qcod, gap_burstiness_coeff,
-        # gap_onset_cv, mc_p11) require multiple gaps and are null for cases with only one gap,
-        # making them unsuitable for axis selection across the full imperfect population.
-        candidate_axes = [
-            "indicated_pct",
-            "gap_adherence_rate",
-            "gap_normalized_entropy",
-          #  "max_gap_fraction",
-            "gap_missing_centroid",
-        ]
-
-        def _pair_corr(df: pl.DataFrame, col_x: str, col_y: str) -> tuple:
-            pair_df = df.select([col_x, col_y]).drop_nulls([col_x, col_y])
-            n = pair_df.height
-            if n < 3:
-                return float("nan"), n
-            x = pair_df[col_x].to_numpy()
-            y = pair_df[col_y].to_numpy()
-            if np.nanstd(x) == 0 or np.nanstd(y) == 0:
-                return float("nan"), n
-            return float(spearmanr(x, y).statistic), n
+        if not stratify:
+            self.results.cm_case_metrics = pl.concat(
+                [base.filter(pl.col("variable") == var).select(metric_cols) for var in self.cols]
+            )
+            self.results.cm_pairwise_correlations = None
+            if save_results and path:
+                self.results.cm_case_metrics.write_csv(path / "case_metrics.csv")
+            return self
 
         all_scores = []
         all_corr_tables = {}
@@ -824,69 +823,25 @@ class IntravariableImperfection:
             # assignment and would bias the median thresholds if included.
             imperfect_df = var_df.filter(pl.col("indicated_pct") > 0)
 
-            # Build pairwise correlation table for this variable.
-            # Drop axes that are near-constant (std < 0.05) — they cannot meaningfully
-            # bisect the population and produce degenerate single-quadrant assignments.
-            corr_rows = []
-            def _is_discriminating(df: pl.DataFrame, col: str, max_at_median: float = 0.5) -> bool:
-                s = df[col].cast(pl.Float64).drop_nulls()
-                if len(s) < 3:
-                    return False
-                median = s.median()
-                # reject axis if more than max_at_median fraction of values equal the median
-                frac_at_median = (s == median).sum() / len(s)
-                return float(frac_at_median) <= max_at_median
-
-            present_axes = [
-                a for a in candidate_axes
-                if a in imperfect_df.columns and _is_discriminating(imperfect_df, a)
-            ]
-            for i, ax_x in enumerate(present_axes):
-                for ax_y in present_axes[i + 1 :]:
-                    corr, n_complete = _pair_corr(imperfect_df, ax_x, ax_y)
-                    corr_rows.append(
-                        {
-                            "axis_1": ax_x,
-                            "axis_2": ax_y,
-                            "corr": corr,
-                            "abs_corr": float(abs(corr)) if not np.isnan(corr) else float("nan"),
-                            "n_complete_cases": n_complete,
-                        }
-                    )
-
-            corr_table = pl.DataFrame(corr_rows).sort(
-                ["abs_corr", "n_complete_cases"], descending=[False, True], nulls_last=True
+            corr_table = stratification.pairwise_axis_correlations(
+                imperfect_df, self.CASE_METRIC_COLS, discriminating_only=True
             )
             all_corr_tables[var] = corr_table
 
-            # Select least-correlated axis pair
-            valid_pairs = corr_table.filter(pl.col("corr").is_not_null())
-            if valid_pairs.height > 0:
-                selected = valid_pairs.row(0, named=True)
-                axis_x = selected["axis_1"]
-                axis_y = selected["axis_2"]
-                selected_corr = float(selected["corr"])
-            else:
-                axis_x = "indicated_pct"
-                axis_y = "gap_normalized_entropy"
-                selected_corr = float("nan")
-                pretty_printing.rich_warning(
-                    f"[{var}] Could not compute pairwise correlations for axis selection. "
-                    f"Falling back to default axes: {axis_x} × {axis_y}."
-                )
+            axis_x, axis_y, selected_corr = stratification.select_axis_pair(
+                corr_table,
+                fallback_x="indicated_pct",
+                fallback_y="gap_entropy",
+                context=var,
+            )
 
             complete_mask = pl.col(axis_x).is_not_null() & pl.col(axis_y).is_not_null()
             complete_df = imperfect_df.filter(complete_mask)
 
             scores = var_df.clone()
             if complete_df.height < 2:
-                scores = scores.with_columns(
-                    pl.lit(axis_x).alias("axis_x"),
-                    pl.lit(axis_y).alias("axis_y"),
-                    pl.lit(None).cast(pl.Float64).alias("axis_pair_corr"),
-                    pl.lit(None).cast(pl.Float64).alias("axis_x_median_threshold"),
-                    pl.lit(None).cast(pl.Float64).alias("axis_y_median_threshold"),
-                    pl.lit(None).cast(pl.Utf8).alias("imperfection_stratum"),
+                scores = stratification.null_axis_metadata(
+                    scores, axis_x, axis_y, "imperfection_stratum"
                 )
             else:
                 x_median = float(
@@ -897,28 +852,13 @@ class IntravariableImperfection:
                 )
 
                 scores = self.assign_strata(scores, axis_x, axis_y, x_median, y_median)
-                scores = scores.with_columns(
-                    pl.lit(axis_x).alias("axis_x"),
-                    pl.lit(axis_y).alias("axis_y"),
-                    pl.lit(selected_corr).alias("axis_pair_corr"),
-                    pl.lit(x_median).alias("axis_x_median_threshold"),
-                    pl.lit(y_median).alias("axis_y_median_threshold"),
+                scores = stratification.attach_axis_metadata(
+                    scores, axis_x, axis_y, selected_corr, x_median, y_median
                 )
 
             scores = scores.select(
                 [
-                    self.id_col,
-                    "variable",
-                    "indicated_pct",
-                    "gap_cv",
-                    "gap_qcod",
-                    "gap_burstiness_coeff",
-                    "gap_normalized_entropy",
-                    "gap_adherence_rate",
-                    "max_gap_fraction",
-                    "gap_onset_cv",
-                    "gap_missing_centroid",
-                    "mc_p11",
+                    *metric_cols,
                     "axis_x",
                     "axis_y",
                     "axis_pair_corr",
@@ -944,11 +884,11 @@ class IntravariableImperfection:
                 )
                 print(prevalence)
 
-        self.results.iv_composite_scores = pl.concat(all_scores)
-        self.results.iv_pairwise_correlations = all_corr_tables
+        self.results.cm_case_metrics = pl.concat(all_scores)
+        self.results.cm_pairwise_correlations = all_corr_tables
 
         if save_results and path:
-            self.results.iv_composite_scores.write_csv(path / "case_scores.csv")
+            self.results.cm_case_metrics.write_csv(path / "case_metrics.csv")
             for var, tbl in all_corr_tables.items():
                 tbl.write_csv(path / f"{var}_pairwise_axis_correlations.csv")
 
