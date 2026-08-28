@@ -2,6 +2,7 @@ import traceback
 from pathlib import Path
 
 import polars as pl
+from scipy.stats import spearmanr
 
 from imperfekt.analysis.intravariable import autocorrelation
 from imperfekt.analysis.irregularity import burstiness as burstiness_module

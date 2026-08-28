@@ -1,9 +1,12 @@
+import itertools
 import traceback
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import numpy as np
 import plotly.graph_objects as go
 import polars as pl
+from scipy.stats import spearmanr
 
 from imperfekt.analysis.intervariable import (
     asymmetric_analysis,
