@@ -54,6 +54,21 @@ def _defined_values(df: pl.DataFrame, metric: str) -> np.ndarray:
     return v[~np.isnan(v)]
 
 
+def _tukey_whiskers(values: np.ndarray, q25: float, q75: float) -> tuple[float, float]:
+    """
+    Tukey whisker ends: the most extreme values still within 1.5 IQR of the quartiles.
+
+    Returned instead of the raw min/max so a box plot drawn from the descriptives alone
+    matches what a box plot drawn from the raw values would show.
+    """
+    iqr = q75 - q25
+    lo_fence, hi_fence = q25 - 1.5 * iqr, q75 + 1.5 * iqr
+    inliers = values[(values >= lo_fence) & (values <= hi_fence)]
+    if inliers.size == 0:
+        return float(q25), float(q75)
+    return float(np.min(inliers)), float(np.max(inliers))
+
+
 def describe_groups(
     frames: dict[str, pl.DataFrame],
     metric_cols: list[str],
@@ -63,7 +78,10 @@ def describe_groups(
     """
     Descriptives: one row per (aspect, facet_value, metric, group).
 
-    Reports median [q25, q75], mean (std), n_defined / pct_defined, and the total n in each group.
+    Reports median [q25, q75], mean (std), n_defined / pct_defined, and the total n in each
+    group, plus the observed range and the Tukey whisker ends. The five-number summary is
+    what lets plot_descriptives_boxplot draw a faithful box plot from this frame alone,
+    without keeping the per-case values around.
 
     Parameters:
         frames (dict[str, pl.DataFrame]): Per-case metric frame keyed by group label.
@@ -73,7 +91,7 @@ def describe_groups(
 
     Returns:
         pl.DataFrame: aspect, variable, metric, group, n, n_defined, pct_defined,
-                      mean, std, median, q25, q75.
+                      mean, std, median, q25, q75, min, max, whisker_low, whisker_high.
     """
     rows = []
     for facet_value in _facet_values(frames, facet_col):
@@ -83,6 +101,11 @@ def describe_groups(
                 values = _defined_values(sub, metric)
                 n_total = sub.height
                 n_defined = len(values)
+                q25 = float(np.percentile(values, 25)) if n_defined else float("nan")
+                q75 = float(np.percentile(values, 75)) if n_defined else float("nan")
+                whisker_low, whisker_high = (
+                    _tukey_whiskers(values, q25, q75) if n_defined else (float("nan"), float("nan"))
+                )
                 rows.append(
                     {
                         "aspect": aspect,
@@ -95,8 +118,12 @@ def describe_groups(
                         "mean": float(np.mean(values)) if n_defined else float("nan"),
                         "std": float(np.std(values, ddof=1)) if n_defined > 1 else float("nan"),
                         "median": float(np.median(values)) if n_defined else float("nan"),
-                        "q25": float(np.percentile(values, 25)) if n_defined else float("nan"),
-                        "q75": float(np.percentile(values, 75)) if n_defined else float("nan"),
+                        "q25": q25,
+                        "q75": q75,
+                        "min": float(np.min(values)) if n_defined else float("nan"),
+                        "max": float(np.max(values)) if n_defined else float("nan"),
+                        "whisker_low": whisker_low,
+                        "whisker_high": whisker_high,
                     }
                 )
 
@@ -115,6 +142,10 @@ def describe_groups(
                 "median": pl.Float64,
                 "q25": pl.Float64,
                 "q75": pl.Float64,
+                "min": pl.Float64,
+                "max": pl.Float64,
+                "whisker_low": pl.Float64,
+                "whisker_high": pl.Float64,
             }
         )
     return pl.DataFrame(rows)

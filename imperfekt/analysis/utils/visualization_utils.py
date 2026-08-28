@@ -915,6 +915,302 @@ def plot_qq(
     return fig
 
 
+# Colour cycle shared by the group-comparison figures, one colour per group.
+_GROUP_COLORS = [
+    "#4c72b0",
+    "#dd8452",
+    "#55a868",
+    "#c44e52",
+    "#8172b3",
+    "#937860",
+    "#da8bc3",
+]
+
+
+def plot_descriptives_boxplot(
+    df: pl.DataFrame,
+    group_col: str = "group",
+    metric_col: str = "metric",
+    facet_col: str | None = "variable",
+    title: str | None = None,
+    library: str = "matplotlib",
+    renderer: str | None = None,
+    save_path: str | Path | None = None,
+    save_results: bool = False,
+) -> "go.Figure | plt.Figure":
+    """
+    Box plots of per-group distributions, drawn from precomputed descriptives.
+
+    One panel per metric, since the metrics live on different scales and sharing a y-axis
+    would flatten all but the widest of them. Within a panel the groups sit side by side at
+    each facet value, which is the arrangement that makes a between-group shift readable.
+
+    The boxes are built from the five-number summary in the descriptives frame
+    (``q25``/``median``/``q75`` with Tukey whisker ends), not from the raw values, so the
+    figure can be redrawn from a saved ``descriptives.csv`` alone. Outliers are therefore
+    not drawn — they are past the whiskers by construction, and the ``min``/``max`` columns
+    still carry the full range. The mean is marked with a dashed line, since these metrics
+    are skewed often enough that the gap between mean and median is itself informative.
+
+    Groups whose metric is undefined everywhere in a facet (``n_defined == 0``) are left out
+    of that panel rather than drawn as an empty slot.
+
+    Parameters:
+        df (pl.DataFrame): Descriptives, one row per (facet value, metric, group). Requires
+            the columns written by group_comparison.describe_groups.
+        group_col (str): Column holding the group label — one box colour per value.
+        metric_col (str): Column holding the metric name — one panel per value.
+        facet_col (str | None): Column spread along the x-axis (e.g. "variable"). Ignored
+            when absent or all-null, which is the unfaceted single-slot case.
+        title (str): Suptitle of the figure.
+        library (str): "matplotlib" or "plotly".
+        renderer (str): Renderer for displaying the plot. None disables rendering.
+        save_path (str): Path to save the plot image.
+        save_results (bool): Whether to save the plot image.
+
+    Returns:
+        go.Figure | plt.Figure: The figure object.
+    """
+    required = [group_col, metric_col, "median", "q25", "q75", "whisker_low", "whisker_high"]
+    for col in required:
+        if col not in df.columns:
+            raise ValueError(f"Column '{col}' not found in DataFrame")
+
+    plot_df = df.filter(pl.col("median").is_not_null() & pl.col("median").is_not_nan())
+    if "n_defined" in plot_df.columns:
+        plot_df = plot_df.filter(pl.col("n_defined") > 0)
+    if plot_df.height == 0:
+        raise ValueError("No rows with a defined median to plot.")
+
+    faceted = (
+        facet_col is not None
+        and facet_col in plot_df.columns
+        and plot_df[facet_col].null_count() < plot_df.height
+    )
+    facet_values = sorted(plot_df[facet_col].drop_nulls().unique().to_list()) if faceted else [None]
+    metrics = sorted(plot_df[metric_col].unique().to_list())
+    groups = sorted(plot_df[group_col].unique().to_list())
+    color_of = {g: _GROUP_COLORS[i % len(_GROUP_COLORS)] for i, g in enumerate(groups)}
+
+    def _rows_for(metric, group):
+        sub = plot_df.filter((pl.col(metric_col) == metric) & (pl.col(group_col) == group))
+        by_facet = {}
+        for row in sub.iter_rows(named=True):
+            by_facet[row[facet_col] if faceted else None] = row
+        return by_facet
+
+    if library.lower() == "plotly":
+        from plotly.subplots import make_subplots
+
+        fig = make_subplots(
+            rows=len(metrics),
+            cols=1,
+            subplot_titles=metrics,
+            vertical_spacing=min(0.08, 0.6 / max(len(metrics), 1)),
+        )
+        for m_idx, metric in enumerate(metrics, start=1):
+            for group in groups:
+                by_facet = _rows_for(metric, group)
+                present = [f for f in facet_values if f in by_facet]
+                if not present:
+                    continue
+                rows = [by_facet[f] for f in present]
+                fig.add_trace(
+                    go.Box(
+                        x=[str(f) if faceted else str(group) for f in present],
+                        q1=[r["q25"] for r in rows],
+                        median=[r["median"] for r in rows],
+                        q3=[r["q75"] for r in rows],
+                        lowerfence=[r["whisker_low"] for r in rows],
+                        upperfence=[r["whisker_high"] for r in rows],
+                        mean=[r.get("mean") for r in rows],
+                        sd=[r.get("std") for r in rows],
+                        name=str(group),
+                        legendgroup=str(group),
+                        showlegend=m_idx == 1,
+                        boxmean=True,
+                        marker={"color": color_of[group]},
+                        # The per-box n varies, so it goes in the hover text rather than
+                        # the axis labels, where it would only fit for the smallest facets.
+                        text=[f"n defined {r.get('n_defined')}/{r.get('n')}" for r in rows],
+                    ),
+                    row=m_idx,
+                    col=1,
+                )
+
+        fig.update_layout(
+            title=title,
+            boxmode="group",
+            template="plotly_white",
+            height=max(320, 260 * len(metrics)),
+            legend_title_text=group_col,
+        )
+
+        if renderer:
+            fig.show(renderer=renderer)
+
+        if save_results and save_path:
+            save_path = Path(save_path)
+            if save_path.suffix != ".png":
+                save_path = save_path.with_suffix(".png")
+            fig.write_image(save_path)
+            print(f"Descriptives box plot saved to {save_path}")
+
+        return fig
+
+    elif library.lower() == "matplotlib":
+        # Faceted: one slot per facet value, groups side by side within it. Unfaceted:
+        # one slot per group, which reads better than a single crowded slot.
+        n_slots = len(facet_values) if faceted else len(groups)
+        slot_labels = [str(f) for f in facet_values] if faceted else [str(g) for g in groups]
+        width = min(24, max(7, 1.4 * n_slots * (len(groups) if faceted else 1) + 3))
+        fig, axes = plt.subplots(
+            len(metrics),
+            1,
+            figsize=(width, max(3.2, 2.9 * len(metrics))),
+            squeeze=False,
+        )
+        axes = [ax for (ax,) in axes]
+
+        box_width = 0.8 / len(groups) if faceted else 0.5
+
+        for ax, metric in zip(axes, metrics):
+            for g_idx, group in enumerate(groups):
+                by_facet = _rows_for(metric, group)
+                stats_list, positions = [], []
+                for f_idx, facet_value in enumerate(facet_values):
+                    row = by_facet.get(facet_value)
+                    if row is None:
+                        continue
+                    stats_list.append(
+                        {
+                            "med": row["median"],
+                            "q1": row["q25"],
+                            "q3": row["q75"],
+                            "whislo": row["whisker_low"],
+                            "whishi": row["whisker_high"],
+                            "mean": row.get("mean"),
+                            "fliers": [],
+                            "label": "",
+                        }
+                    )
+                    if faceted:
+                        positions.append(f_idx + (g_idx - (len(groups) - 1) / 2) * box_width)
+                    else:
+                        positions.append(g_idx)
+                if not stats_list:
+                    continue
+                artists = ax.bxp(
+                    stats_list,
+                    positions=positions,
+                    widths=box_width * 0.8,
+                    patch_artist=True,
+                    showmeans=True,
+                    meanline=True,
+                    showfliers=False,
+                    manage_ticks=False,
+                )
+                for patch in artists["boxes"]:
+                    patch.set_facecolor(color_of[group])
+                    patch.set_alpha(0.55)
+                    patch.set_edgecolor(color_of[group])
+                for median in artists["medians"]:
+                    median.set_color("black")
+                    median.set_linewidth(1.4)
+                for mean in artists["means"]:
+                    mean.set_color("black")
+                    mean.set_linestyle(":")
+                    mean.set_linewidth(1.0)
+
+            ax.set_ylabel(metric)
+            ax.set_xticks(range(n_slots))
+            ax.set_xticklabels(
+                slot_labels,
+                rotation=45 if n_slots > 4 else 0,
+                ha="right" if n_slots > 4 else "center",
+            )
+            ax.set_xlim(-0.5, n_slots - 0.5)
+            ax.grid(True, alpha=0.3, axis="y")
+
+        handles = [
+            plt.Line2D(
+                [0],
+                [0],
+                marker="s",
+                linestyle="",
+                markersize=9,
+                alpha=0.55,
+                color=color_of[g],
+                label=str(g),
+            )
+            for g in groups
+        ]
+        if faceted:
+            axes[0].legend(handles=handles, title=group_col, loc="best", fontsize=8)
+        if title:
+            fig.suptitle(title)
+        fig.tight_layout(rect=(0, 0, 1, 0.97) if title else None)
+
+        if save_results and save_path:
+            save_path = Path(save_path)
+            if save_path.suffix != ".png":
+                save_path = save_path.with_suffix(".png")
+            fig.savefig(save_path, dpi=300, bbox_inches="tight")
+            print(f"Descriptives box plot saved to {save_path}")
+
+        if renderer:
+            plt.show()
+
+        plt.close(fig)
+        return fig
+
+    else:
+        raise ValueError(f"Library '{library}' is not supported. Choose 'plotly' or 'matplotlib'.")
+
+
+def _format_q_value(value) -> str:
+    """q-value as text; very small values get a bound rather than a run of zeros."""
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return ""
+    if value < 0.001:
+        return "<0.001"
+    return f"{value:.3f}"
+
+
+def _format_estimate_ci(estimate, lower, upper) -> str:
+    """Point estimate with its interval, or the estimate alone when no interval is given."""
+
+    def defined(v):
+        return v is not None and not (isinstance(v, float) and np.isnan(v))
+
+    def fmt(v):
+        # A bound that came out of a rank-based search on tied values lands on cancellation
+        # noise rather than on zero; printing "-1.11e-16" would suggest a precision the
+        # estimate does not have.
+        return f"{0.0 if abs(v) < 1e-12 else v:.3g}"
+
+    if not defined(estimate):
+        return ""
+    if defined(lower) and defined(upper):
+        return f"{fmt(estimate)} [{fmt(lower)}, {fmt(upper)}]"
+    return fmt(estimate)
+
+
+def _format_hl_column(
+    plot_df: pl.DataFrame, hl_col: str | None, hl_ci_cols: tuple[str, str]
+) -> list[str] | None:
+    """Hodges-Lehmann annotation per row, or None when the frame does not carry it."""
+    if not hl_col or hl_col not in plot_df.columns:
+        return None
+    estimates = plot_df[hl_col].to_list()
+    lo_col, hi_col = hl_ci_cols
+    lowers = plot_df[lo_col].to_list() if lo_col in plot_df.columns else [None] * len(estimates)
+    uppers = plot_df[hi_col].to_list() if hi_col in plot_df.columns else [None] * len(estimates)
+    texts = [_format_estimate_ci(e, lo, hi) for e, lo, hi in zip(estimates, lowers, uppers)]
+    # All-blank means k > 2 groups throughout: the column would be an empty header.
+    return texts if any(texts) else None
+
+
 def plot_effect_size_forest(
     df: pl.DataFrame,
     effect_col: str = "effect_size",
@@ -923,6 +1219,9 @@ def plot_effect_size_forest(
     label_col: str = "metric",
     facet_col: str | None = None,
     significant_col: str | None = "significant",
+    q_col: str | None = "q_value",
+    hl_col: str | None = "hodges_lehmann",
+    hl_ci_cols: tuple[str, str] = ("hl_ci_lower", "hl_ci_upper"),
     reference_line: float = 0.0,
     title: str | None = None,
     xaxis_title: str | None = None,
@@ -944,6 +1243,13 @@ def plot_effect_size_forest(
     tested and found null is information, and dropping it would misrepresent the
     breadth of what was examined.
 
+    When the columns are present, each row carries two further readouts in a text column
+    to the right: the FDR-corrected q-value, and the Hodges-Lehmann median difference with
+    its confidence interval. The plotted effect size is unit-free by design, which is what
+    makes the rows comparable but also what makes a large delta impossible to translate
+    back into the metric — the Hodges-Lehmann estimate is that translation, in the metric's
+    own units. It is defined for two groups only, so it is left blank for a k > 2 omnibus.
+
     Parameters:
         df (pl.DataFrame): One row per comparison.
         effect_col (str): Column holding the point estimate.
@@ -952,6 +1258,12 @@ def plot_effect_size_forest(
         label_col (str): Column holding the row label.
         facet_col (str | None): Optional column prefixed onto the label (e.g. "variable").
         significant_col (str | None): Boolean column controlling filled vs hollow markers.
+        q_col (str | None): Column holding the corrected q-value. None, or absent from the
+            frame, drops the q column from the annotations.
+        hl_col (str | None): Column holding the Hodges-Lehmann median difference. None, or
+            absent, drops the Hodges-Lehmann column.
+        hl_ci_cols (tuple[str, str]): Columns holding its interval bounds. Absent bounds
+            print the point estimate on its own.
         reference_line (float): x position of the dashed null-effect line.
         title (str): Title of the plot.
         xaxis_title (str): Title for the x-axis.
@@ -994,6 +1306,13 @@ def plot_effect_size_forest(
     else:
         significant = [True] * len(effects)
 
+    q_texts = (
+        [_format_q_value(v) for v in plot_df[q_col].to_list()]
+        if q_col and q_col in plot_df.columns
+        else None
+    )
+    hl_texts = _format_hl_column(plot_df, hl_col, hl_ci_cols)
+
     y_positions = np.arange(len(effects))
     # Error bars are offsets from the point estimate, clipped at 0 so an inverted
     # interval (possible with a bootstrap on a degenerate sample) cannot raise.
@@ -1006,6 +1325,17 @@ def plot_effect_size_forest(
             idx = [i for i, s in enumerate(significant) if s == is_sig]
             if not idx:
                 continue
+            hover_extra = [
+                "<br>".join(
+                    part
+                    for part in (
+                        f"q = {q_texts[i]}" if q_texts and q_texts[i] else "",
+                        f"Hodges-Lehmann {hl_texts[i]}" if hl_texts and hl_texts[i] else "",
+                    )
+                    if part
+                )
+                for i in idx
+            ]
             fig.add_trace(
                 go.Scatter(
                     x=effects[idx],
@@ -1024,15 +1354,56 @@ def plot_effect_size_forest(
                         "color": "#1f77b4" if is_sig else "white",
                         "line": {"color": "#1f77b4", "width": 1.5},
                     },
+                    customdata=hover_extra,
+                    hovertemplate="%{y}<br>%{x:.3g}<br>%{customdata}<extra></extra>",
                 )
             )
         fig.add_vline(x=reference_line, line_dash="dash", line_color="grey")
+
+        # Text columns to the right of the plotting area, in paper coordinates so they
+        # stay put whatever the x range does.
+        annotations, right_margin = [], 40
+        columns = [(c, t) for c, t in (("q", q_texts), ("Hodges-Lehmann [95% CI]", hl_texts)) if t]
+        for col_idx, (header, texts) in enumerate(columns):
+            x_paper = 1.02 + col_idx * 0.16
+            annotations.append(
+                {
+                    "text": f"<b>{header}</b>",
+                    "x": x_paper,
+                    "y": 1.0,
+                    "xref": "paper",
+                    "yref": "paper",
+                    "xanchor": "left",
+                    "yanchor": "bottom",
+                    "showarrow": False,
+                    "font": {"size": 10},
+                }
+            )
+            annotations += [
+                {
+                    "text": text,
+                    "x": x_paper,
+                    "y": labels[i],
+                    "xref": "paper",
+                    "yref": "y",
+                    "xanchor": "left",
+                    "showarrow": False,
+                    "font": {"size": 10},
+                }
+                for i, text in enumerate(texts)
+                if text
+            ]
+        if columns:
+            right_margin = 120 + 130 * len(columns)
+
         fig.update_layout(
             title=title,
             xaxis_title=xaxis_title or effect_col,
             yaxis_title="",
             template="plotly_white",
             height=max(400, 26 * len(effects) + 160),
+            annotations=annotations,
+            margin={"r": right_margin},
         )
 
         if renderer:
@@ -1048,7 +1419,10 @@ def plot_effect_size_forest(
         return fig
 
     elif library.lower() == "matplotlib":
-        fig, ax = plt.subplots(figsize=(10, max(6, 0.32 * len(effects) + 2)))
+        n_annotation_cols = sum(1 for t in (q_texts, hl_texts) if t)
+        fig, ax = plt.subplots(
+            figsize=(10 + 2.2 * n_annotation_cols, max(6, 0.32 * len(effects) + 2))
+        )
 
         ax.errorbar(
             effects,
@@ -1077,7 +1451,41 @@ def plot_effect_size_forest(
             ax.set_title(title)
 
         ax.grid(True, alpha=0.3, axis="x")
-        fig.tight_layout()
+
+        # Text columns to the right of the axes: x in axes fraction, y in data
+        # coordinates, so a row's annotation tracks its marker.
+        columns = [(c, t) for c, t in (("q", q_texts), ("Hodges-Lehmann [95% CI]", hl_texts)) if t]
+        if columns:
+            ax.set_ylim(-0.8, len(effects) - 0.2)
+            transform = ax.get_yaxis_transform()
+            for col_idx, (header, texts) in enumerate(columns):
+                x_frac = 1.03 + col_idx * 0.14
+                ax.text(
+                    x_frac,
+                    len(effects) - 0.5,
+                    header,
+                    transform=transform,
+                    fontsize=8,
+                    fontweight="bold",
+                    va="center",
+                    clip_on=False,
+                )
+                for i, text in enumerate(texts):
+                    if not text:
+                        continue
+                    ax.text(
+                        x_frac,
+                        i,
+                        text,
+                        transform=transform,
+                        fontsize=8,
+                        va="center",
+                        clip_on=False,
+                    )
+            # Leave room for the columns; tight_layout only measures the axes themselves.
+            fig.tight_layout(rect=(0, 0, 1 - 0.16 * len(columns), 1))
+        else:
+            fig.tight_layout()
 
         if save_results and save_path:
             save_path = Path(save_path)

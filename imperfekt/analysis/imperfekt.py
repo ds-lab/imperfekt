@@ -322,7 +322,7 @@ class Imperfekt:
             pretty_printing.rich_info(f"Running analysis for group: {group}")
             group_df = merged_df.filter(pl.col(annotation_col) == group)
 
-            if self.save_path:
+            if self.save_path and analysis_mode=="full":
                 group_save_path = self.save_path / str(group)
                 group_save_path.mkdir(parents=True, exist_ok=True)
             else:
@@ -457,7 +457,8 @@ class Imperfekt:
             self.group_comparison_descriptives — per (aspect, variable, metric, group)
             self.group_comparison_results      — per (aspect, variable, metric)
             self.group_comparison_posthoc      — per group pair; empty for two groups
-            self.group_comparison_plots        — forest plot per aspect
+            self.group_comparison_plots        — per aspect, a forest plot of the effect
+                                                 sizes and a box plot of the descriptives
 
         Parameters:
             save_results (bool): Whether to save CSVs and figures to save_path.
@@ -528,12 +529,15 @@ class Imperfekt:
         self.group_comparison_results = results
 
         self.group_comparison_posthoc = self._run_group_posthoc(results, aspect_frames)
-        self.group_comparison_plots = self._plot_group_differences(results, path, save_results)
+        self.group_comparison_plots = self._plot_group_differences(
+            results, self.group_comparison_descriptives, path, save_results
+        )
 
         if save_results and path:
             self.group_comparison_descriptives.write_csv(path / "descriptives.csv")
             self.group_comparison_results.write_csv(path / "comparisons.csv")
-            self.group_comparison_posthoc.write_csv(path / "posthoc.csv")
+            if self.group_comparison_posthoc.height > 0:
+                self.group_comparison_posthoc.write_csv(path / "posthoc.csv")
 
         if self.renderer:
             self._report_group_differences(results)
@@ -587,19 +591,25 @@ class Imperfekt:
     def _plot_group_differences(
         self,
         results: pl.DataFrame,
+        descriptives: pl.DataFrame,
         path: Path | None,
         save_results: bool,
     ) -> dict:
         """
-        One forest plot of effect sizes with confidence intervals per aspect.
+        Two figures per aspect: a forest plot of effect sizes and a descriptives box plot.
+
+        The forest plot ranks the comparisons; the box plot shows the distributions those
+        comparisons were computed from, which is what tells you whether an effect is a shift
+        of the whole distribution or a tail.
 
         Parameters:
             results (pl.DataFrame): The FDR-corrected comparison frame.
+            descriptives (pl.DataFrame): The per-group descriptives frame.
             path (Path | None): Directory to save figures into.
             save_results (bool): Whether to save the figures.
 
         Returns:
-            dict: aspect -> figure object.
+            dict: "<aspect>_forest" / "<aspect>_descriptives" -> figure object.
         """
         plots = {}
         for aspect in results["aspect"].unique().to_list():
@@ -611,7 +621,7 @@ class Imperfekt:
 
             effect_name = aspect_results["effect_size_name"][0]
             try:
-                plots[aspect] = visualization_utils.plot_effect_size_forest(
+                plots[f"{aspect}_forest"] = visualization_utils.plot_effect_size_forest(
                     aspect_results,
                     facet_col="variable",
                     title=f"{aspect.capitalize()} — group differences",
@@ -626,6 +636,28 @@ class Imperfekt:
                 )
             except ValueError as exc:
                 pretty_printing.rich_warning(f"Could not plot {aspect} forest plot: {exc}")
+
+            aspect_descriptives = descriptives.filter(pl.col("aspect") == aspect)
+            if aspect_descriptives.height == 0:
+                continue
+            try:
+                plots[f"{aspect}_descriptives"] = visualization_utils.plot_descriptives_boxplot(
+                    aspect_descriptives,
+                    group_col="group",
+                    metric_col="metric",
+                    facet_col="variable",
+                    title=f"{aspect.capitalize()} — metric distributions per group",
+                    library=self.plot_library,
+                    renderer=self.renderer,
+                    save_path=(
+                        path / f"{aspect}_descriptives_box.png" if path is not None else None
+                    ),
+                    save_results=save_results,
+                )
+            except ValueError as exc:
+                pretty_printing.rich_warning(
+                    f"Could not plot {aspect} descriptives box plot: {exc}"
+                )
         return plots
 
     def _report_group_differences(self, results: pl.DataFrame):
