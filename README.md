@@ -45,10 +45,10 @@ df = pl.read_parquet("your_data.parquet")
 # Configure Analyzer Setup
 analyzer = Imperfekt(
     df=df,
-    id_col="id",           # Unique identifier column
-    clock_col="clock",     # Timestamp column
-    cols=["var1", "var2"], # Variables to analyze
-    save_path="./results"
+    id_col="id",  # Unique identifier column
+    clock_col="clock",  # Timestamp column
+    cols=["var1", "var2"],  # Variables to analyze
+    save_path="./results",
 )
 
 # Simple intravariable missingness stats
@@ -60,12 +60,7 @@ print(analyzer.intravariable.results.cs_case_level_statistics)
 results = analyzer.run()
 
 # Or generate missingness-aware features for ML
-fg = FeatureGenerator(
-    df=df,
-    id_col="id",
-    clock_col="clock",
-    variable_cols=["var1", "var2"]
-)
+fg = FeatureGenerator(df=df, id_col="id", clock_col="clock", variable_cols=["var1", "var2"])
 features_df = fg.add_binary_masks().add_temporal_features().df
 
 # Or restrict individual steps to a subset of variables

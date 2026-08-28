@@ -23,10 +23,10 @@ from imperfekt.features import FeatureGenerator
 
 fg = FeatureGenerator(
     df,
-    id_col="patient_id",      # Entity identifier
-    clock_col="timestamp",    # Datetime column
+    id_col="patient_id",  # Entity identifier
+    clock_col="timestamp",  # Datetime column
     variable_cols=["hr", "sbp", "rr"],  # Columns to analyze
-    imperfection="missingness"  # Type of imperfection
+    imperfection="missingness",  # Type of imperfection
 )
 
 # Generate all features
@@ -48,8 +48,8 @@ $$mask_{i,t} = \begin{cases} 1 & \text{if } x_{i,t} \text{ is null} \\ 0 & \text
 Base imperfection indicators for each variable.
 
 ```python
-fg.add_binary_masks()                        # all variable_cols
-fg.add_binary_masks(cols=["hr", "sbp"])      # subset only
+fg.add_binary_masks()  # all variable_cols
+fg.add_binary_masks(cols=["hr", "sbp"])  # subset only
 ```
 
 | Output Column | Description |
@@ -76,8 +76,8 @@ Encodes cyclical time patterns using sine/cosine transformation to preserve cont
 ### 3. Temporal Features
 
 ```python
-fg.add_temporal_features()                   # all variable_cols
-fg.add_temporal_features(cols=["hr"])        # subset only
+fg.add_temporal_features()  # all variable_cols
+fg.add_temporal_features(cols=["hr"])  # subset only
 ```
 
 #### Lag Mask
@@ -116,8 +116,8 @@ Elapsed time (in seconds) since last imperfect or non-imperfect observation:
 ### 4. Window Features
 
 ```python
-fg.add_window_features(rolling_window_sizes=[2], ewma_alphas=[0.3])               # all variable_cols
-fg.add_window_features(rolling_window_sizes=[2], ewma_alphas=[0.3], cols=["sbp"]) # subset only
+fg.add_window_features(rolling_window_sizes=[2], ewma_alphas=[0.3])  # all variable_cols
+fg.add_window_features(rolling_window_sizes=[2], ewma_alphas=[0.3], cols=["sbp"])  # subset only
 ```
 
 #### Rolling Statistics
@@ -150,7 +150,7 @@ where $\alpha \in (0, 1)$ is the smoothing factor.
 ### 5. Irregularity Features
 
 ```python
-fg.add_irregularity_features()                          # default window_size=5
+fg.add_irregularity_features()  # default window_size=5
 fg.add_irregularity_features(acceleration_window_size=10)
 ```
 
@@ -188,10 +188,10 @@ Positive values mean gaps are growing (spacing out); negative values mean gaps a
 ### 6. Interaction Features
 
 ```python
-fg.add_interaction_features()                       # all variable_cols
-fg.add_interaction_features(cols=["hr", "sbp"])     # subset only
-fg.add_row_imperfection_pct()                       # all variable_cols
-fg.add_row_imperfection_pct(cols=["hr", "sbp"])     # subset only
+fg.add_interaction_features()  # all variable_cols
+fg.add_interaction_features(cols=["hr", "sbp"])  # subset only
+fg.add_row_imperfection_pct()  # all variable_cols
+fg.add_row_imperfection_pct(cols=["hr", "sbp"])  # subset only
 ```
 
 #### Pairwise Interactions
@@ -266,13 +266,14 @@ Parameters are prefixed by feature set so the call site is self-documenting.
 from imperfekt.features import FeatureGenerator
 import polars as pl
 
-df = pl.DataFrame({
-    "patient": ["a", "a", "a", "a"],
-    "time": ["2023-01-01 00:00", "2023-01-01 00:05",
-             "2023-01-01 00:10", "2023-01-01 00:15"],
-    "hr": [80, None, None, 85],
-    "sbp": [None, 120, None, 125],
-}).with_columns(pl.col("time").str.to_datetime())
+df = pl.DataFrame(
+    {
+        "patient": ["a", "a", "a", "a"],
+        "time": ["2023-01-01 00:00", "2023-01-01 00:05", "2023-01-01 00:10", "2023-01-01 00:15"],
+        "hr": [80, None, None, 85],
+        "sbp": [None, 120, None, 125],
+    }
+).with_columns(pl.col("time").str.to_datetime())
 
 fg = FeatureGenerator(df, id_col="patient", clock_col="time")
 

@@ -2,7 +2,6 @@ import traceback
 from pathlib import Path
 
 import matplotlib.pyplot as plt
-import numpy as np
 import plotly.graph_objects as go
 import polars as pl
 
@@ -227,7 +226,9 @@ class IntervariableImperfection:
                 id_col=self.id_col,
                 clock_col=self.clock_col,
                 clock_no_col=self.clock_no_col,
-                save_path=self._path(f"{new_path_level_name}/all_null_rows_stats.csv") if self.save_path else None,
+                save_path=self._path(f"{new_path_level_name}/all_null_rows_stats.csv")
+                if self.save_path
+                else None,
                 save_results=save_results,
             )
             if self.renderer and self.results.rs_empty_statistics is not None:
@@ -284,7 +285,9 @@ class IntervariableImperfection:
             id_col=self.id_col,
             clock_col=self.clock_col,
             clock_no_col=self.clock_no_col,
-            save_path=self._path(f"{new_path_level_name}/row_completeness_stats.csv") if self.save_path else None,
+            save_path=self._path(f"{new_path_level_name}/row_completeness_stats.csv")
+            if self.save_path
+            else None,
             save_results=save_results,
         )
 
@@ -307,6 +310,18 @@ class IntervariableImperfection:
                 save_results=save_results,
                 library=self.plot_library,
             )
+        if self.results.rs_overall_statistics is not None:
+            visualization_utils.plot_histogram(
+                self.results.rs_overall_statistics,
+                x="indicated_vars_pct",
+                title="Imperfect Variables Per Row Percentage",
+                xaxis_title="Imperfect Variables Percentage",
+                yaxis_title="#Cases",
+                renderer=self.renderer,
+                save_path=self._path(f"{new_path_level_name}/indicated_vars_pct_histogram.png"),
+                save_results=save_results,
+                library=self.plot_library,
+            )
 
         # 4. Imperfect-variable stats per ID
         self.results.rs_case_level_statistics = row_statistics.analyze_row_imperfection_per_id(
@@ -315,7 +330,9 @@ class IntervariableImperfection:
             id_col=self.id_col,
             clock_col=self.clock_col,
             clock_no_col=self.clock_no_col,
-            save_path=self._path(f"{new_path_level_name}/row_completeness_per_id_stats.csv") if self.save_path else None,
+            save_path=self._path(f"{new_path_level_name}/row_completeness_per_id_stats.csv")
+            if self.save_path
+            else None,
             save_results=save_results,
         )
 
@@ -568,8 +585,12 @@ class IntervariableImperfection:
 
                     self.results.plots.sc_lag_scatter_plot[pair_key] = (
                         visualization_utils.plot_scatter(
-                            x=self.results.sc_symmetric_crosscorrelation[pair_key]["lag"].to_numpy(),
-                            y=self.results.sc_symmetric_crosscorrelation[pair_key]["crosscorr"].to_numpy(),
+                            x=self.results.sc_symmetric_crosscorrelation[pair_key][
+                                "lag"
+                            ].to_numpy(),
+                            y=self.results.sc_symmetric_crosscorrelation[pair_key][
+                                "crosscorr"
+                            ].to_numpy(),
                             title=f"{col_x} - {col_y} Cross-Correlation",
                             xaxis_title="Lags",
                             yaxis_title="Phi coefficient",
@@ -677,9 +698,6 @@ class IntervariableImperfection:
                             print(
                                 f"  When {indicated_col} missing: {obs_col} mean = {stats_result['conditional_stats']['missing_mean']:.3f}"
                             )
-                            print(
-                                f"  When {indicated_col} observed: {obs_col} mean = {stats_result['conditional_stats']['observed_mean']:.3f}"
-                            )
 
                         if "mannwhitney" in stats_result:
                             print(
@@ -738,8 +756,12 @@ class IntervariableImperfection:
                     # Visualize lagged correlations
                     self.results.plots.ac_lag_scatter_plot[pair_key] = (
                         visualization_utils.plot_scatter(
-                            x=self.results.ac_asymmetric_crosscorrelation[pair_key]["lag"].to_numpy(),
-                            y=self.results.ac_asymmetric_crosscorrelation[pair_key]["crosscorr"].to_numpy(),
+                            x=self.results.ac_asymmetric_crosscorrelation[pair_key][
+                                "lag"
+                            ].to_numpy(),
+                            y=self.results.ac_asymmetric_crosscorrelation[pair_key][
+                                "crosscorr"
+                            ].to_numpy(),
                             title=f"Asymmetric Correlation: Missing {indicated_col} vs Observed {obs_col}",
                             xaxis_title="Lag",
                             yaxis_title="Rank-Biserial Correlation",
@@ -1140,25 +1162,17 @@ class IntervariableImperfection:
         )
         self.results.cm_pairwise_correlations = corr_table
 
-        axis_x, axis_y, selected_corr = stratification.select_axis_pair(
-            corr_table, fallback_x="avg_indicated_pct", fallback_y="breadth"
+        # Thresholds are fitted on imperfect cases only, so Q_complete cases do not drag
+        # the medians down, but every case gets labelled.
+        scores, axis_x, axis_y, selected_corr = stratification.fit_and_stratify(
+            base,
+            fit_df=imperfect_base,
+            corr_table=corr_table,
+            assign_fn=self.assign_strata,
+            stratum_col=self.STRATUM_COL,
+            fallback_x="avg_indicated_pct",
+            fallback_y="breadth",
         )
-
-        complete_mask = pl.col(axis_x).is_not_null() & pl.col(axis_y).is_not_null()
-        complete_df = imperfect_base.filter(complete_mask)
-
-        scores = base.clone()
-        if complete_df.height < 2:
-            scores = stratification.null_axis_metadata(
-                scores, axis_x, axis_y, "intervariable_stratum"
-            )
-        else:
-            x_median = float(complete_df.select(pl.col(axis_x).cast(pl.Float64).median()).item() or 0.0)
-            y_median = float(complete_df.select(pl.col(axis_y).cast(pl.Float64).median()).item() or 0.0)
-            scores = self.assign_strata(scores, axis_x, axis_y, x_median, y_median)
-            scores = stratification.attach_axis_metadata(
-                scores, axis_x, axis_y, selected_corr, x_median, y_median
-            )
 
         scores = scores.select(
             [
@@ -1177,8 +1191,7 @@ class IntervariableImperfection:
             stratified = scores.filter(pl.col("intervariable_stratum").is_not_null())
             total = len(stratified)
             prevalence = (
-                stratified
-                .group_by("intervariable_stratum")
+                stratified.group_by("intervariable_stratum")
                 .agg(pl.len().alias("n"))
                 .with_columns((pl.col("n") / total * 100).round(1).alias("pct"))
                 .sort("intervariable_stratum")
@@ -1250,6 +1263,9 @@ if __name__ == "__main__":
     bp_A = [120.0, 118.0, 122.0, 119.0, 121.0, None, 117.0, 123.0, 120.0, 119.0]
     bp_B = [115.0, 116.0, 114.0, 117.0, 115.0, 118.0, 116.0, 119.0, None, 114.0]
 
+    rows = [("A", times_A[i], hr_A[i], bp_A[i], i) for i in range(10)] + [
+        ("B", times_B[i], hr_B[i], bp_B[i], i) for i in range(10)
+    ]
     rows = [("A", times_A[i], hr_A[i], bp_A[i], i) for i in range(10)] + [
         ("B", times_B[i], hr_B[i], bp_B[i], i) for i in range(10)
     ]

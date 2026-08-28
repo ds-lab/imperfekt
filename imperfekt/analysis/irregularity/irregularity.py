@@ -1,7 +1,6 @@
 import traceback
 from pathlib import Path
 
-import numpy as np
 import polars as pl
 
 from imperfekt.analysis.intravariable import autocorrelation
@@ -669,28 +668,17 @@ class Irregularity:
         corr_table = stratification.pairwise_axis_correlations(base, self.CASE_METRIC_COLS)
         self.results.cm_pairwise_correlations = corr_table
 
-        axis_x, axis_y, selected_corr = stratification.select_axis_pair(
-            corr_table, fallback_x="interval_cv", fallback_y="interval_adh_rate"
+        # Every case with an observation rhythm is stratifiable, so thresholds are fitted
+        # on the same frame that gets labelled — there is no Q_complete subset to exclude.
+        scores_a, axis_x, axis_y, selected_corr = stratification.fit_and_stratify(
+            base,
+            fit_df=base,
+            corr_table=corr_table,
+            assign_fn=self.assign_strata,
+            stratum_col=self.STRATUM_COL,
+            fallback_x="interval_cv",
+            fallback_y="interval_adh_rate",
         )
-
-        complete_mask = pl.col(axis_x).is_not_null() & pl.col(axis_y).is_not_null()
-        complete_df = base.filter(complete_mask)
-
-        # median-bisection on selected least-correlated axis pair
-        scores_a = base.clone()
-        if len(complete_df) < 2:
-            scores_a = stratification.null_axis_metadata(
-                scores_a, axis_x, axis_y, "irregularity_stratum"
-            )
-        else:
-            # .item() extracts the underlying Python scalar from a 1x1 dataframe/series
-            x_median = float(complete_df.select(pl.col(axis_x).cast(pl.Float64).median()).item())
-            y_median = float(complete_df.select(pl.col(axis_y).cast(pl.Float64).median()).item())
-
-            scores_a = self.assign_strata(scores_a, axis_x, axis_y, x_median, y_median)
-            scores_a = stratification.attach_axis_metadata(
-                scores_a, axis_x, axis_y, selected_corr, x_median, y_median
-            )
 
         scores_a = scores_a.select(
             [
@@ -706,9 +694,7 @@ class Irregularity:
         self.results.cm_case_metrics = scores_a
 
         if self.renderer:
-            pretty_printing.rich_info(
-                "Case metrics axis selection — pairwise metric correlations:"
-            )
+            pretty_printing.rich_info("Case metrics axis selection — pairwise metric correlations:")
             print(corr_table)
 
             axis_direction = {

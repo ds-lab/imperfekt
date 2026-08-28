@@ -17,18 +17,23 @@ This module provides statistical analysis tools for characterizing imperfection 
 ```python
 from imperfekt.analysis import Imperfekt
 
-df = pl.DataFrame({
-    "patient": ["a", "a", "a", "a", "b", "b", "b"],
-    "time": [
-        "2023-01-01 08:00", "2023-01-01 08:05", "2023-01-01 08:10", "2023-01-01 08:15",
-        "2023-01-02 12:00", "2023-01-02 12:05", "2023-01-02 12:10"
-    ],
-    "heartrate": [60, None, 70, None, 80, 85, None],
-    "blood_pressure": [120, 125, None, None, 130, None, 140],
-    "resprate": [12, 14, None, 16, 18, None, 20],
-}).with_columns(
-    pl.col("time").str.strptime(pl.Datetime, format="%Y-%m-%d %H:%M")
-)
+df = pl.DataFrame(
+    {
+        "patient": ["a", "a", "a", "a", "b", "b", "b"],
+        "time": [
+            "2023-01-01 08:00",
+            "2023-01-01 08:05",
+            "2023-01-01 08:10",
+            "2023-01-01 08:15",
+            "2023-01-02 12:00",
+            "2023-01-02 12:05",
+            "2023-01-02 12:10",
+        ],
+        "heartrate": [60, None, 70, None, 80, 85, None],
+        "blood_pressure": [120, 125, None, None, 130, None, 140],
+        "resprate": [12, 14, None, 16, 18, None, 20],
+    }
+).with_columns(pl.col("time").str.strptime(pl.Datetime, format="%Y-%m-%d %H:%M"))
 
 analyzer = Imperfekt(
     df=df,
@@ -80,10 +85,10 @@ separately per group and then tests whether they differ between groups.
 ```python
 analyzer.run_grouped_analysis(annotation_col="outcome", analysis_mode="metrics")
 
-analyzer.group_comparison_results        # effect size + CI + q per metric
-analyzer.group_comparison_descriptives   # median [IQR], mean (SD), n per group
-analyzer.group_comparison_posthoc        # pairwise comparisons (k > 2 groups only)
-analyzer.group_comparison_plots          # forest plot per aspect
+analyzer.group_comparison_results  # effect size + CI + q per metric
+analyzer.group_comparison_descriptives  # median [IQR], mean (SD), n per group
+analyzer.group_comparison_posthoc  # pairwise comparisons (k > 2 groups only)
+analyzer.group_comparison_plots  # forest plot per aspect
 ```
 
 ### Method

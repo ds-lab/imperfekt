@@ -3,11 +3,12 @@ from pathlib import Path
 from typing import TypedDict
 
 import polars as pl
+from config import COHORT_MIN_READINGS, COHORT_PATH, COHORT_WINDOW_MINUTES
 
 from imperfekt import Imperfekt
-from config import COHORT_PATH, COHORT_MIN_READINGS, COHORT_WINDOW_MINUTES
 
 pl.Config.set_tbl_cols(8)
+
 
 class Modus(TypedDict):
     method: str | None
@@ -15,14 +16,18 @@ class Modus(TypedDict):
     missing_as: str
     ranges: bool
 
+
 df = pl.read_parquet(Path(COHORT_PATH))
 
 # %%
-df_filtered = df.with_columns(
-    pl.col("clock").min().over("PcrKey").alias("_start_clock")
-).with_columns(
-    ((pl.col("clock") - pl.col("_start_clock")).dt.total_minutes()).alias("_minutes_from_start")
-).filter(pl.col("_minutes_from_start") <= COHORT_WINDOW_MINUTES).drop(["_start_clock", "_minutes_from_start"])
+df_filtered = (
+    df.with_columns(pl.col("clock").min().over("PcrKey").alias("_start_clock"))
+    .with_columns(
+        ((pl.col("clock") - pl.col("_start_clock")).dt.total_minutes()).alias("_minutes_from_start")
+    )
+    .filter(pl.col("_minutes_from_start") <= COHORT_WINDOW_MINUTES)
+    .drop(["_start_clock", "_minutes_from_start"])
+)
 
 valid_keys = (
     df_filtered.group_by("PcrKey")
@@ -39,19 +44,19 @@ print(df_filtered.select(["sbp", "hr", "o2sat", "rr"]).describe())
 
 # %%
 REFERENCE_RANGES = {
-    "hr":    (15.0, 300.0),
-    "sbp":   (10.0, 350.0),
+    "hr": (15.0, 300.0),
+    "sbp": (10.0, 350.0),
     "o2sat": (10.0, 100.0),
-    "rr":    (2.0, 80.0),
+    "rr": (2.0, 80.0),
 }
 
 # method=None means ranges-only detection (no statistical method)
 MODI: list[Modus] = [
-    {"method": "iqr",  "threshold": 1.5, "missing_as": "ignore", "ranges": False},
-    {"method": "iqr",  "threshold": 1.5, "missing_as": "ignore", "ranges": True},
-    {"method": "mad",  "threshold": 3.5, "missing_as": "ignore", "ranges": False},
-    {"method": "mad",  "threshold": 3.5, "missing_as": "ignore", "ranges": True},
-    {"method": None,   "threshold": 1.5, "missing_as": "ignore", "ranges": True},
+    {"method": "iqr", "threshold": 1.5, "missing_as": "ignore", "ranges": False},
+    {"method": "iqr", "threshold": 1.5, "missing_as": "ignore", "ranges": True},
+    {"method": "mad", "threshold": 3.5, "missing_as": "ignore", "ranges": False},
+    {"method": "mad", "threshold": 3.5, "missing_as": "ignore", "ranges": True},
+    {"method": None, "threshold": 1.5, "missing_as": "ignore", "ranges": True},
 ]
 
 # %%
@@ -85,10 +90,7 @@ for modus in MODI:
 
     stats = imp.intravariable.results.cs_overall_statistics
     if stats is not None:
-        results.append(
-            stats.select(["column", "indicated_pct"])
-            .rename({"indicated_pct": name})
-        )
+        results.append(stats.select(["column", "indicated_pct"]).rename({"indicated_pct": name}))
 
 # %%
 comparison = results[0]
@@ -96,4 +98,3 @@ for tbl in results[1:]:
     comparison = comparison.join(tbl, on="column", how="left")
 
 print(comparison)
-

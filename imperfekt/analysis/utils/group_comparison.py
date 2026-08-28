@@ -103,17 +103,26 @@ def describe_groups(
     if not rows:
         return pl.DataFrame(
             schema={
-                "aspect": pl.Utf8, "variable": pl.Utf8, "metric": pl.Utf8, "group": pl.Utf8,
-                "n": pl.Int64, "n_defined": pl.Int64, "pct_defined": pl.Float64,
-                "mean": pl.Float64, "std": pl.Float64, "median": pl.Float64,
-                "q25": pl.Float64, "q75": pl.Float64,
+                "aspect": pl.Utf8,
+                "variable": pl.Utf8,
+                "metric": pl.Utf8,
+                "group": pl.Utf8,
+                "n": pl.Int64,
+                "n_defined": pl.Int64,
+                "pct_defined": pl.Float64,
+                "mean": pl.Float64,
+                "std": pl.Float64,
+                "median": pl.Float64,
+                "q25": pl.Float64,
+                "q75": pl.Float64,
             }
         )
     return pl.DataFrame(rows)
 
 
-def _definedness_p_value(frames: dict[str, pl.DataFrame], metric: str,
-                         facet_col: str | None, facet_value) -> float:
+def _definedness_p_value(
+    frames: dict[str, pl.DataFrame], metric: str, facet_col: str | None, facet_value
+) -> float:
     """
     Chi-square p-value for "is this metric computable equally often in every group?".
 
@@ -182,7 +191,9 @@ def compare_groups(
     ordered = {g: frames[k] for g, k in zip(group_labels, sorted(frames, key=str))}
 
     rows = []
-    for facet_value in _facet_values(frames, facet_col): # intravarialbe has "variable", other aspects have None
+    for facet_value in _facet_values(
+        frames, facet_col
+    ):  # intravarialbe has "variable", other aspects have None
         for metric in metric_cols:
             row = {
                 "aspect": aspect,
@@ -329,8 +340,7 @@ def posthoc_pairwise(
     ordered = {g: frames[k] for g, k in zip(group_labels, sorted(frames, key=str))}
 
     samples = {
-        g: _defined_values(_slice(df, facet_col, facet_value), metric)
-        for g, df in ordered.items()
+        g: _defined_values(_slice(df, facet_col, facet_value), metric) for g, df in ordered.items()
     }
     usable = [g for g in group_labels if len(samples[g]) >= MIN_DEFINED_PER_GROUP]
     if len(usable) < 2:
@@ -368,8 +378,10 @@ def posthoc_pairwise(
                     "ci_lower": float(es["ci_lower"]),
                     "ci_upper": float(es["ci_upper"]),
                     "direction": (
-                        f"higher in {g1}" if delta > 0
-                        else f"higher in {g2}" if delta < 0
+                        f"higher in {g1}"
+                        if delta > 0
+                        else f"higher in {g2}"
+                        if delta < 0
                         else "no difference"
                     ),
                 }
@@ -378,4 +390,3 @@ def posthoc_pairwise(
     if not rows:
         return pl.DataFrame(schema=POSTHOC_SCHEMA)
     return pl.DataFrame(rows, infer_schema_length=None)
-

@@ -390,7 +390,7 @@ class Imperfekt:
                 raise ValueError(
                     f"Unsupported analysis_mode: {analysis_mode}. Supported modes: 'full', 'metrics'."
                 )
-                
+
         if analysis_mode == "metrics":
             # check if groups are significantly different in their metrics and store as table including mean (and std) per metric per group
             self._check_group_differences(
@@ -524,9 +524,7 @@ class Imperfekt:
                 "definedness_q_value",
                 statistics_utils.benjamini_hochberg(results["definedness_p_value"].to_numpy()),
             ),
-        ).with_columns(
-            (pl.col("q_value") < self.alpha).fill_null(False).alias("significant")
-        )
+        ).with_columns((pl.col("q_value") < self.alpha).fill_null(False).alias("significant"))
         self.group_comparison_results = results
 
         self.group_comparison_posthoc = self._run_group_posthoc(results, aspect_frames)
@@ -583,9 +581,7 @@ class Imperfekt:
             return posthoc.with_columns(pl.lit(None).cast(pl.Float64).alias("q_value"))
 
         return posthoc.with_columns(
-            pl.Series(
-                "q_value", statistics_utils.benjamini_hochberg(posthoc["p_value"].to_numpy())
-            )
+            pl.Series("q_value", statistics_utils.benjamini_hochberg(posthoc["p_value"].to_numpy()))
         )
 
     def _plot_group_differences(
@@ -644,8 +640,7 @@ class Imperfekt:
         pretty_printing.rich_info(
             f"Group comparison: {tested.height} metric(s) tested across "
             f"{groups_desc} groups, {n_significant} surviving FDR correction "
-            f"at alpha={self.alpha}"
-            + (f", {skipped} skipped." if skipped else ".")
+            f"at alpha={self.alpha}" + (f", {skipped} skipped." if skipped else ".")
         )
         if tested.height:
             print(
@@ -653,8 +648,16 @@ class Imperfekt:
                 .sort("_abs", descending=True)
                 .head(5)
                 .select(
-                    ["aspect", "variable", "metric", "effect_size", "ci_lower",
-                     "ci_upper", "q_value", "direction"]
+                    [
+                        "aspect",
+                        "variable",
+                        "metric",
+                        "effect_size",
+                        "ci_lower",
+                        "ci_upper",
+                        "q_value",
+                        "direction",
+                    ]
                 )
             )
 

@@ -100,7 +100,7 @@ def t_test_two_subgroups(
     if stdd1 == 0 or stdd2 == 0:
         raise ValueError("Standard deviation of one or both groups is zero, cannot perform t-test.")
     equal_var = np.isclose(stdd1, stdd2, rtol=1e-5)
-    
+
     stat = stats.ttest_ind(
         df1_filtered[col1].to_numpy(),
         df2_filtered[col2].to_numpy(),

@@ -2,9 +2,9 @@ import sys
 from pathlib import Path
 
 import polars as pl
+from config import COHORT_MIN_READINGS, COHORT_WINDOW_MINUTES
 
 from imperfekt.analysis.utils.masking import create_plausibility_mask
-from config import COHORT_MIN_READINGS, COHORT_WINDOW_MINUTES
 
 _SEP_DIR = Path(__file__).resolve().parent.parent / "sepsis_prediction"
 if str(_SEP_DIR) not in sys.path:
@@ -14,12 +14,12 @@ from imputation import impute  # noqa: E402
 VITAL_COLS = ["sbp", "hr", "o2sat", "rr"]
 
 CONFIGS: dict[str, dict[str, str]] = {
-    "iq_pk_in": {"method": "iqr", "plaus": "keep",   "imp": "none"},
-    "iq_pk_il": {"method": "iqr", "plaus": "keep",   "imp": "locf"},
+    "iq_pk_in": {"method": "iqr", "plaus": "keep", "imp": "none"},
+    "iq_pk_il": {"method": "iqr", "plaus": "keep", "imp": "locf"},
     "iq_pr_in": {"method": "iqr", "plaus": "remove", "imp": "none"},
     "iq_pr_il": {"method": "iqr", "plaus": "remove", "imp": "locf"},
-    "ma_pk_in": {"method": "mad", "plaus": "keep",   "imp": "none"},
-    "ma_pk_il": {"method": "mad", "plaus": "keep",   "imp": "locf"},
+    "ma_pk_in": {"method": "mad", "plaus": "keep", "imp": "none"},
+    "ma_pk_il": {"method": "mad", "plaus": "keep", "imp": "locf"},
     "ma_pr_in": {"method": "mad", "plaus": "remove", "imp": "none"},
     "ma_pr_il": {"method": "mad", "plaus": "remove", "imp": "locf"},
 }
@@ -30,8 +30,9 @@ def filter_cohort(df: pl.DataFrame) -> pl.DataFrame:
     df_win = (
         df.with_columns(pl.col("clock").min().over("PcrKey").alias("_start_clock"))
         .with_columns(
-            ((pl.col("clock") - pl.col("_start_clock")).dt.total_minutes())
-            .alias("_minutes_from_start")
+            ((pl.col("clock") - pl.col("_start_clock")).dt.total_minutes()).alias(
+                "_minutes_from_start"
+            )
         )
         .filter(pl.col("_minutes_from_start") <= COHORT_WINDOW_MINUTES)
         .drop(["_start_clock", "_minutes_from_start"])
@@ -93,10 +94,12 @@ def _apply_plausibility(df: pl.DataFrame, mask: pl.DataFrame, plaus: str) -> pl.
     mask_renamed = mask.rename({v: f"_m_{v}" for v in VITAL_COLS})
     return (
         df.join(mask_renamed, on=["PcrKey", "clock"], how="left")
-        .with_columns([
-            pl.when(pl.col(f"_m_{v}") == 1).then(None).otherwise(pl.col(v)).alias(v)
-            for v in VITAL_COLS
-        ])
+        .with_columns(
+            [
+                pl.when(pl.col(f"_m_{v}") == 1).then(None).otherwise(pl.col(v)).alias(v)
+                for v in VITAL_COLS
+            ]
+        )
         .drop([f"_m_{v}" for v in VITAL_COLS])
     )
 

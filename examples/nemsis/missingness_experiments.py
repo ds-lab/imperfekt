@@ -2,20 +2,23 @@
 from pathlib import Path
 
 import polars as pl
+from config import COHORT_MIN_READINGS, COHORT_PATH, COHORT_WINDOW_MINUTES
 
 from imperfekt import Imperfekt
-from config import COHORT_PATH, COHORT_MIN_READINGS, COHORT_WINDOW_MINUTES
 
 pl.Config.set_tbl_cols(8)
 pl.Config.set_tbl_rows(25)
 
 df = pl.read_parquet(Path(COHORT_PATH))
 # %%
-df_filtered = df.with_columns(
-    pl.col("clock").min().over("PcrKey").alias("_start_clock")
-).with_columns(
-    ((pl.col("clock") - pl.col("_start_clock")).dt.total_minutes()).alias("_minutes_from_start")
-).filter(pl.col("_minutes_from_start") <= COHORT_WINDOW_MINUTES).drop(["_start_clock", "_minutes_from_start"])
+df_filtered = (
+    df.with_columns(pl.col("clock").min().over("PcrKey").alias("_start_clock"))
+    .with_columns(
+        ((pl.col("clock") - pl.col("_start_clock")).dt.total_minutes()).alias("_minutes_from_start")
+    )
+    .filter(pl.col("_minutes_from_start") <= COHORT_WINDOW_MINUTES)
+    .drop(["_start_clock", "_minutes_from_start"])
+)
 
 valid_keys = (
     df_filtered.group_by("PcrKey")
@@ -30,9 +33,14 @@ df_filtered = df_filtered.join(valid_keys, on="PcrKey", how="inner")
 labels = df_filtered.select(["PcrKey", "label"]).unique("PcrKey")
 
 print("=== Label prevalence per PcrKey ===")
-print(df_filtered.select(["PcrKey", "label"]).unique("PcrKey").group_by("label").agg(pl.len().alias("n_cases")).with_columns(
-    (pl.col("n_cases") / pl.col("n_cases").sum() * 100).round(1).alias("pct_cases")
-).sort("label"))
+print(
+    df_filtered.select(["PcrKey", "label"])
+    .unique("PcrKey")
+    .group_by("label")
+    .agg(pl.len().alias("n_cases"))
+    .with_columns((pl.col("n_cases") / pl.col("n_cases").sum() * 100).round(1).alias("pct_cases"))
+    .sort("label")
+)
 print(df_filtered["PcrKey"].n_unique(), "unique PcrKeys")
 
 # %%
@@ -60,8 +68,16 @@ assert intra_scores is not None
 # Selected axis pair per variable
 print("\n=== Intravariable: selected axis pairs ===")
 print(
-    intra_scores.select(["variable", "axis_x", "axis_y", "axis_pair_corr",
-                         "axis_x_median_threshold", "axis_y_median_threshold"])
+    intra_scores.select(
+        [
+            "variable",
+            "axis_x",
+            "axis_y",
+            "axis_pair_corr",
+            "axis_x_median_threshold",
+            "axis_y_median_threshold",
+        ]
+    )
     .unique(["variable", "axis_x", "axis_y"])
     .sort("variable")
 )
@@ -78,13 +94,24 @@ null_strata = intra_scores.filter(
 )
 print(f"Imperfect cases with null stratum: {null_strata.height}")
 if null_strata.height > 0:
-    print(null_strata.select([
-        "PcrKey", "variable", "indicated_pct", "indicated_centroid",
-        "gap_entropy", "gap_adh_rate",
-        "axis_x", "axis_y", "imperfection_stratum",
-    ]).head(20))
+    print(
+        null_strata.select(
+            [
+                "PcrKey",
+                "variable",
+                "indicated_pct",
+                "indicated_centroid",
+                "gap_entropy",
+                "gap_adh_rate",
+                "axis_x",
+                "axis_y",
+                "imperfection_stratum",
+            ]
+        ).head(20)
+    )
 
 intra_scores = intra_scores.join(labels, on="PcrKey", how="left")
+
 
 def intra_dist(df: pl.DataFrame) -> None:
     df = df.filter(pl.col("imperfection_stratum").is_not_null())
@@ -99,9 +126,7 @@ def intra_dist(df: pl.DataFrame) -> None:
             pl.col("gap_adh_rate").mean().round(3).alias("mean_gap_adh_rate"),
         )
         .with_columns(
-            (pl.col("n") / pl.col("n").sum().over("variable") * 100)
-            .round(1)
-            .alias("stratum_pct")
+            (pl.col("n") / pl.col("n").sum().over("variable") * 100).round(1).alias("stratum_pct")
         )
         .sort(["variable", "imperfection_stratum"])
     )
@@ -109,6 +134,7 @@ def intra_dist(df: pl.DataFrame) -> None:
         var_total = var_df["n"].sum()
         print(f"\n=== Intravariable | variable={var[0]} (n={var_total}) ===")
         print(var_df.drop("variable"))
+
 
 # %%
 pl.Config.set_tbl_cols(100)
@@ -125,9 +151,9 @@ assert inter_scores is not None
 # Selected axis pair (single pair for the whole cohort)
 print("\n=== Intervariable: selected axis pair ===")
 print(
-    inter_scores.select(["axis_x", "axis_y", "axis_pair_corr",
-                         "axis_x_median_threshold", "axis_y_median_threshold"])
-    .unique()
+    inter_scores.select(
+        ["axis_x", "axis_y", "axis_pair_corr", "axis_x_median_threshold", "axis_y_median_threshold"]
+    ).unique()
 )
 
 # All pairwise rho values (including non-selected pairs)
@@ -137,6 +163,7 @@ if inter_pair_corrs is not None:
     print(inter_pair_corrs.sort("abs_corr"))
 
 inter_scores = inter_scores.join(labels, on="PcrKey", how="left")
+
 
 def inter_dist(df: pl.DataFrame) -> None:
     df = df.filter(pl.col("intervariable_stratum").is_not_null())
@@ -156,6 +183,7 @@ def inter_dist(df: pl.DataFrame) -> None:
     )
     print(f"\n=== Intervariable (n={total} cases) ===")
     print(dist)
+
 
 # %%
 inter_dist(inter_scores)
@@ -189,22 +217,42 @@ pl.Config.set_tbl_rows(50)
 
 print("\n=== Group comparison: effect sizes, largest first ===")
 print(
-    imp_grouped.group_comparison_results
-    .filter(pl.col("skipped_reason").is_null())
+    imp_grouped.group_comparison_results.filter(pl.col("skipped_reason").is_null())
     .with_columns(pl.col("effect_size").abs().alias("abs_effect"))
     .sort("abs_effect", descending=True)
-    .select([
-        "aspect", "variable", "metric", "effect_size", "ci_lower", "ci_upper",
-        "q_value", "significant", "direction", "hodges_lehmann",
-    ])
+    .select(
+        [
+            "aspect",
+            "variable",
+            "metric",
+            "effect_size",
+            "ci_lower",
+            "ci_upper",
+            "q_value",
+            "significant",
+            "direction",
+            "hodges_lehmann",
+        ]
+    )
 )
 
 print("\n=== Group descriptives (median [IQR] per group) ===")
 print(
-    imp_grouped.group_comparison_descriptives.select([
-        "aspect", "variable", "metric", "group", "n", "pct_defined",
-        "median", "q25", "q75", "mean", "std",
-    ])
+    imp_grouped.group_comparison_descriptives.select(
+        [
+            "aspect",
+            "variable",
+            "metric",
+            "group",
+            "n",
+            "pct_defined",
+            "median",
+            "q25",
+            "q75",
+            "mean",
+            "std",
+        ]
+    )
 )
 
 skipped = imp_grouped.group_comparison_results.filter(pl.col("skipped_reason").is_not_null())

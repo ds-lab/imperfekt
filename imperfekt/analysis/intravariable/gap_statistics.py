@@ -476,9 +476,7 @@ def compute_case_gap_metrics(
     # the imperfect run starts at the first or ends at the last record) would be absent from
     # true_gaps and therefore get no row at all after the assemble join — losing gap_missing_centroid
     # even though the centroid computation doesn't depend on true_gaps.
-    all_pairs = (
-        gaps_df.select([id_col, "variable"]).unique().sort([id_col, "variable"])
-    )
+    all_pairs = gaps_df.select([id_col, "variable"]).unique().sort([id_col, "variable"])
 
     # --- Base stats: n_gaps, mean, std, q25, q75, max ---
     base = true_gaps.group_by([id_col, "variable"]).agg(
@@ -545,7 +543,12 @@ def compute_case_gap_metrics(
     case_entropy = (
         case_bin_counts.group_by([id_col, "variable"])
         .agg(
-            pl.col("_entropy_contrib").sum().alias("_entropy_bits"),
+            # .sort() before .sum() is not cosmetic: polars aggregates groups in
+            # parallel with no guaranteed element order, and float addition is not
+            # associative, so an unsorted sum makes the entropy differ in its last
+            # digits between runs. Sorting pins a canonical order and makes the
+            # metric reproducible.
+            pl.col("_entropy_contrib").sort().sum().alias("_entropy_bits"),
             pl.col("_gap_bin").count().cast(pl.Int64).alias("_n_unique_bins"),
             pl.col("_gap_bin")
             .sort_by(["_bin_count", "_gap_bin"], descending=True)
@@ -596,20 +599,18 @@ def compute_case_gap_metrics(
     # normalized [0, 1] observation timeline. Each missing tick contributes its own clock,
     # normalized by the (case, variable)'s observed [t_first, t_last] span.
     # ~0 = front-loaded missingness, ~0.5 = symmetric, ~1 = back-loaded.
-    cols_in_mask = [c for c in mask_df.columns if c not in {id_col, clock_col} and not c.startswith("clock_no")]
+    cols_in_mask = [
+        c for c in mask_df.columns if c not in {id_col, clock_col} and not c.startswith("clock_no")
+    ]
     mask_long = mask_df.unpivot(
         index=[c for c in mask_df.columns if c in {id_col, clock_col}],
         on=cols_in_mask,
         variable_name="variable",
         value_name="_is_missing",
     )
-    obs_span = (
-        mask_long
-        .group_by([id_col, "variable"])
-        .agg(
-            pl.col(clock_col).min().alias("_t_first"),
-            pl.col(clock_col).max().alias("_t_last"),
-        )
+    obs_span = mask_long.group_by([id_col, "variable"]).agg(
+        pl.col(clock_col).min().alias("_t_first"),
+        pl.col(clock_col).max().alias("_t_last"),
     )
     centroid = (
         mask_long.filter(pl.col("_is_missing") == 1)

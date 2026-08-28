@@ -3,8 +3,7 @@ from pathlib import Path
 
 import polars as pl
 import s3fs
-
-from config import S3_BASE, DATASET_NAME, NEMSIS_YEAR, COHORT_PATH, CLINICAL_ENDPOINT
+from config import CLINICAL_ENDPOINT, COHORT_PATH, DATASET_NAME, NEMSIS_YEAR, S3_BASE
 from prep import filter_cohort
 
 pl.Config.set_tbl_cols(100)
@@ -18,7 +17,7 @@ fs = s3fs.S3FileSystem(
 
 local = True
 
-while(True):
+while True:
     if Path(COHORT_PATH).exists():
         df = pl.read_parquet(Path(COHORT_PATH))
         break
@@ -40,9 +39,13 @@ while(True):
                 path_2024 = f"/workspaces/imperfekt/data/nemsis/{CLINICAL_ENDPOINT}_2024.parquet"
                 path_2025 = f"/workspaces/imperfekt/data/nemsis/{CLINICAL_ENDPOINT}_2025.parquet"
                 if not Path(path_2024).exists():
-                    raise FileNotFoundError(f"{path_2024} not found. Please build the 2024 cohort first.")
+                    raise FileNotFoundError(
+                        f"{path_2024} not found. Please build the 2024 cohort first."
+                    )
                 if not Path(path_2025).exists():
-                    raise FileNotFoundError(f"{path_2025} not found. Please build the 2025 cohort first.")
+                    raise FileNotFoundError(
+                        f"{path_2025} not found. Please build the 2025 cohort first."
+                    )
                 # If both exist, read them and concatenate
                 df_2024 = pl.read_parquet(path_2024)
                 df_2025 = pl.read_parquet(path_2025)
@@ -55,10 +58,15 @@ while(True):
                 print(f"Combined 2024 and 2025 cohorts and saved to {COHORT_PATH}")
                 break
             if local:
-                events_df = pl.read_parquet(f"/workspaces/imperfekt/data/nemsis/{NEMSIS_YEAR}/{events_file_name}", columns=["PcrKey", "eResponse_05", "eDisposition_22", "ePatient_15"])
+                events_df = pl.read_parquet(
+                    f"/workspaces/imperfekt/data/nemsis/{NEMSIS_YEAR}/{events_file_name}",
+                    columns=["PcrKey", "eResponse_05", "eDisposition_22", "ePatient_15"],
+                )
             else:
                 with fs.open(f"{S3_BASE}/{events_file_name}") as f:
-                    events_df = pl.read_parquet(f).select(["PcrKey", "eResponse_05", "eDisposition_22", "ePatient_15"])
+                    events_df = pl.read_parquet(f).select(
+                        ["PcrKey", "eResponse_05", "eDisposition_22", "ePatient_15"]
+                    )
 
             def _log(label: str, df: pl.DataFrame, id_key: str) -> None:
                 print(f"  {df[id_key].n_unique():>9,}  {id_key}  │  {label}")
@@ -66,16 +74,24 @@ while(True):
             _log("all events loaded", events_df, "PcrKey")
 
             # Only 911 calls, emergency resonses
-            call_df = events_df.filter(pl.col("eResponse_05").is_in(["2205001", "2205003", "2205009"]))
+            call_df = events_df.filter(
+                pl.col("eResponse_05").is_in(["2205001", "2205003", "2205009"])
+            )
             del events_df
             _log("after 911/emergency response filter (eResponse_05)", call_df, "PcrKey")
             if CLINICAL_ENDPOINT == "sepsis":
-                if local: 
-                    diagnosis_df = pl.read_parquet(f"/workspaces/imperfekt/data/nemsis/{NEMSIS_YEAR}/{diagnosis_file_name}")
-                else: 
+                if local:
+                    diagnosis_df = pl.read_parquet(
+                        f"/workspaces/imperfekt/data/nemsis/{NEMSIS_YEAR}/{diagnosis_file_name}"
+                    )
+                else:
                     with fs.open(f"{S3_BASE}/{diagnosis_file_name}") as f:
-                        diagnosis_df = pl.read_parquet(f).select(["PcrKey", "eOutcome_13"]) 
-                sepsis_ids = diagnosis_df.filter(pl.col("eOutcome_13").str.contains(r"^A41|^R65")).select("PcrKey").unique()
+                        diagnosis_df = pl.read_parquet(f).select(["PcrKey", "eOutcome_13"])
+                sepsis_ids = (
+                    diagnosis_df.filter(pl.col("eOutcome_13").str.contains(r"^A41|^R65"))
+                    .select("PcrKey")
+                    .unique()
+                )
                 del diagnosis_df
 
                 # Attach label at id level so every timestamp row carries it.
@@ -100,13 +116,15 @@ while(True):
                 ward_codes = [
                     "4222017",  # Med/Surg
                     "4222033",  # Orthopedic
-                    #"4222051",  # Oncology
+                    # "4222051",  # Oncology
                 ]
 
                 # Use this list to filter to only the ICU and ward dispositions above.
                 filter_for = icu_codes + ward_codes
 
-                binary_df = call_df.filter(pl.col("eDisposition_22").is_in(filter_for)).with_columns(
+                binary_df = call_df.filter(
+                    pl.col("eDisposition_22").is_in(filter_for)
+                ).with_columns(
                     pl.when(pl.col("eDisposition_22").is_in(icu_codes))
                     .then(pl.lit(1))
                     .otherwise(pl.lit(0))
@@ -124,13 +142,16 @@ while(True):
             binary_df = binary_df.select(["PcrKey", "label"])
 
             if local:
-                vitals_scan = pl.scan_parquet(f"/workspaces/imperfekt/data/nemsis/{NEMSIS_YEAR}/{vitals_file_name}")
+                vitals_scan = pl.scan_parquet(
+                    f"/workspaces/imperfekt/data/nemsis/{NEMSIS_YEAR}/{vitals_file_name}"
+                )
             else:
                 with fs.open(f"{S3_BASE}/{vitals_file_name}") as f:
                     vitals_scan = pl.scan_parquet(f)
             vitals_df = (
-                vitals_scan
-                .select(["PcrKey", "eVitals_01", "eVitals_06", "eVitals_10", "eVitals_12", "eVitals_14"])
+                vitals_scan.select(
+                    ["PcrKey", "eVitals_01", "eVitals_06", "eVitals_10", "eVitals_12", "eVitals_14"]
+                )
                 .join(binary_df.lazy().select("PcrKey"), on="PcrKey", how="semi")
                 .rename(
                     {
@@ -141,17 +162,22 @@ while(True):
                         "eVitals_14": "rr",
                     }
                 )
-                .with_columns(pl.col("clock").str.to_datetime("  %d%b%Y:%H:%M:%S", strict=False).alias("clock"))
+                .with_columns(
+                    pl.col("clock")
+                    .str.to_datetime("  %d%b%Y:%H:%M:%S", strict=False)
+                    .alias("clock")
+                )
                 .filter(pl.col("clock").is_not_null())
                 .sort(["PcrKey", "clock"])
                 .unique(subset=["PcrKey", "clock"], keep="first", maintain_order=True)
                 .filter(
-                        ~(
-                            pl.col("sbp").is_null()
-                            & pl.col("hr").is_null()
-                            & pl.col("o2sat").is_null()
-                            & pl.col("rr").is_null()
-                        ))
+                    ~(
+                        pl.col("sbp").is_null()
+                        & pl.col("hr").is_null()
+                        & pl.col("o2sat").is_null()
+                        & pl.col("rr").is_null()
+                    )
+                )
                 .collect()
             )
             _log("after clock parse + dedup + null row filtering", vitals_df, "PcrKey")
@@ -210,9 +236,7 @@ thresholds = [10, 20, 30, 45, 60, 120, 99999]
 min_vitals = [3, 5, 8, 10]
 
 # Attach each patient's first clock so we can compute per-row offset
-df_with_start = df.with_columns(
-    pl.col("clock").min().over("id").alias("start_clock")
-).with_columns(
+df_with_start = df.with_columns(pl.col("clock").min().over("id").alias("start_clock")).with_columns(
     ((pl.col("clock") - pl.col("start_clock")).dt.total_minutes()).alias("minutes_from_start")
 )
 

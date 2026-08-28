@@ -58,7 +58,7 @@ IntravariableImperfection
 │   ├── autocorrelation()             # Temporal autocorrelation of imperfection
 │   ├── windowed_significance()       # Values near imperfect instances
 │   ├── date_time_statistics()        # Temporal distribution patterns
-│   ├── case_metrics()                # Per-(case × variable) metrics (+ optional strata)
+│   ├── case_metrics()                # Per-(case × variable) metrics (+ 2 optional strata)
 │   ├── run()                         # Execute all analyses
 │   └── generate_html_report()        # Create HTML summary
 │
@@ -76,6 +76,9 @@ IntravariableImperfection
     ├── ws_observations_around_indicated: dict
     ├── ws_mwu_result: pl.DataFrame
     ├── dt_date_time_statistics: dict
+    ├── cm_case_metrics: pl.DataFrame                      # one row per (case × variable), both strata
+    ├── cm_pairwise_correlations: dict[str, pl.DataFrame]  # per-variable axis correlations
+    ├── cm_cross_variable_correlations: pl.DataFrame       # same-metric cross-variable pairs
     └── plots: IntravariablePlots
 ```
 
@@ -358,7 +361,7 @@ Analyzes imperfection patterns by calendar/clock time to detect **provider-level
 ### 7. Case-Level Metrics (`case_metrics`)
 
 Computes the four canonical case-level intravariable metrics — one row per (case × variable) —
-and optionally assigns each pair to an imperfection stratum.
+and optionally assigns **two independent stratifications** to that same frame.
 
 Runs `column_statistics()` and `gap_statistics()` automatically if not already done.
 
@@ -414,18 +417,44 @@ only, so `Q_complete` cases do not bias the thresholds — to produce the four q
 passed as parameters to `assign_strata()`, enabling leakage-free cross-validation: fit medians on
 the training fold, apply to the held-out test fold.
 
+#### Two stratifications, one frame
+
+The same metrics answer two different questions, so `stratify=True` produces both. They differ in
+what gets paired, and therefore in what a label means:
+
+| Column | Granularity | Axes are… | Example pair |
+|--------|-------------|-----------|--------------|
+| `imperfection_stratum` | per (case × variable) | two **different metrics** of **one variable** | `hr`: `indicated_pct` × `gap_entropy` |
+| `cross_variable_stratum` | per **case** | **one metric** across **two variables** | `hr_gap_entropy` × `sbp_gap_entropy` |
+
+The per-variable pass fits axes independently for each variable, so a case's label varies across
+its rows. The cross-variable pass fits one axis pair for the whole cohort and yields one label per
+case, which is repeated across that case's rows. Its candidate pairs are restricted to the *same*
+metric on two *different* variables — pairing two metrics is the per-variable pass's job, and
+mixing the two would make the quadrants uninterpretable. It needs at least two variables; with
+fewer it is skipped with a warning and the column is null.
+
+Cross-variable provenance columns are prefixed `cv_` so both fits are recorded side by side.
+`Q_complete` also means something slightly different in each: no imperfection in *that variable*
+for the per-variable pass, versus no imperfection in *any* variable for the cross-variable one.
+
 > **Stratification is off by default.** The quadrant thresholds are fitted to whichever cohort is
 > passed in, so labels from separately-fitted cohorts are **not** comparable. To compare cohorts,
 > either compare the raw metrics (see [Group Comparison](../README.md)) or fit thresholds once on
-> the pooled data and apply them with `assign_strata()`.
+> the pooled data and apply them with `assign_strata()` / `assign_strata_cross_variable()`.
 
 #### Output
 
 - `results.cm_case_metrics` — one row per (case × variable) with the four metrics. With
   `stratify=True`, additionally `axis_x`, `axis_y`, `axis_pair_corr`,
-  `axis_x_median_threshold`, `axis_y_median_threshold` and `imperfection_stratum`.
+  `axis_x_median_threshold`, `axis_y_median_threshold`, `imperfection_stratum`, and the
+  `cv_`-prefixed equivalents plus `cross_variable_stratum`.
 - `results.cm_pairwise_correlations` — dict keyed by variable name, each a correlation table used
-  for axis selection. `None` unless `stratify=True`.
+  for per-variable axis selection.
+- `results.cm_cross_variable_correlations` — the same-metric cross-variable candidate pairs,
+  most orthogonal first.
+
+  The latter two are `None` unless `stratify=True`.
 
 ---
 
@@ -438,17 +467,22 @@ from datetime import timedelta
 from imperfekt.analysis.intravariable import IntravariableImperfection
 
 # Load your data
-df = pl.DataFrame({
-    "patient": ["a", "a", "a", "a", "b", "b", "b"],
-    "time": [
-        "2023-01-01 08:00", "2023-01-01 08:05", "2023-01-01 08:10", "2023-01-01 08:15",
-        "2023-01-02 12:00", "2023-01-02 12:05", "2023-01-02 12:10"
-    ],
-    "heartrate": [60, None, 70, None, 80, 85, None],
-    "blood_pressure": [120, 125, None, None, 130, None, 140],
-}).with_columns(
-    pl.col("time").str.strptime(pl.Datetime, format="%Y-%m-%d %H:%M")
-)
+df = pl.DataFrame(
+    {
+        "patient": ["a", "a", "a", "a", "b", "b", "b"],
+        "time": [
+            "2023-01-01 08:00",
+            "2023-01-01 08:05",
+            "2023-01-01 08:10",
+            "2023-01-01 08:15",
+            "2023-01-02 12:00",
+            "2023-01-02 12:05",
+            "2023-01-02 12:10",
+        ],
+        "heartrate": [60, None, 70, None, 80, 85, None],
+        "blood_pressure": [120, 125, None, None, 130, None, 140],
+    }
+).with_columns(pl.col("time").str.strptime(pl.Datetime, format="%Y-%m-%d %H:%M"))
 
 # Initialize analysis
 analysis = IntravariableImperfection(
@@ -467,16 +501,15 @@ analysis = IntravariableImperfection(
 # Run all analyses
 analysis.run(
     save_results=True,
-    bin_resolution_seconds=60.0,   # bin width for dominant gap detection
-    adherence_tolerance=0.5,       # tolerance around dominant gap for adherence rate
+    bin_resolution_seconds=60.0,  # bin width for dominant gap detection
+    adherence_tolerance=0.5,  # tolerance around dominant gap for adherence rate
     window_size=timedelta(minutes=5),
     window_location="both",
 )
 
 # Generate HTML report
 analysis.generate_html_report(
-    report_path="intravariable_report.html",
-    title="Intravariable Imperfection Analysis"
+    report_path="intravariable_report.html", title="Intravariable Imperfection Analysis"
 )
 ```
 

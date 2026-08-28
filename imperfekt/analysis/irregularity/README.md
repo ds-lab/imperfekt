@@ -388,10 +388,12 @@ import polars as pl
 from pathlib import Path
 from imperfekt.analysis.irregularity import Irregularity
 
-df = pl.DataFrame({
-    "patient": ["a", "a", "a", "a", "a", "b", "b", "b", "b"],
-    "time": [0, 60, 120, 180, 240, 0, 60, 500, 560],  # seconds (numeric)
-})
+df = pl.DataFrame(
+    {
+        "patient": ["a", "a", "a", "a", "a", "b", "b", "b", "b"],
+        "time": [0, 60, 120, 180, 240, 0, 60, 500, 560],  # seconds (numeric)
+    }
+)
 
 analysis = Irregularity(
     df=df,
@@ -411,13 +413,13 @@ analysis.run(
 )
 
 # Access results
-print(analysis.results.ins_case_statistics)       # CV and interval stats per case
-print(analysis.results.bu_case_burstiness)        # Burstiness per case
-print(analysis.results.ea_case_entropy_adherence) # Entropy and adherence per case
-print(analysis.results.cm_case_metrics)            # Per-case metrics (+ quadrant strata)
-print(analysis.results.cm_pairwise_correlations)   # Axis selection correlation table
-print(analysis.results.domf_frequency_summary)      # Global dominant frequency
-print(analysis.results.ia_autocorrelation)          # Global interval autocorrelation
+print(analysis.results.ins_case_statistics)  # CV and interval stats per case
+print(analysis.results.bu_case_burstiness)  # Burstiness per case
+print(analysis.results.ea_case_entropy_adherence)  # Entropy and adherence per case
+print(analysis.results.cm_case_metrics)  # Per-case metrics (+ quadrant strata)
+print(analysis.results.cm_pairwise_correlations)  # Axis selection correlation table
+print(analysis.results.domf_frequency_summary)  # Global dominant frequency
+print(analysis.results.ia_autocorrelation)  # Global interval autocorrelation
 
 # Run individual analyses and chain
 analysis.interval_statistics().case_entropy_adherence().case_metrics(stratify=True)
@@ -428,7 +430,9 @@ axis_x = case_metrics["axis_x"][0]
 axis_y = case_metrics["axis_y"][0]
 train_median_x = train_df[axis_x].median()
 train_median_y = train_df[axis_y].median()
-test_with_strata = Irregularity.assign_strata(test_df, axis_x, axis_y, train_median_x, train_median_y)
+test_with_strata = Irregularity.assign_strata(
+    test_df, axis_x, axis_y, train_median_x, train_median_y
+)
 ```
 
 ---

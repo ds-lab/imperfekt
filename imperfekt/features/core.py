@@ -82,6 +82,14 @@ class FeatureGenerator:
         else:
             raise ValueError(f"Unknown imperfection type: {self.imperfection}")
 
+        # Suffix the variable columns with `_mask` so downstream feature code
+        # (add_binary_masks, temporal.*) can find them by `{col}_mask`. The id
+        # and clock columns are left untouched for joins.
+        id_cols = {self.id_col, self.clock_col, self.clock_no_col}
+        self.mask = self.mask.rename(
+            {c: f"{c}_mask" for c in self.mask.columns if c not in id_cols}
+        )
+
     def add_binary_masks(self, cols: list | None = None):
         """
         Joins the pre-generated binary mask columns to the main DataFrame.
@@ -91,13 +99,11 @@ class FeatureGenerator:
         """
         cols = cols or self.variable_cols
         if self.mask is not None:
-            mask_subset = self.mask.select(
-                [self.id_col, self.clock_col, self.clock_no_col]
-                + [f"{c}_mask" for c in cols if f"{c}_mask" in self.mask.columns]
-            )
-            mask_cols = [c for c in mask_subset.columns if c not in [self.id_col, self.clock_col]]
+            keys = [self.id_col, self.clock_col]
+            mask_cols = [f"{c}_mask" for c in cols if f"{c}_mask" in self.mask.columns]
+            mask_subset = self.mask.select(keys + mask_cols)
             self.df = self.df.drop(mask_cols, strict=False)
-            self.df = self.df.join(mask_subset, on=[self.id_col, self.clock_col], how="inner")
+            self.df = self.df.join(mask_subset, on=keys, how="inner")
         return self
 
     def add_circular_features(self):

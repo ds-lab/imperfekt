@@ -1,3 +1,5 @@
+from collections.abc import Sequence
+
 import numpy as np
 import polars as pl
 from scipy.stats import spearmanr
@@ -5,13 +7,36 @@ from scipy.stats import spearmanr
 from imperfekt.analysis.utils import pretty_printing
 
 # Schema of the pairwise correlation table
-_CORR_SCHEMA = {
+CORR_SCHEMA = {
     "axis_1": pl.Utf8,
     "axis_2": pl.Utf8,
     "corr": pl.Float64,
     "abs_corr": pl.Float64,
     "n_complete_cases": pl.Int64,
 }
+
+
+def is_inverted(axis: str, inverted_axes, match_suffix: bool = False) -> bool:
+    """
+    Whether an axis is one where a *lower* value means *more* imperfect.
+
+    With match_suffix, an axis also counts as inverted when it ends in ``_<base>`` for a
+    base name in the set. That is what lets a cross-variable mode work, where axes carry a
+    variable prefix — ``hr_gap_adh_rate`` has to be recognised as ``gap_adh_rate``.
+
+    Parameters:
+        axis (str): Axis column name.
+        inverted_axes: Base names of the inverted metrics.
+        match_suffix (bool): Also match variable-prefixed axis names.
+
+    Returns:
+        bool: True if the axis direction is inverted.
+    """
+    if axis in inverted_axes:
+        return True
+    if match_suffix:
+        return any(axis.endswith(f"_{base}") for base in inverted_axes)
+    return False
 
 
 def assign_strata(
@@ -22,10 +47,11 @@ def assign_strata(
     y_median: float,
     stratum_col: str = "stratum",
     inverted_axes: frozenset[str] | set[str] = frozenset(),
-    complete_col: str | None = None,
+    complete_col: str | Sequence[str] | None = None,
     complete_value: float = 0.0,
     complete_label: str = "Q_complete",
     labels: tuple[str, str, str, str] = ("Q_alpha", "Q_beta", "Q_gamma", "Q_delta"),
+    match_axis_suffix: bool = False,
 ) -> pl.DataFrame:
     """
     Assign each row to a quadrant by median-bisecting two axes.
@@ -53,20 +79,26 @@ def assign_strata(
         stratum_col (str): Name of the output column.
         inverted_axes (frozenset[str]): Axes where a *lower* value means *more*
             imperfect (e.g. an adherence rate). For these, "high" is ``<= median``.
-        complete_col (str | None): Column identifying rows with no imperfection at
-            all, which are labelled ``complete_label`` instead of being placed in a
-            quadrant. Pass None when the concept does not apply — an observation
-            rhythm, for instance, always exists.
-        complete_value (float): Value of ``complete_col`` marking such rows.
+        complete_col (str | Sequence[str] | None): Column identifying rows with no
+            imperfection at all, which are labelled ``complete_label`` instead of being
+            placed in a quadrant. Pass several columns for a wide layout, where a row
+            counts as complete only when *every* one of them is at ``complete_value``.
+            Pass None when the concept does not apply — an observation rhythm, for
+            instance, always exists.
+        complete_value (float): Value marking such rows.
         complete_label (str): Label given to them.
         labels (tuple[str, str, str, str]): Quadrant labels, in the order
             (low/low, high/low, low/high, high/high).
+        match_axis_suffix (bool): Treat ``<var>_<base>`` as inverted when ``<base>`` is in
+            inverted_axes. Needed when axes carry a variable prefix.
 
     Returns:
         pl.DataFrame: df with the stratum column added.
     """
-    x_high = pl.col(axis_x) <= x_median if axis_x in inverted_axes else pl.col(axis_x) > x_median
-    y_high = pl.col(axis_y) <= y_median if axis_y in inverted_axes else pl.col(axis_y) > y_median
+    x_inv = is_inverted(axis_x, inverted_axes, match_axis_suffix)
+    y_inv = is_inverted(axis_y, inverted_axes, match_axis_suffix)
+    x_high = pl.col(axis_x) <= x_median if x_inv else pl.col(axis_x) > x_median
+    y_high = pl.col(axis_y) <= y_median if y_inv else pl.col(axis_y) > y_median
 
     q_alpha, q_beta, q_gamma, q_delta = labels
     unplaceable = pl.col(axis_x).is_null() | pl.col(axis_y).is_null()
@@ -74,11 +106,14 @@ def assign_strata(
     # The complete check comes first: such rows have no imperfection to stratify, and
     # their axis values are typically null, which would otherwise leave them unlabelled.
     if complete_col is not None:
+        complete_cols = [complete_col] if isinstance(complete_col, str) else list(complete_col)
+        is_complete = pl.fold(
+            acc=pl.lit(True),
+            function=lambda acc, s: acc & (s == complete_value),
+            exprs=[pl.col(c) for c in complete_cols],
+        )
         expr = (
-            pl.when(pl.col(complete_col) == complete_value)
-            .then(pl.lit(complete_label))
-            .when(unplaceable)
-            .then(pl.lit(None))
+            pl.when(is_complete).then(pl.lit(complete_label)).when(unplaceable).then(pl.lit(None))
         )
     else:
         expr = pl.when(unplaceable).then(pl.lit(None))
@@ -188,7 +223,7 @@ def pairwise_axis_correlations(
             )
 
     if not corr_rows:
-        return pl.DataFrame(schema=_CORR_SCHEMA)
+        return pl.DataFrame(schema=CORR_SCHEMA)
 
     return pl.DataFrame(corr_rows).sort(
         ["abs_corr", "n_complete_cases"], descending=[False, True], nulls_last=True
@@ -218,9 +253,7 @@ def select_axis_pair(
         tuple[str, str, float]: (axis_x, axis_y, Spearman rho of the selected pair).
     """
     if corr_table.height > 0:
-        valid_pairs = corr_table.filter(
-            pl.col("corr").is_not_null() & pl.col("corr").is_not_nan()
-        )
+        valid_pairs = corr_table.filter(pl.col("corr").is_not_null() & pl.col("corr").is_not_nan())
         if valid_pairs.height > 0:
             selected = valid_pairs.row(0, named=True)
             return selected["axis_1"], selected["axis_2"], float(selected["corr"])
@@ -234,6 +267,64 @@ def select_axis_pair(
     return fallback_x, fallback_y, float("nan")
 
 
+def fit_and_stratify(
+    df: pl.DataFrame,
+    fit_df: pl.DataFrame,
+    corr_table: pl.DataFrame,
+    assign_fn,
+    stratum_col: str,
+    fallback_x: str,
+    fallback_y: str,
+    context: str = "",
+    prefix: str = "",
+) -> tuple[pl.DataFrame, str, str, float]:
+    """
+    Select the most orthogonal axis pair, fit medians, and label every row.
+
+    The whole recipe in one call: pick the least-correlated pair from ``corr_table``,
+    take each axis median over ``fit_df``, hand both to ``assign_fn``, and stamp the
+    provenance columns on. When fewer than 2 rows of ``fit_df`` have both axes defined
+    no threshold can be fitted, so the frame comes back with null metadata and a null
+    stratum rather than a fabricated split.
+
+    ``fit_df`` is separate from ``df`` because thresholds are fitted on a subset — the
+    imperfect cases only, so that fully-complete cases do not drag the medians down —
+    while labels are applied to everything.
+
+    Parameters:
+        df (pl.DataFrame): Frame to label.
+        fit_df (pl.DataFrame): Rows the medians are computed over.
+        corr_table (pl.DataFrame): Output of pairwise_axis_correlations().
+        assign_fn (callable): ``(df, axis_x, axis_y, x_median, y_median) -> df``, the
+            module's quadrant assignment.
+        stratum_col (str): Stratum column name, used for the null-metadata path.
+        fallback_x (str): Default x-axis when no pair has a defined correlation.
+        fallback_y (str): Default y-axis in that case.
+        context (str): Label prefixed onto any warning.
+        prefix (str): Prepended to the provenance column names.
+
+    Returns:
+        tuple: (labelled frame, axis_x, axis_y, correlation of the selected pair).
+    """
+    axis_x, axis_y, corr = select_axis_pair(corr_table, fallback_x, fallback_y, context)
+
+    complete = fit_df.filter(pl.col(axis_x).is_not_null() & pl.col(axis_y).is_not_null())
+    if complete.height < 2:
+        return (
+            null_axis_metadata(df, axis_x, axis_y, stratum_col, prefix=prefix),
+            axis_x,
+            axis_y,
+            float("nan"),
+        )
+
+    x_median = float(complete.select(pl.col(axis_x).cast(pl.Float64).median()).item())
+    y_median = float(complete.select(pl.col(axis_y).cast(pl.Float64).median()).item())
+
+    out = assign_fn(df, axis_x, axis_y, x_median, y_median)
+    out = attach_axis_metadata(out, axis_x, axis_y, corr, x_median, y_median, prefix=prefix)
+    return out, axis_x, axis_y, corr
+
+
 def attach_axis_metadata(
     df: pl.DataFrame,
     axis_x: str,
@@ -241,6 +332,7 @@ def attach_axis_metadata(
     corr: float,
     x_median: float,
     y_median: float,
+    prefix: str = "",
 ) -> pl.DataFrame:
     """
     Add the five cohort-constant axis provenance columns to every row.
@@ -256,17 +348,19 @@ def attach_axis_metadata(
         corr (float): Spearman rho between the selected axes.
         x_median (float): Median threshold applied to the x-axis.
         y_median (float): Median threshold applied to the y-axis.
+        prefix (str): Prepended to every column name, so a frame can carry the
+            provenance of more than one stratification without collisions.
 
     Returns:
-        pl.DataFrame: df with axis_x, axis_y, axis_pair_corr,
-                      axis_x_median_threshold, axis_y_median_threshold added.
+        pl.DataFrame: df with {prefix}axis_x, {prefix}axis_y, {prefix}axis_pair_corr,
+                      {prefix}axis_x_median_threshold, {prefix}axis_y_median_threshold.
     """
     return df.with_columns(
-        pl.lit(axis_x).alias("axis_x"),
-        pl.lit(axis_y).alias("axis_y"),
-        pl.lit(corr).cast(pl.Float64).alias("axis_pair_corr"),
-        pl.lit(x_median).cast(pl.Float64).alias("axis_x_median_threshold"),
-        pl.lit(y_median).cast(pl.Float64).alias("axis_y_median_threshold"),
+        pl.lit(axis_x).alias(f"{prefix}axis_x"),
+        pl.lit(axis_y).alias(f"{prefix}axis_y"),
+        pl.lit(corr).cast(pl.Float64).alias(f"{prefix}axis_pair_corr"),
+        pl.lit(x_median).cast(pl.Float64).alias(f"{prefix}axis_x_median_threshold"),
+        pl.lit(y_median).cast(pl.Float64).alias(f"{prefix}axis_y_median_threshold"),
     )
 
 
@@ -275,6 +369,7 @@ def null_axis_metadata(
     axis_x: str,
     axis_y: str,
     stratum_col: str,
+    prefix: str = "",
 ) -> pl.DataFrame:
     """
     Annotate a frame that could not be stratified (fewer than 2 complete cases).
@@ -287,15 +382,16 @@ def null_axis_metadata(
         axis_x (str): Axis name that would have been used.
         axis_y (str): Axis name that would have been used.
         stratum_col (str): Name of the module's stratum column.
+        prefix (str): Prepended to the axis column names.
 
     Returns:
         pl.DataFrame: df with the axis columns and a null stratum column added.
     """
     return df.with_columns(
-        pl.lit(axis_x).alias("axis_x"),
-        pl.lit(axis_y).alias("axis_y"),
-        pl.lit(None).cast(pl.Float64).alias("axis_pair_corr"),
-        pl.lit(None).cast(pl.Float64).alias("axis_x_median_threshold"),
-        pl.lit(None).cast(pl.Float64).alias("axis_y_median_threshold"),
+        pl.lit(axis_x).alias(f"{prefix}axis_x"),
+        pl.lit(axis_y).alias(f"{prefix}axis_y"),
+        pl.lit(None).cast(pl.Float64).alias(f"{prefix}axis_pair_corr"),
+        pl.lit(None).cast(pl.Float64).alias(f"{prefix}axis_x_median_threshold"),
+        pl.lit(None).cast(pl.Float64).alias(f"{prefix}axis_y_median_threshold"),
         pl.lit(None).cast(pl.Utf8).alias(stratum_col),
     )

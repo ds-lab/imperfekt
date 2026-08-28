@@ -214,7 +214,9 @@ def run_cv(
         ireg_lookup: dict[str, dict[str, float]] = {}
         for row in test_strata_ireg.iter_rows(named=True):
             sid = row["stay_id"]
-            ireg_lookup[sid] = {c: row[c] for c in ("interval_cv", "interval_qcod", "interval_adh_rate") if c in row}
+            ireg_lookup[sid] = {
+                c: row[c] for c in ("interval_cv", "interval_qcod", "interval_adh_rate") if c in row
+            }
 
         stay_ids_arr = test["stay_id"].to_numpy()
 
