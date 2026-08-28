@@ -246,15 +246,20 @@ from pathlib import Path
 from imperfekt.analysis.preliminary import Preliminary
 
 # Load your data
-df = pl.DataFrame({
-    "patient": ["a", "a", "a", "b", "b"],
-    "time": ["2023-01-01 00:00", "2023-01-01 00:05", "2023-01-01 00:10",
-             "2023-01-02 00:00", "2023-01-02 00:05"],
-    "heartrate": [60, 65, 70, 80, 85],
-    "blood_pressure": [120, 125, None, 130, 135],
-}).with_columns(
-    pl.col("time").str.strptime(pl.Datetime, format="%Y-%m-%d %H:%M")
-)
+df = pl.DataFrame(
+    {
+        "patient": ["a", "a", "a", "b", "b"],
+        "time": [
+            "2023-01-01 00:00",
+            "2023-01-01 00:05",
+            "2023-01-01 00:10",
+            "2023-01-02 00:00",
+            "2023-01-02 00:05",
+        ],
+        "heartrate": [60, 65, 70, 80, 85],
+        "blood_pressure": [120, 125, None, 130, 135],
+    }
+).with_columns(pl.col("time").str.strptime(pl.Datetime, format="%Y-%m-%d %H:%M"))
 
 # Initialize and run preliminary analysis
 preliminary = Preliminary(
@@ -274,8 +279,7 @@ preliminary.run(lags=10, save_results=True, use="pairwise")
 
 # Generate HTML report
 preliminary.generate_html_report(
-    report_path="preliminary_report.html",
-    title="Preliminary Analysis Report"
+    report_path="preliminary_report.html", title="Preliminary Analysis Report"
 )
 ```
 

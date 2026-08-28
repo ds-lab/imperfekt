@@ -16,7 +16,7 @@ This module provides a comprehensive suite of analyses for examining **intervari
    - [Symmetric Correlation](#4-symmetric-correlation-symmetric_correlation)
    - [Symmetric Lagged Cross-Correlation](#5-symmetric-lagged-cross-correlation-symmetric_lagged_cross_correlation)
    - [Asymmetric Correlation](#6-asymmetric-correlation-asymmetric_correlation)
-   - [Composite Score](#7-composite-score-composite_score)
+   - [Case-Level Metrics](#7-case-level-metrics-case_metrics)
 5. [Missingness Mechanism Classification](#missingness-mechanism-classification)
 6. [Usage Example](#usage-example)
 7. [References](#references)
@@ -455,18 +455,23 @@ from pathlib import Path
 from imperfekt.analysis.intervariable import IntervariableImperfection
 
 # Load your data
-df = pl.DataFrame({
-    "patient": ["a", "a", "a", "a", "b", "b", "b"],
-    "time": [
-        "2023-01-01 08:00", "2023-01-01 08:05", "2023-01-01 08:10", "2023-01-01 08:15",
-        "2023-01-02 12:00", "2023-01-02 12:05", "2023-01-02 12:10"
-    ],
-    "heartrate": [60, None, 70, None, 80, 85, None],
-    "blood_pressure": [120, 125, None, None, 130, None, 140],
-    "resprate": [12, 14, None, 16, 18, None, 20],
-}).with_columns(
-    pl.col("time").str.strptime(pl.Datetime, format="%Y-%m-%d %H:%M")
-)
+df = pl.DataFrame(
+    {
+        "patient": ["a", "a", "a", "a", "b", "b", "b"],
+        "time": [
+            "2023-01-01 08:00",
+            "2023-01-01 08:05",
+            "2023-01-01 08:10",
+            "2023-01-01 08:15",
+            "2023-01-02 12:00",
+            "2023-01-02 12:05",
+            "2023-01-02 12:10",
+        ],
+        "heartrate": [60, None, 70, None, 80, 85, None],
+        "blood_pressure": [120, 125, None, None, 130, None, 140],
+        "resprate": [12, 14, None, 16, 18, None, 20],
+    }
+).with_columns(pl.col("time").str.strptime(pl.Datetime, format="%Y-%m-%d %H:%M"))
 
 # Initialize analysis
 analysis = IntervariableImperfection(
@@ -497,8 +502,7 @@ analysis.asymmetric_correlation()
 
 # Generate HTML report
 analysis.generate_html_report(
-    report_path="intervariable_report.html",
-    title="Intervariable Imperfection Analysis"
+    report_path="intervariable_report.html", title="Intervariable Imperfection Analysis"
 )
 ```
 

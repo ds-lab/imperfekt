@@ -1,9 +1,9 @@
 # %%
 from datetime import timedelta
 
+import examples.sepsis_prediction.config as settings
 import polars as pl
 
-import examples.sepsis_prediction.config as settings
 from imperfekt.analysis.intravariable import intravariable
 from imperfekt.config.global_settings import VITALS
 

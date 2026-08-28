@@ -15,7 +15,12 @@ from imperfekt.analysis.intervariable import (
     row_statistics,
     symmetric_correlation,
 )
-from imperfekt.analysis.utils import masking, pretty_printing, visualization_utils
+from imperfekt.analysis.utils import (
+    masking,
+    pretty_printing,
+    stratification,
+    visualization_utils,
+)
 from imperfekt.config.global_settings import VITALS
 
 
@@ -46,8 +51,8 @@ class IntervariableResults:
         self.sc_symmetric_crosscorrelation: dict[str, pl.DataFrame] = {}
         self.ac_asymmetric_statistical_results: dict[str, pl.DataFrame] = {}
         self.ac_asymmetric_crosscorrelation: dict[str, pl.DataFrame] = {}
-        self.iv_composite_scores: pl.DataFrame | None = None
-        self.iv_pairwise_correlations: pl.DataFrame | None = None
+        self.cm_case_metrics: pl.DataFrame | None = None
+        self.cm_pairwise_correlations: pl.DataFrame | None = None
         # Plots
         self.plots = IntervariablePlots()
 
@@ -100,6 +105,22 @@ class IntervariableImperfection:
         _generate_clock_no_col():
             Helper method that generates a clock number column if it does not exist in the DataFrame.
     """
+
+    # --- Class-level configuration ---------------------------------------------
+
+    # Canonical case-level intervariable metrics, one row per case (across all variables).
+    CASE_METRIC_COLS: list[str] = [
+        "avg_indicated_pct",
+        "co_concentration",
+        "breadth",
+        "max_pair_overlap",
+        "pattern_entropy",
+    ]
+    # Axes where a *lower* value means *more* imperfect (none for intervariable — all higher = more imperfect)
+    INVERTED_AXES: frozenset = frozenset()
+    # Output column of assign_strata, and the metric identifying zero-imperfection rows
+    STRATUM_COL: str = "intervariable_stratum"
+    COMPLETE_COL: str = "avg_indicated_pct"
 
     def __init__(
         self,
@@ -208,7 +229,9 @@ class IntervariableImperfection:
                 id_col=self.id_col,
                 clock_col=self.clock_col,
                 clock_no_col=self.clock_no_col,
-                save_path=self._path(f"{new_path_level_name}/all_null_rows_stats.csv") if self.save_path else None,
+                save_path=self._path(f"{new_path_level_name}/all_null_rows_stats.csv")
+                if self.save_path
+                else None,
                 save_results=save_results,
             )
             if self.renderer and self.results.rs_empty_statistics is not None:
@@ -265,7 +288,9 @@ class IntervariableImperfection:
             id_col=self.id_col,
             clock_col=self.clock_col,
             clock_no_col=self.clock_no_col,
-            save_path=self._path(f"{new_path_level_name}/row_completeness_stats.csv") if self.save_path else None,
+            save_path=self._path(f"{new_path_level_name}/row_completeness_stats.csv")
+            if self.save_path
+            else None,
             save_results=save_results,
         )
 
@@ -288,6 +313,18 @@ class IntervariableImperfection:
                 save_results=save_results,
                 library=self.plot_library,
             )
+        if self.results.rs_overall_statistics is not None:
+            visualization_utils.plot_histogram(
+                self.results.rs_overall_statistics,
+                x="indicated_vars_pct",
+                title="Imperfect Variables Per Row Percentage",
+                xaxis_title="Imperfect Variables Percentage",
+                yaxis_title="#Cases",
+                renderer=self.renderer,
+                save_path=self._path(f"{new_path_level_name}/indicated_vars_pct_histogram.png"),
+                save_results=save_results,
+                library=self.plot_library,
+            )
 
         # 4. Imperfect-variable stats per ID
         self.results.rs_case_level_statistics = row_statistics.analyze_row_imperfection_per_id(
@@ -296,7 +333,9 @@ class IntervariableImperfection:
             id_col=self.id_col,
             clock_col=self.clock_col,
             clock_no_col=self.clock_no_col,
-            save_path=self._path(f"{new_path_level_name}/row_completeness_per_id_stats.csv") if self.save_path else None,
+            save_path=self._path(f"{new_path_level_name}/row_completeness_per_id_stats.csv")
+            if self.save_path
+            else None,
             save_results=save_results,
         )
 
@@ -549,8 +588,12 @@ class IntervariableImperfection:
 
                     self.results.plots.sc_lag_scatter_plot[pair_key] = (
                         visualization_utils.plot_scatter(
-                            x=self.results.sc_symmetric_crosscorrelation[pair_key]["lag"].to_numpy(),
-                            y=self.results.sc_symmetric_crosscorrelation[pair_key]["crosscorr"].to_numpy(),
+                            x=self.results.sc_symmetric_crosscorrelation[pair_key][
+                                "lag"
+                            ].to_numpy(),
+                            y=self.results.sc_symmetric_crosscorrelation[pair_key][
+                                "crosscorr"
+                            ].to_numpy(),
                             title=f"{col_x} - {col_y} Cross-Correlation",
                             xaxis_title="Lags",
                             yaxis_title="Phi coefficient",
@@ -658,9 +701,6 @@ class IntervariableImperfection:
                             print(
                                 f"  When {indicated_col} missing: {obs_col} mean = {stats_result['conditional_stats']['missing_mean']:.3f}"
                             )
-                            print(
-                                f"  When {indicated_col} observed: {obs_col} mean = {stats_result['conditional_stats']['observed_mean']:.3f}"
-                            )
 
                         if "mannwhitney" in stats_result:
                             print(
@@ -719,8 +759,12 @@ class IntervariableImperfection:
                     # Visualize lagged correlations
                     self.results.plots.ac_lag_scatter_plot[pair_key] = (
                         visualization_utils.plot_scatter(
-                            x=self.results.ac_asymmetric_crosscorrelation[pair_key]["lag"].to_numpy(),
-                            y=self.results.ac_asymmetric_crosscorrelation[pair_key]["crosscorr"].to_numpy(),
+                            x=self.results.ac_asymmetric_crosscorrelation[pair_key][
+                                "lag"
+                            ].to_numpy(),
+                            y=self.results.ac_asymmetric_crosscorrelation[pair_key][
+                                "crosscorr"
+                            ].to_numpy(),
                             title=f"Asymmetric Correlation: Missing {indicated_col} vs Observed {obs_col}",
                             xaxis_title="Lag",
                             yaxis_title="Rank-Biserial Correlation",
@@ -992,9 +1036,6 @@ class IntervariableImperfection:
 
         return summary
 
-    # Axes where a *lower* value means *more* imperfect (none for intervariable — all higher = more imperfect)
-    INVERTED_AXES: frozenset = frozenset()
-
     @staticmethod
     def assign_strata(
         df: pl.DataFrame,
@@ -1009,65 +1050,72 @@ class IntervariableImperfection:
         Returns df with an added "intervariable_stratum" column
         (Q_complete / Q_alpha / Q_beta / Q_gamma / Q_delta / null).
 
-        Q_complete is assigned to cases with avg_indicated_vars_pct == 0 (no missingness).
+        Q_complete is assigned to cases with avg_indicated_pct == 0 (no missingness).
         All axes: higher = more imperfect (no inverted axes).
 
+        Thin wrapper over stratification.assign_strata() supplying this module's
+        conventions.
+
         Parameters:
-            df (pl.DataFrame): Input DataFrame containing the axis columns and avg_indicated_vars_pct.
+            df (pl.DataFrame): Input DataFrame containing the axis columns and avg_indicated_pct.
             axis_x (str): Column name for the x-axis metric.
             axis_y (str): Column name for the y-axis metric.
             x_median (float): Median threshold for the x-axis.
             y_median (float): Median threshold for the y-axis.
         """
-        x_high = pl.col(axis_x) > x_median
-        y_high = pl.col(axis_y) > y_median
-        return df.with_columns(
-            pl.when(pl.col("avg_indicated_vars_pct") == 0)
-            .then(pl.lit("Q_complete"))
-            .when(pl.col(axis_x).is_null() | pl.col(axis_y).is_null())
-            .then(pl.lit(None))
-            .when(~x_high & ~y_high)
-            .then(pl.lit("Q_alpha"))
-            .when(x_high & ~y_high)
-            .then(pl.lit("Q_beta"))
-            .when(~x_high & y_high)
-            .then(pl.lit("Q_gamma"))
-            .when(x_high & y_high)
-            .then(pl.lit("Q_delta"))
-            .otherwise(pl.lit(None))
-            .alias("intervariable_stratum")
+        return stratification.assign_strata(
+            df,
+            axis_x,
+            axis_y,
+            x_median,
+            y_median,
+            stratum_col=IntervariableImperfection.STRATUM_COL,
+            inverted_axes=IntervariableImperfection.INVERTED_AXES,
+            complete_col=IntervariableImperfection.COMPLETE_COL,
         )
 
-    def composite_score(
+    def case_metrics(
         self,
+        stratify: bool = False,
         save_results: bool = True,
     ) -> "IntervariableImperfection":
         """
-        Assign each case to one of five intervariable imperfection strata.
+        Compute the case-level intervariable imperfection metrics, one row per case.
 
-        Strata: Q_complete (no missingness), Q_alpha / Q_beta / Q_gamma / Q_delta
-        (quadrants from median-bisecting the two most orthogonal candidate axes).
+        These describe how imperfection is distributed *across* variables within a case,
+        so unlike the intravariable metrics they are computed over all variables jointly
+        rather than per variable (D = number of variables, T = timestamps):
 
-        Candidate axes (per case, across all variables):
-            avg_indicated_vars_pct      : mean row-level imperfection
-            co_missingness_concentration: avg imperfection on rows that have any
-            missing_variable_breadth    : fraction of variables ever missing
-            pattern_entropy             : entropy of co-dropout bitmask patterns
-            max_pairwise_co_missingness : strongest pairwise Jaccard co-dropout
+            avg_indicated_pct : mean fraction of variables imperfect per timestamp,
+                                averaged over all T — on [0, 100]
+            co_concentration  : the same mean, but restricted to timestamps that have at
+                                least one imperfect variable — on [0, 100]
+            breadth           : fraction of variables that are imperfect at some point
+            max_pair_overlap  : strongest pairwise co-dropout, max over variable pairs of
+                                |T_i ∩ T_j| / min(|T_i|, |T_j|)
+            pattern_entropy   : Shannon entropy of the row-level co-dropout bitmask
+                                patterns, normalized by log2 of the number of patterns
+
+        With stratify=True, each case is additionally assigned to an imperfection stratum:
+        Q_complete for cases with no imperfection, otherwise the Q_alpha / Q_beta /
+        Q_gamma / Q_delta quadrant obtained by median-bisecting the least-correlated
+        (most orthogonal) pair of the above metrics.
 
         Runs row_statistics() automatically if not already done.
 
         Results stored in:
-            self.results.iv_composite_scores       — one row per case
-            self.results.iv_pairwise_correlations  — correlation table used to select axes
+            self.results.cm_case_metrics          — one row per case
+            self.results.cm_pairwise_correlations — correlation table used to select axes,
+                                                    None unless stratify=True
 
         Parameters:
+            stratify (bool): Also assign imperfection strata. Defaults to False.
             save_results (bool): Whether to save CSVs to save_path.
 
         Returns:
             self: Supports method chaining.
         """
-        new_path_level_name = "composite_score"
+        new_path_level_name = "case_metrics"
         path = None
         if self.save_path and save_results:
             path = self.save_path / new_path_level_name
@@ -1085,102 +1133,53 @@ class IntervariableImperfection:
         )
         if base is None:
             pretty_printing.rich_warning(
-                "Could not compute intervariable metrics for composite score (no complete cases?)."
+                "Could not compute intervariable case metrics (no complete cases?)."
             )
             return self
 
-        candidate_axes = [
-            "avg_indicated_vars_pct",
-            "co_missingness_concentration",
-            "missing_variable_breadth",
-            "pattern_entropy",
-            "max_pairwise_co_missingness",
-        ]
+        base = base.rename(
+            {
+                "avg_indicated_vars_pct": "avg_indicated_pct",
+                "co_missingness_concentration": "co_concentration",
+                "missing_variable_breadth": "breadth",
+                "max_pairwise_co_missingness": "max_pair_overlap",
+            }
+        )
 
-        def _pair_corr(df: pl.DataFrame, col_x: str, col_y: str) -> tuple:
-            pair_df = df.select([col_x, col_y]).drop_nulls([col_x, col_y])
-            n = pair_df.height
-            if n < 3:
-                return float("nan"), n
-            x = pair_df[col_x].to_numpy()
-            y = pair_df[col_y].to_numpy()
-            if np.nanstd(x) == 0 or np.nanstd(y) == 0:
-                return float("nan"), n
-            return float(spearmanr(x, y).statistic), n
+        metric_cols = [self.id_col, *self.CASE_METRIC_COLS]
+
+        if not stratify:
+            self.results.cm_case_metrics = base.select(metric_cols)
+            self.results.cm_pairwise_correlations = None
+            if save_results and path:
+                self.results.cm_case_metrics.write_csv(path / "case_metrics.csv")
+            return self
 
         # Axis selection and median computation are done on imperfect cases only.
-        # Q_complete cases (avg_indicated_vars_pct == 0) are structurally excluded from
+        # Q_complete cases (avg_indicated_pct == 0) are structurally excluded from
         # quadrant assignment and would bias the median thresholds if included.
-        imperfect_base = base.filter(pl.col("avg_indicated_vars_pct") > 0)
+        imperfect_base = base.filter(pl.col("avg_indicated_pct") > 0)
 
-        corr_rows = []
-        present_axes = [a for a in candidate_axes if a in imperfect_base.columns]
-        for ax_x, ax_y in itertools.combinations(present_axes, 2):
-            corr, n_complete = _pair_corr(imperfect_base, ax_x, ax_y)
-            corr_rows.append(
-                {
-                    "axis_1": ax_x,
-                    "axis_2": ax_y,
-                    "corr": corr,
-                    "abs_corr": float(abs(corr)) if not np.isnan(corr) else float("nan"),
-                    "n_complete_cases": n_complete,
-                }
-            )
-
-        corr_table = pl.DataFrame(corr_rows).sort(
-            ["abs_corr", "n_complete_cases"], descending=[False, True], nulls_last=True
+        corr_table = stratification.pairwise_axis_correlations(
+            imperfect_base, self.CASE_METRIC_COLS
         )
-        self.results.iv_pairwise_correlations = corr_table
+        self.results.cm_pairwise_correlations = corr_table
 
-        valid_pairs = corr_table.filter(pl.col("corr").is_not_null())
-        if valid_pairs.height > 0:
-            selected = valid_pairs.row(0, named=True)
-            axis_x = selected["axis_1"]
-            axis_y = selected["axis_2"]
-            selected_corr = float(selected["corr"])
-        else:
-            axis_x = "avg_indicated_vars_pct"
-            axis_y = "missing_variable_breadth"
-            selected_corr = float("nan")
-            pretty_printing.rich_warning(
-                "Could not compute pairwise Spearman correlations for axis selection "
-                "(too few complete cases or zero-variance metrics). "
-                f"Falling back to default axes: {axis_x} × {axis_y}."
-            )
-
-        complete_mask = pl.col(axis_x).is_not_null() & pl.col(axis_y).is_not_null()
-        complete_df = imperfect_base.filter(complete_mask)
-
-        scores = base.clone()
-        if complete_df.height < 2:
-            scores = scores.with_columns(
-                pl.lit(axis_x).alias("axis_x"),
-                pl.lit(axis_y).alias("axis_y"),
-                pl.lit(None).cast(pl.Float64).alias("axis_pair_corr"),
-                pl.lit(None).cast(pl.Float64).alias("axis_x_median_threshold"),
-                pl.lit(None).cast(pl.Float64).alias("axis_y_median_threshold"),
-                pl.lit(None).cast(pl.Utf8).alias("intervariable_stratum"),
-            )
-        else:
-            x_median = float(complete_df.select(pl.col(axis_x).cast(pl.Float64).median()).item() or 0.0)
-            y_median = float(complete_df.select(pl.col(axis_y).cast(pl.Float64).median()).item() or 0.0)
-            scores = self.assign_strata(scores, axis_x, axis_y, x_median, y_median)
-            scores = scores.with_columns(
-                pl.lit(axis_x).alias("axis_x"),
-                pl.lit(axis_y).alias("axis_y"),
-                pl.lit(selected_corr).alias("axis_pair_corr"),
-                pl.lit(x_median).alias("axis_x_median_threshold"),
-                pl.lit(y_median).alias("axis_y_median_threshold"),
-            )
+        # Thresholds are fitted on imperfect cases only, so Q_complete cases do not drag
+        # the medians down, but every case gets labelled.
+        scores, axis_x, axis_y, selected_corr = stratification.fit_and_stratify(
+            base,
+            fit_df=imperfect_base,
+            corr_table=corr_table,
+            assign_fn=self.assign_strata,
+            stratum_col=self.STRATUM_COL,
+            fallback_x="avg_indicated_pct",
+            fallback_y="breadth",
+        )
 
         scores = scores.select(
             [
-                self.id_col,
-                "avg_indicated_vars_pct",
-                "co_missingness_concentration",
-                "missing_variable_breadth",
-                "pattern_entropy",
-                "max_pairwise_co_missingness",
+                *metric_cols,
                 "axis_x",
                 "axis_y",
                 "axis_pair_corr",
@@ -1189,26 +1188,25 @@ class IntervariableImperfection:
                 "intervariable_stratum",
             ]
         )
-        self.results.iv_composite_scores = scores
+        self.results.cm_case_metrics = scores
 
         if self.renderer:
             stratified = scores.filter(pl.col("intervariable_stratum").is_not_null())
             total = len(stratified)
             prevalence = (
-                stratified
-                .group_by("intervariable_stratum")
+                stratified.group_by("intervariable_stratum")
                 .agg(pl.len().alias("n"))
                 .with_columns((pl.col("n") / total * 100).round(1).alias("pct"))
                 .sort("intervariable_stratum")
             )
             pretty_printing.rich_info(
-                f"Intervariable composite score — selected axes: {axis_x} × {axis_y} "
+                f"Intervariable case metrics — selected axes: {axis_x} × {axis_y} "
                 f"(corr={selected_corr:.3f})"
             )
             print(prevalence)
 
         if save_results and path:
-            scores.write_csv(path / "case_scores.csv")
+            scores.write_csv(path / "case_metrics.csv")
             corr_table.write_csv(path / "pairwise_axis_correlations.csv")
 
         return self
@@ -1268,6 +1266,9 @@ if __name__ == "__main__":
     bp_A = [120.0, 118.0, 122.0, 119.0, 121.0, None, 117.0, 123.0, 120.0, 119.0]
     bp_B = [115.0, 116.0, 114.0, 117.0, 115.0, 118.0, 116.0, 119.0, None, 114.0]
 
+    rows = [("A", times_A[i], hr_A[i], bp_A[i], i) for i in range(10)] + [
+        ("B", times_B[i], hr_B[i], bp_B[i], i) for i in range(10)
+    ]
     rows = [("A", times_A[i], hr_A[i], bp_A[i], i) for i in range(10)] + [
         ("B", times_B[i], hr_B[i], bp_B[i], i) for i in range(10)
     ]

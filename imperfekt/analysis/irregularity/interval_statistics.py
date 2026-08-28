@@ -263,7 +263,12 @@ def compute_case_interval_entropy_adherence(
     case_entropy = (
         case_bin_counts.group_by(id_col)
         .agg(
-            pl.col("entropy_contrib").sum().alias("entropy_bits"),
+            # .sort() before .sum() is not cosmetic: polars aggregates groups in
+            # parallel with no guaranteed element order, and float addition is not
+            # associative, so an unsorted sum makes the entropy differ in its last
+            # digits between runs. Sorting pins a canonical order and makes the
+            # metric reproducible.
+            pl.col("entropy_contrib").sort().sum().alias("entropy_bits"),
             pl.col("interval_bin").count().cast(pl.Int64).alias("n_unique_bins"),
             # dominant bin = the bin_count argmax (sort descending, take first)
             pl.col("interval_bin")

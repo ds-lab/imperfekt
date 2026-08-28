@@ -1,7 +1,7 @@
 # %%
+import examples.sepsis_prediction.config as settings
 import polars as pl
 
-import examples.sepsis_prediction.config as settings
 from imperfekt.analysis.preliminary.preliminary import Preliminary
 from imperfekt.config.global_settings import VITALS
 

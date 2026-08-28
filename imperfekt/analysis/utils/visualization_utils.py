@@ -915,6 +915,187 @@ def plot_qq(
     return fig
 
 
+def plot_effect_size_forest(
+    df: pl.DataFrame,
+    effect_col: str = "effect_size",
+    ci_lower_col: str = "ci_lower",
+    ci_upper_col: str = "ci_upper",
+    label_col: str = "metric",
+    facet_col: str | None = None,
+    significant_col: str | None = "significant",
+    reference_line: float = 0.0,
+    title: str | None = None,
+    xaxis_title: str | None = None,
+    sort_by_magnitude: bool = True,
+    library: str = "matplotlib",
+    renderer: str | None = None,
+    save_path: str | Path | None = None,
+    save_results: bool = False,
+) -> "go.Figure | plt.Figure":
+    """
+    Forest plot of effect sizes with confidence intervals — one row per comparison.
+
+    The standard presentation for many outcomes compared at once: the point estimate
+    with its interval carries the magnitude and its precision, and the reference line
+    shows at a glance which intervals exclude "no effect". Rows are sorted by absolute
+    effect so the substantive findings sit together, regardless of their p-values.
+
+    Non-significant rows are drawn with hollow markers rather than omitted — a metric
+    tested and found null is information, and dropping it would misrepresent the
+    breadth of what was examined.
+
+    Parameters:
+        df (pl.DataFrame): One row per comparison.
+        effect_col (str): Column holding the point estimate.
+        ci_lower_col (str): Column holding the lower interval bound.
+        ci_upper_col (str): Column holding the upper interval bound.
+        label_col (str): Column holding the row label.
+        facet_col (str | None): Optional column prefixed onto the label (e.g. "variable").
+        significant_col (str | None): Boolean column controlling filled vs hollow markers.
+        reference_line (float): x position of the dashed null-effect line.
+        title (str): Title of the plot.
+        xaxis_title (str): Title for the x-axis.
+        sort_by_magnitude (bool): Sort rows by absolute effect size descending.
+        library (str): "matplotlib" or "plotly".
+        renderer (str): Renderer for displaying the plot. None disables rendering.
+        save_path (str): Path to save the plot image.
+        save_results (bool): Whether to save the plot image.
+
+    Returns:
+        go.Figure | plt.Figure: The figure object.
+    """
+    for col in (effect_col, ci_lower_col, ci_upper_col, label_col):
+        if col not in df.columns:
+            raise ValueError(f"Column '{col}' not found in DataFrame")
+
+    plot_df = df.filter(pl.col(effect_col).is_not_null() & pl.col(effect_col).is_not_nan())
+    if plot_df.height == 0:
+        raise ValueError("No rows with a defined effect size to plot.")
+
+    if sort_by_magnitude:
+        plot_df = plot_df.with_columns(pl.col(effect_col).abs().alias("_abs_effect")).sort(
+            "_abs_effect", descending=False
+        )
+
+    if facet_col is not None and facet_col in plot_df.columns:
+        labels = [
+            f"{f} · {m}" if f is not None else str(m)
+            for f, m in zip(plot_df[facet_col].to_list(), plot_df[label_col].to_list())
+        ]
+    else:
+        labels = [str(v) for v in plot_df[label_col].to_list()]
+
+    effects = plot_df[effect_col].cast(pl.Float64).to_numpy()
+    lowers = plot_df[ci_lower_col].cast(pl.Float64).to_numpy()
+    uppers = plot_df[ci_upper_col].cast(pl.Float64).to_numpy()
+
+    if significant_col and significant_col in plot_df.columns:
+        significant = [bool(v) for v in plot_df[significant_col].fill_null(False).to_list()]
+    else:
+        significant = [True] * len(effects)
+
+    y_positions = np.arange(len(effects))
+    # Error bars are offsets from the point estimate, clipped at 0 so an inverted
+    # interval (possible with a bootstrap on a degenerate sample) cannot raise.
+    err_low = np.clip(effects - lowers, 0, None)
+    err_high = np.clip(uppers - effects, 0, None)
+
+    if library.lower() == "plotly":
+        fig = go.Figure()
+        for is_sig, marker_name in ((True, "significant"), (False, "not significant")):
+            idx = [i for i, s in enumerate(significant) if s == is_sig]
+            if not idx:
+                continue
+            fig.add_trace(
+                go.Scatter(
+                    x=effects[idx],
+                    y=[labels[i] for i in idx],
+                    mode="markers",
+                    name=marker_name,
+                    error_x={
+                        "type": "data",
+                        "symmetric": False,
+                        "array": err_high[idx],
+                        "arrayminus": err_low[idx],
+                        "thickness": 1.2,
+                    },
+                    marker={
+                        "size": 9,
+                        "color": "#1f77b4" if is_sig else "white",
+                        "line": {"color": "#1f77b4", "width": 1.5},
+                    },
+                )
+            )
+        fig.add_vline(x=reference_line, line_dash="dash", line_color="grey")
+        fig.update_layout(
+            title=title,
+            xaxis_title=xaxis_title or effect_col,
+            yaxis_title="",
+            template="plotly_white",
+            height=max(400, 26 * len(effects) + 160),
+        )
+
+        if renderer:
+            fig.show(renderer=renderer)
+
+        if save_results and save_path:
+            save_path = Path(save_path)
+            if save_path.suffix != ".png":
+                save_path = save_path.with_suffix(".png")
+            fig.write_image(save_path)
+            print(f"Forest plot saved to {save_path}")
+
+        return fig
+
+    elif library.lower() == "matplotlib":
+        fig, ax = plt.subplots(figsize=(10, max(6, 0.32 * len(effects) + 2)))
+
+        ax.errorbar(
+            effects,
+            y_positions,
+            xerr=[err_low, err_high],
+            fmt="none",
+            ecolor="#4c72b0",
+            elinewidth=1.2,
+            capsize=3,
+        )
+        for i, (effect, is_sig) in enumerate(zip(effects, significant)):
+            ax.plot(
+                effect,
+                i,
+                marker="o",
+                markersize=7,
+                color="#4c72b0",
+                markerfacecolor="#4c72b0" if is_sig else "white",
+            )
+
+        ax.axvline(reference_line, linestyle="--", color="grey", linewidth=1)
+        ax.set_yticks(y_positions)
+        ax.set_yticklabels(labels)
+        ax.set_xlabel(xaxis_title or effect_col)
+        if title:
+            ax.set_title(title)
+
+        ax.grid(True, alpha=0.3, axis="x")
+        fig.tight_layout()
+
+        if save_results and save_path:
+            save_path = Path(save_path)
+            if save_path.suffix != ".png":
+                save_path = save_path.with_suffix(".png")
+            fig.savefig(save_path, dpi=300, bbox_inches="tight")
+            print(f"Forest plot saved to {save_path}")
+
+        if renderer:
+            plt.show()
+
+        plt.close(fig)
+        return fig
+
+    else:
+        raise ValueError(f"Library '{library}' is not supported. Choose 'plotly' or 'matplotlib'.")
+
+
 # test matplotlib plotting
 if __name__ == "__main__":
     # Example usage

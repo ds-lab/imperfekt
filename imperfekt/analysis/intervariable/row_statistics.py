@@ -313,7 +313,12 @@ def compute_case_intervariable_metrics(
         .with_columns((-pl.col("_frac") * pl.col("_frac").log(base=2.0)).alias("_entropy_contrib"))
         .group_by(id_col)
         .agg(
-            pl.col("_entropy_contrib").sum().alias("_entropy_bits"),
+            # .sort() before .sum() is not cosmetic: polars aggregates groups in
+            # parallel with no guaranteed element order, and float addition is not
+            # associative, so an unsorted sum makes the entropy differ in its last
+            # digits between runs. Sorting pins a canonical order and makes the
+            # metric reproducible.
+            pl.col("_entropy_contrib").sort().sum().alias("_entropy_bits"),
             pl.col("_bitmask").count().cast(pl.Int64).alias("_n_unique_patterns"),
             pl.col("_n_imperfect_rows").first().alias("_n_imperfect_rows"),
         )

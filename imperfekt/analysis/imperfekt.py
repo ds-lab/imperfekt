@@ -6,7 +6,13 @@ from imperfekt.analysis.intervariable.intervariable import IntervariableImperfec
 from imperfekt.analysis.intravariable.intravariable import IntravariableImperfection
 from imperfekt.analysis.irregularity.irregularity import Irregularity
 from imperfekt.analysis.preliminary.preliminary import Preliminary
-from imperfekt.analysis.utils import masking, pretty_printing
+from imperfekt.analysis.utils import (
+    group_comparison,
+    masking,
+    pretty_printing,
+    statistics_utils,
+    visualization_utils,
+)
 from imperfekt.analysis.utils.events import (
     calculate_event_percentage,
     create_event_mask,
@@ -174,6 +180,12 @@ class Imperfekt:
         self.group_results = {}
         self.event_results = {}
 
+        # Group comparison results, populated by run_grouped_analysis in 'metrics' mode
+        self.group_comparison_descriptives: pl.DataFrame | None = None
+        self.group_comparison_results: pl.DataFrame | None = None
+        self.group_comparison_posthoc: pl.DataFrame | None = None
+        self.group_comparison_plots: dict = {}
+
     def run(
         self,
         save_results: bool = True,
@@ -224,6 +236,8 @@ class Imperfekt:
         top_n_groups: int | None = None,
         addition_to_title: str | None = None,
         cheap_mode: bool = False,
+        analysis_mode: str = "metrics",  # 'full' or 'metrics'
+        n_bootstrap: int = 1000,
     ):
         """
         Runs a grouped analysis based on an annotation dataframe.
@@ -241,6 +255,12 @@ class Imperfekt:
             save_results (bool): If True, saves the results of the analysis.
             top_n_groups (int, optional): If set, limits the analysis to the
                                           top N largest groups. Defaults to None.
+            analysis_mode (str): The mode of analysis to run. Can be 'full' or 'metrics'. Defaults to 'metrics'.
+                                 In 'metrics' mode the case-level metrics are compared between
+                                 groups; see _check_group_differences for the method.
+            n_bootstrap (int): Bootstrap resamples for the Kruskal-Wallis effect-size CI
+                                 ('metrics' mode, more than two groups). The two-group effect
+                                 size gets an analytic interval and does not bootstrap.
 
         Returns:
             None, updates the dict under <imperfect_object>.group_results.
@@ -326,28 +346,320 @@ class Imperfekt:
                 plausibility_reference_ranges=self.plausibility_reference_ranges,
             )
 
-            if not cheap_mode:
-                self.group_results[group].run(save_results=save_results)
+            if analysis_mode == "full":
+                if not cheap_mode:
+                    self.group_results[group].run(save_results=save_results)
+                else:
+                    self.group_results[group].preliminary.describe_df(
+                        save_results=save_results
+                    ).correlation(save_results=save_results)
+                    self.group_results[group].intravariable.column_statistics(
+                        save_results=save_results
+                    ).gap_statistics(save_results=save_results).date_time_statistics(
+                        save_results=save_results
+                    ).case_metrics(stratify=True, save_results=save_results)
+                    self.group_results[group].intervariable.row_statistics(
+                        save_results=save_results
+                    ).mcar_test(save_results=save_results).mar_mnar_test(
+                        save_results=save_results
+                    ).symmetric_correlation(save_results=save_results).case_metrics(
+                        stratify=True, save_results=save_results
+                    )
+                    self.group_results[group].irregularity.case_metrics(
+                        stratify=True, save_results=save_results
+                    )
+                if group_save_path:
+                    self.group_results[group].generate_html_reports(
+                        addition_to_title=f"{addition_to_title} - Group: {group}"
+                    )
+            elif analysis_mode == "metrics":
+                # stratify=False: the quadrant thresholds would be fitted separately per
+                # group, so the resulting labels would not be comparable between groups.
+                # The raw metrics are what gets compared.
+                self.group_results[group].intravariable.case_metrics(
+                    stratify=False, save_results=False
+                )
+                self.group_results[group].intervariable.case_metrics(
+                    stratify=False, save_results=False
+                )
+                self.group_results[group].irregularity.case_metrics(
+                    stratify=False, save_results=False
+                )
+
             else:
-                self.group_results[group].preliminary.describe_df(
-                    save_results=save_results
-                ).correlation(save_results=save_results)
-                self.group_results[group].intravariable.column_statistics(
-                    save_results=save_results
-                ).gap_statistics(save_results=save_results).date_time_statistics(
-                    save_results=save_results
+                raise ValueError(
+                    f"Unsupported analysis_mode: {analysis_mode}. Supported modes: 'full', 'metrics'."
                 )
-                self.group_results[group].intervariable.row_statistics(
-                    save_results=save_results
-                ).mcar_test(save_results=save_results).mar_mnar_test(
-                    save_results=save_results
-                ).symmetric_correlation(save_results=save_results)
-                self.group_results[group].irregularity.composite_score(save_results=save_results)
-            if group_save_path:
-                self.group_results[group].generate_html_reports(
-                    addition_to_title=f"{addition_to_title} - Group: {group}"
-                )
+
+        if analysis_mode == "metrics":
+            # check if groups are significantly different in their metrics and store as table including mean (and std) per metric per group
+            self._check_group_differences(
+                save_results=save_results,
+                n_bootstrap=n_bootstrap,
+            )
         pretty_printing.rich_info("Grouped analysis complete.")
+
+    _GROUP_COMPARISON_ASPECTS = (
+        ("intravariable", "intravariable", IntravariableImperfection, "variable"),
+        ("intervariable", "intervariable", IntervariableImperfection, None),
+        ("irregularity", "irregularity", Irregularity, None),
+    )
+
+    def _collect_group_frames(self, attr: str) -> dict:
+        """
+        Gather one aspect's per-case metric frame from every group.
+
+        Parameters:
+            attr (str): Attribute name of the analysis module on each group's Imperfekt.
+
+        Returns:
+            dict: Group label -> per-case metric DataFrame.
+        """
+        frames = {}
+        for group, imp in self.group_results.items():
+            metrics = getattr(getattr(imp, attr), "results").cm_case_metrics
+            if metrics is None or metrics.height == 0:
+                pretty_printing.rich_warning(
+                    f"No {attr} case metrics for group '{group}' — excluded from the comparison."
+                )
+                continue
+            n_ids = metrics[self.id_col].n_unique()
+            if n_ids < 3:
+                pretty_printing.rich_warning(
+                    f"Group '{group}' has only {n_ids} case(s) with {attr} metrics — "
+                    "excluded from the comparison."
+                )
+                continue
+            frames[str(group)] = metrics
+        return frames
+
+    def _check_group_differences(
+        self,
+        save_results: bool = True,
+        n_bootstrap: int = 1000,
+    ):
+        """
+        Test whether the case-level imperfection metrics differ between groups.
+
+        RQ: does the imperfection analysis reveal any differences between groups?
+
+        For every metric of every aspect, compares the per-case values across groups
+        with a rank-based test (Mann-Whitney for two groups, Kruskal-Wallis for more),
+        and reports the magnitude as an effect size with a confidence interval. For two
+        groups the Hodges-Lehmann median difference gives the direction in the metric's
+        own units.
+
+        Benjamini-Hochberg FDR correction is applied once across the whole family of
+        tests, all aspects, all variables, all metrics.
+        For more than two groups, pairwise DSCF post-hoc tests run only for metrics whose omnibus survives the correction.
+
+        Results stored in:
+            self.group_comparison_descriptives — per (aspect, variable, metric, group)
+            self.group_comparison_results      — per (aspect, variable, metric)
+            self.group_comparison_posthoc      — per group pair; empty for two groups
+            self.group_comparison_plots        — forest plot per aspect
+
+        Parameters:
+            save_results (bool): Whether to save CSVs and figures to save_path.
+            n_bootstrap (int): Bootstrap resamples for the Kruskal-Wallis eta-squared CI.
+                Unused for two groups: Cliff's delta gets an analytic interval, which is
+                both exact and far cheaper than bootstrapping a rank statistic.
+
+        Returns:
+            None. Updates the attributes listed above.
+        """
+        path = None
+        if self.save_path and save_results:
+            path = self.save_path / "group_comparison"
+            path.mkdir(parents=True, exist_ok=True)
+
+        descriptives, comparisons = [], []
+        # Keep each aspect's frames so the post-hoc pass can re-slice them.
+        aspect_frames: dict[str, tuple[dict, str | None]] = {}
+
+        for aspect, attr, module_cls, facet_col in self._GROUP_COMPARISON_ASPECTS:
+            frames = self._collect_group_frames(attr)
+            if len(frames) < 2:
+                pretty_printing.rich_warning(
+                    f"Fewer than 2 usable groups for the {aspect} comparison — skipping it."
+                )
+                continue
+
+            aspect_frames[aspect] = (frames, facet_col)
+            metric_cols = module_cls.CASE_METRIC_COLS
+
+            descriptives.append(
+                group_comparison.describe_groups(
+                    frames, metric_cols, facet_col=facet_col, aspect=aspect
+                )
+            )
+            comparisons.append(
+                group_comparison.compare_groups(
+                    frames,
+                    metric_cols,
+                    alpha=self.alpha,
+                    facet_col=facet_col,
+                    aspect=aspect,
+                    n_bootstrap=n_bootstrap,
+                )
+            )
+
+        if not comparisons:
+            pretty_printing.rich_warning(
+                "No aspect had enough usable groups — no group comparison was performed."
+            )
+            self.group_comparison_descriptives = None
+            self.group_comparison_results = None
+            self.group_comparison_posthoc = None
+            return
+
+        self.group_comparison_descriptives = pl.concat(descriptives, how="vertical_relaxed")
+        results = pl.concat(comparisons, how="vertical_relaxed")
+
+        results = results.with_columns(
+            pl.Series(
+                "q_value", statistics_utils.benjamini_hochberg(results["p_value"].to_numpy())
+            ),
+            pl.Series(
+                "definedness_q_value",
+                statistics_utils.benjamini_hochberg(results["definedness_p_value"].to_numpy()),
+            ),
+        ).with_columns((pl.col("q_value") < self.alpha).fill_null(False).alias("significant"))
+        self.group_comparison_results = results
+
+        self.group_comparison_posthoc = self._run_group_posthoc(results, aspect_frames)
+        self.group_comparison_plots = self._plot_group_differences(results, path, save_results)
+
+        if save_results and path:
+            self.group_comparison_descriptives.write_csv(path / "descriptives.csv")
+            self.group_comparison_results.write_csv(path / "comparisons.csv")
+            self.group_comparison_posthoc.write_csv(path / "posthoc.csv")
+
+        if self.renderer:
+            self._report_group_differences(results)
+
+    def _run_group_posthoc(
+        self,
+        results: pl.DataFrame,
+        aspect_frames: dict,
+    ) -> pl.DataFrame:
+        """
+        Pairwise post-hoc tests for metrics whose omnibus survived FDR correction.
+
+        Only relevant with more than two groups — with two, the omnibus already is the
+        pairwise comparison. Gating on the omnibus is what keeps the pairwise error rate
+        contained; running post-hoc unconditionally would defeat it.
+
+        Parameters:
+            results (pl.DataFrame): The FDR-corrected comparison frame.
+            aspect_frames (dict): aspect -> (group frames, facet column).
+
+        Returns:
+            pl.DataFrame: Pairwise comparisons with FDR-corrected q-values.
+        """
+        surviving = results.filter(
+            (pl.col("n_groups") > 2) & pl.col("significant") & pl.col("skipped_reason").is_null()
+        )
+        if surviving.height == 0:
+            return pl.DataFrame(schema={**group_comparison.POSTHOC_SCHEMA, "q_value": pl.Float64})
+
+        posthoc_frames = []
+        for row in surviving.iter_rows(named=True):
+            frames, facet_col = aspect_frames[row["aspect"]]
+            posthoc_frames.append(
+                group_comparison.posthoc_pairwise(
+                    frames,
+                    metric=row["metric"],
+                    facet_col=facet_col,
+                    facet_value=row["variable"],
+                    aspect=row["aspect"],
+                )
+            )
+
+        posthoc = pl.concat(posthoc_frames, how="vertical_relaxed")
+        if posthoc.height == 0:
+            return posthoc.with_columns(pl.lit(None).cast(pl.Float64).alias("q_value"))
+
+        return posthoc.with_columns(
+            pl.Series("q_value", statistics_utils.benjamini_hochberg(posthoc["p_value"].to_numpy()))
+        )
+
+    def _plot_group_differences(
+        self,
+        results: pl.DataFrame,
+        path: Path | None,
+        save_results: bool,
+    ) -> dict:
+        """
+        One forest plot of effect sizes with confidence intervals per aspect.
+
+        Parameters:
+            results (pl.DataFrame): The FDR-corrected comparison frame.
+            path (Path | None): Directory to save figures into.
+            save_results (bool): Whether to save the figures.
+
+        Returns:
+            dict: aspect -> figure object.
+        """
+        plots = {}
+        for aspect in results["aspect"].unique().to_list():
+            aspect_results = results.filter(
+                (pl.col("aspect") == aspect) & pl.col("skipped_reason").is_null()
+            )
+            if aspect_results.height == 0:
+                continue
+
+            effect_name = aspect_results["effect_size_name"][0]
+            try:
+                plots[aspect] = visualization_utils.plot_effect_size_forest(
+                    aspect_results,
+                    facet_col="variable",
+                    title=f"{aspect.capitalize()} — group differences",
+                    xaxis_title=f"{effect_name} (95% CI)",
+                    reference_line=0.0,
+                    library=self.plot_library,
+                    renderer=self.renderer,
+                    save_path=(
+                        path / f"{aspect}_effect_size_forest.png" if path is not None else None
+                    ),
+                    save_results=save_results,
+                )
+            except ValueError as exc:
+                pretty_printing.rich_warning(f"Could not plot {aspect} forest plot: {exc}")
+        return plots
+
+    def _report_group_differences(self, results: pl.DataFrame):
+        """Print a short summary of the comparison to the console."""
+        tested = results.filter(pl.col("skipped_reason").is_null())
+        skipped = results.height - tested.height
+        n_significant = int(tested["significant"].sum()) if tested.height else 0
+
+        # n_groups can differ between aspects if a group was excluded from one of them.
+        group_counts = sorted(set(results["n_groups"].to_list()))
+        groups_desc = "/".join(str(n) for n in group_counts)
+        pretty_printing.rich_info(
+            f"Group comparison: {tested.height} metric(s) tested across "
+            f"{groups_desc} groups, {n_significant} surviving FDR correction "
+            f"at alpha={self.alpha}" + (f", {skipped} skipped." if skipped else ".")
+        )
+        if tested.height:
+            print(
+                tested.with_columns(pl.col("effect_size").abs().alias("_abs"))
+                .sort("_abs", descending=True)
+                .head(5)
+                .select(
+                    [
+                        "aspect",
+                        "variable",
+                        "metric",
+                        "effect_size",
+                        "ci_lower",
+                        "ci_upper",
+                        "q_value",
+                        "direction",
+                    ]
+                )
+            )
 
     def run_event_based_analysis(
         self,
