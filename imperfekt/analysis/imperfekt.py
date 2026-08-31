@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import numpy as np
 import polars as pl
 
 from imperfekt.analysis.intervariable.intervariable import IntervariableImperfection
@@ -322,7 +323,7 @@ class Imperfekt:
             pretty_printing.rich_info(f"Running analysis for group: {group}")
             group_df = merged_df.filter(pl.col(annotation_col) == group)
 
-            if self.save_path and analysis_mode=="full":
+            if self.save_path and analysis_mode == "full":
                 group_save_path = self.save_path / str(group)
                 group_save_path.mkdir(parents=True, exist_ok=True)
             else:
@@ -352,7 +353,7 @@ class Imperfekt:
                 else:
                     self.group_results[group].preliminary.describe_df(
                         save_results=save_results
-                    ).correlation(save_results=save_results)
+                    ).correlation(save_results=save_results).case_metrics(save_results=save_results)
                     self.group_results[group].intravariable.column_statistics(
                         save_results=save_results
                     ).gap_statistics(save_results=save_results).date_time_statistics(
@@ -373,6 +374,9 @@ class Imperfekt:
                         addition_to_title=f"{addition_to_title} - Group: {group}"
                     )
             elif analysis_mode == "metrics":
+                # The observed-value summaries: no stratification exists to disable, since
+                # there is no "more imperfect" direction for a raw measurement.
+                self.group_results[group].preliminary.case_metrics(save_results=False)
                 # stratify=False: the quadrant thresholds would be fitted separately per
                 # group, so the resulting labels would not be comparable between groups.
                 # The raw metrics are what gets compared.
@@ -399,10 +403,17 @@ class Imperfekt:
             )
         pretty_printing.rich_info("Grouped analysis complete.")
 
+    # (aspect label, attribute on Imperfekt, module class, facet column, FDR family).
+    #
+    # Two families, corrected separately: the observed-value metrics answer a different
+    # question (does the case-mix differ?) from the imperfection metrics (does the data
+    # quality differ?). Folding them into one family would inflate the q-values of the
+    # primary imperfection findings purely as a side effect of also describing the cohort.
     _GROUP_COMPARISON_ASPECTS = (
-        ("intravariable", "intravariable", IntravariableImperfection, "variable"),
-        ("intervariable", "intervariable", IntervariableImperfection, None),
-        ("irregularity", "irregularity", Irregularity, None),
+        ("preliminary", "preliminary", Preliminary, "variable", "observed_values"),
+        ("intravariable", "intravariable", IntravariableImperfection, "variable", "imperfection"),
+        ("intervariable", "intervariable", IntervariableImperfection, None, "imperfection"),
+        ("irregularity", "irregularity", Irregularity, None, "imperfection"),
     )
 
     def _collect_group_frames(self, attr: str) -> dict:
@@ -478,7 +489,7 @@ class Imperfekt:
         # Keep each aspect's frames so the post-hoc pass can re-slice them.
         aspect_frames: dict[str, tuple[dict, str | None]] = {}
 
-        for aspect, attr, module_cls, facet_col in self._GROUP_COMPARISON_ASPECTS:
+        for aspect, attr, module_cls, facet_col, family in self._GROUP_COMPARISON_ASPECTS:
             frames = self._collect_group_frames(attr)
             if len(frames) < 2:
                 pretty_printing.rich_warning(
@@ -492,7 +503,7 @@ class Imperfekt:
             descriptives.append(
                 group_comparison.describe_groups(
                     frames, metric_cols, facet_col=facet_col, aspect=aspect
-                )
+                ).with_columns(pl.lit(family).alias("family"))
             )
             comparisons.append(
                 group_comparison.compare_groups(
@@ -502,7 +513,7 @@ class Imperfekt:
                     facet_col=facet_col,
                     aspect=aspect,
                     n_bootstrap=n_bootstrap,
-                )
+                ).with_columns(pl.lit(family).alias("family"))
             )
 
         if not comparisons:
@@ -518,13 +529,8 @@ class Imperfekt:
         results = pl.concat(comparisons, how="vertical_relaxed")
 
         results = results.with_columns(
-            pl.Series(
-                "q_value", statistics_utils.benjamini_hochberg(results["p_value"].to_numpy())
-            ),
-            pl.Series(
-                "definedness_q_value",
-                statistics_utils.benjamini_hochberg(results["definedness_p_value"].to_numpy()),
-            ),
+            pl.Series("q_value", self._fdr_by_family(results, "p_value")),
+            pl.Series("definedness_q_value", self._fdr_by_family(results, "definedness_p_value")),
         ).with_columns((pl.col("q_value") < self.alpha).fill_null(False).alias("significant"))
         self.group_comparison_results = results
 
@@ -541,6 +547,32 @@ class Imperfekt:
 
         if self.renderer:
             self._report_group_differences(results)
+
+    @staticmethod
+    def _fdr_by_family(results: pl.DataFrame, p_col: str) -> np.ndarray:
+        """
+        Benjamini-Hochberg applied separately within each FDR family.
+
+        A multiplicity correction controls the error rate over the set of hypotheses that
+        answer one question. The observed-value metrics ask whether the cohorts differ;
+        the imperfection metrics ask whether their data quality differs. Correcting them
+        together would mean that describing the cohort more thoroughly raises the
+        q-values of the imperfection findings, which is not a real loss of evidence.
+
+        Parameters:
+            results (pl.DataFrame): Comparison frame carrying a "family" column.
+            p_col (str): Column of uncorrected p-values to correct.
+
+        Returns:
+            np.ndarray: q-values in the input row order; NaN where the p-value was NaN.
+        """
+        p_values = results[p_col].to_numpy().astype(float)
+        families = results["family"].to_numpy()
+        q_values = np.full(p_values.shape, np.nan)
+        for family in np.unique(families):
+            idx = np.flatnonzero(families == family)
+            q_values[idx] = statistics_utils.benjamini_hochberg(p_values[idx])
+        return q_values
 
     def _run_group_posthoc(
         self,
@@ -565,7 +597,13 @@ class Imperfekt:
             (pl.col("n_groups") > 2) & pl.col("significant") & pl.col("skipped_reason").is_null()
         )
         if surviving.height == 0:
-            return pl.DataFrame(schema={**group_comparison.POSTHOC_SCHEMA, "q_value": pl.Float64})
+            return pl.DataFrame(
+                schema={
+                    **group_comparison.POSTHOC_SCHEMA,
+                    "family": pl.Utf8,
+                    "q_value": pl.Float64,
+                }
+            )
 
         posthoc_frames = []
         for row in surviving.iter_rows(named=True):
@@ -577,16 +615,15 @@ class Imperfekt:
                     facet_col=facet_col,
                     facet_value=row["variable"],
                     aspect=row["aspect"],
-                )
+                ).with_columns(pl.lit(row["family"]).alias("family"))
             )
 
         posthoc = pl.concat(posthoc_frames, how="vertical_relaxed")
         if posthoc.height == 0:
             return posthoc.with_columns(pl.lit(None).cast(pl.Float64).alias("q_value"))
 
-        return posthoc.with_columns(
-            pl.Series("q_value", statistics_utils.benjamini_hochberg(posthoc["p_value"].to_numpy()))
-        )
+        # Split by family for the same reason the omnibus q-values are.
+        return posthoc.with_columns(pl.Series("q_value", self._fdr_by_family(posthoc, "p_value")))
 
     def _plot_group_differences(
         self,
@@ -640,40 +677,100 @@ class Imperfekt:
             aspect_descriptives = descriptives.filter(pl.col("aspect") == aspect)
             if aspect_descriptives.height == 0:
                 continue
-            try:
-                plots[f"{aspect}_descriptives"] = visualization_utils.plot_descriptives_boxplot(
+            plots.update(
+                self._plot_aspect_descriptives(aspect, aspect_descriptives, path, save_results)
+            )
+        return plots
+
+    def _plot_aspect_descriptives(
+        self,
+        aspect: str,
+        aspect_descriptives: pl.DataFrame,
+        path: Path | None,
+        save_results: bool,
+    ) -> dict:
+        """
+        Box plots of one aspect's per-group distributions.
+
+        The imperfection aspects get a single figure: their metrics are all bounded
+        proportions or entropies, so putting every variable in one panel is readable.
+        The observed-value metrics are in the variables' own clinical units, and a panel
+        holding SpO2 (~97) beside lactate (~2) would flatten the smaller one to a line —
+        so that aspect gets one figure per variable, leaving one unit per panel.
+
+        Parameters:
+            aspect (str): Aspect label.
+            aspect_descriptives (pl.DataFrame): Descriptives rows for this aspect.
+            path (Path | None): Directory to save figures into.
+            save_results (bool): Whether to save the figures.
+
+        Returns:
+            dict: Plot key -> figure object.
+        """
+        if aspect == "preliminary":
+            slices = [
+                (
+                    f"{aspect}_descriptives_{variable}",
+                    f"{aspect}_descriptives_box_{variable}.png",
+                    f"Observed values — {variable} per group",
+                    aspect_descriptives.filter(pl.col("variable") == variable),
+                    None,
+                )
+                for variable in aspect_descriptives["variable"].unique().sort().to_list()
+            ]
+        else:
+            slices = [
+                (
+                    f"{aspect}_descriptives",
+                    f"{aspect}_descriptives_box.png",
+                    f"{aspect.capitalize()} — metric distributions per group",
                     aspect_descriptives,
+                    "variable",
+                )
+            ]
+
+        plots = {}
+        for key, filename, title, frame, facet_col in slices:
+            if frame.height == 0:
+                continue
+            try:
+                plots[key] = visualization_utils.plot_descriptives_boxplot(
+                    frame,
                     group_col="group",
                     metric_col="metric",
-                    facet_col="variable",
-                    title=f"{aspect.capitalize()} — metric distributions per group",
+                    facet_col=facet_col,
+                    title=title,
                     library=self.plot_library,
                     renderer=self.renderer,
-                    save_path=(
-                        path / f"{aspect}_descriptives_box.png" if path is not None else None
-                    ),
+                    save_path=(path / filename if path is not None else None),
                     save_results=save_results,
                 )
             except ValueError as exc:
-                pretty_printing.rich_warning(
-                    f"Could not plot {aspect} descriptives box plot: {exc}"
-                )
+                pretty_printing.rich_warning(f"Could not plot {key} box plot: {exc}")
         return plots
 
     def _report_group_differences(self, results: pl.DataFrame):
         """Print a short summary of the comparison to the console."""
         tested = results.filter(pl.col("skipped_reason").is_null())
         skipped = results.height - tested.height
-        n_significant = int(tested["significant"].sum()) if tested.height else 0
 
         # n_groups can differ between aspects if a group was excluded from one of them.
         group_counts = sorted(set(results["n_groups"].to_list()))
         groups_desc = "/".join(str(n) for n in group_counts)
         pretty_printing.rich_info(
             f"Group comparison: {tested.height} metric(s) tested across "
-            f"{groups_desc} groups, {n_significant} surviving FDR correction "
-            f"at alpha={self.alpha}" + (f", {skipped} skipped." if skipped else ".")
+            f"{groups_desc} groups" + (f", {skipped} skipped." if skipped else ".")
         )
+        # Reported per family, because the two families were corrected separately and
+        # answer different questions — a combined count would misrepresent both.
+        for family in sorted(set(results["family"].to_list())):
+            family_tested = tested.filter(pl.col("family") == family)
+            if family_tested.height == 0:
+                continue
+            pretty_printing.rich_info(
+                f"  {family}: {int(family_tested['significant'].sum())} of "
+                f"{family_tested.height} surviving FDR correction at alpha={self.alpha}"
+            )
         if tested.height:
             print(
                 tested.with_columns(pl.col("effect_size").abs().alias("_abs"))
@@ -681,6 +778,7 @@ class Imperfekt:
                 .head(5)
                 .select(
                     [
+                        "family",
                         "aspect",
                         "variable",
                         "metric",

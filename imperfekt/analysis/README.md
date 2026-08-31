@@ -53,15 +53,25 @@ analyzer.preliminary.run()
 
 ## Case-Level Metrics
 
-Each of the three imperfection aspects exposes a `case_metrics()` method producing one row per case
-(per case × variable for intravariable) with a small set of canonical metrics. These are the
-comparable unit of analysis: 13 metrics in total, all bounded except `interval_cv`.
+Each aspect exposes a `case_metrics()` method producing one row per case (per case × variable
+where the aspect is per-variable). These are the comparable unit of analysis: 19 columns in
+total, split into two kinds.
+
+**Imperfection metrics** — 13 constructed indices describing the *shape of the imperfection*,
+all bounded except `interval_cv`:
 
 | Aspect | Shape | Metrics |
 |--------|-------|---------|
 | [Intravariable](intravariable/README.md#7-case-level-metrics-case_metrics) | per case × variable | `indicated_pct`, `indicated_centroid`, `gap_adh_rate`, `gap_entropy` |
 | [Intervariable](intervariable/README.md#7-case-level-metrics-case_metrics) | per case | `avg_indicated_pct`, `co_concentration`, `breadth`, `max_pair_overlap`, `pattern_entropy` |
 | [Irregularity](irregularity/README.md#6-case-level-irregularity-metrics-case_metrics) | per case | `interval_cv`, `interval_qcod`, `interval_adh_rate`, `interval_entropy` |
+
+**Observed-value summary measures** — 6 plain descriptive statistics of *the data itself*, in
+each variable's own units (`value_slope` in units per hour). 
+
+| Aspect | Shape | Metrics |
+|--------|-------|---------|
+| [Preliminary](preliminary/README.md#6-case-level-observed-value-metrics-case_metrics) | per case × variable | `value_mean`, `value_min`, `value_max`, `value_iqr`, `value_slope`, `value_first` |
 
 Passing `stratify=True` additionally assigns each row to an imperfection quadrant
 ($Q_{\alpha}$–$Q_{\delta}$) by median-bisecting the least-correlated pair of metrics. This is
@@ -82,13 +92,27 @@ median-bisect any pair of columns with your own labels.
 `run_grouped_analysis(annotation_col=..., analysis_mode="metrics")` computes the case-level metrics
 separately per group and then tests whether they differ between groups.
 
+It answers **two** questions, kept deliberately distinct:
+
+| Family | Aspects | Question |
+|--------|---------|----------|
+| `imperfection` | intravariable, intervariable, irregularity | Does the *data quality* differ between groups? |
+| `observed_values` | preliminary | Does the *data itself* — the case-mix — differ between groups? |
+
+The second is what makes the first interpretable. If a group has both more missingness *and*
+higher heart rates, the imperfection finding may reflect case-mix rather than the data-generating
+process; reading the two tables side by side is what separates them. 
+
 ```python
 analyzer.run_grouped_analysis(annotation_col="outcome", analysis_mode="metrics")
 
-analyzer.group_comparison_results  # effect size + CI + q per metric
+analyzer.group_comparison_results  # effect size + CI + q per metric, with a `family` column
 analyzer.group_comparison_descriptives  # median [IQR], mean (SD), n per group
 analyzer.group_comparison_posthoc  # pairwise comparisons (k > 2 groups only)
 analyzer.group_comparison_plots  # forest plot per aspect
+
+# The Table 1 view: observed values per group, in the variables' own units
+analyzer.group_comparison_descriptives.filter(pl.col("aspect") == "preliminary")
 ```
 
 ### Method
@@ -107,17 +131,30 @@ Three deliberate choices:
   library essentially every metric reaches significance, so the q-value gates a finding while the
   effect size ranks it. Cliff's $\delta$ is unit-free, which is what makes metrics on different
   scales comparable on one forest plot.
-- **Benjamini–Hochberg FDR is applied once across the whole family of tests** — all aspects, all
-  variables, all metrics. Bonferroni controls the wrong error rate for many correlated metrics;
-  correcting per aspect would under-correct.
+- **Benjamini–Hochberg FDR is applied once per family** — across all aspects, variables and
+  metrics *within* a family, but never across the two. Bonferroni controls the wrong error rate
+  for many correlated metrics, and correcting per aspect would under-correct; but correcting the
+  two families together would mean that describing the cohort more thoroughly raises the
+  q-values of the imperfection findings, which is not a real loss of evidence. A multiplicity
+  correction controls the error rate over the hypotheses answering *one* question, and these are
+  two. Both `q_value` and `definedness_q_value` are corrected this way.
 - **Definedness is tested too.** `gap_adh_rate` is `null` for a case with no gaps, `interval_*` for
-  a case with fewer than two intervals. If a metric is computable more often in one group than
-  another, any effect size is computed on a self-selected subsample. `pct_defined` appears in the
-  descriptives and `definedness_q_value` in the results.
+  a case with fewer than two intervals, `value_*` for a case in which the variable was never
+  recorded. If a metric is computable more often in one group than another, any effect size is
+  computed on a self-selected subsample. `pct_defined` appears in the descriptives and
+  `definedness_q_value` in the results. For the observed-value metrics `pct_defined` reads
+  directly as "% of cases in which this variable was ever recorded", so differential availability
+  is itself a reportable finding.
 
 Metrics that cannot be tested — fewer than three defined values in a group, or no pooled variance —
 are reported with a `skipped_reason` rather than dropped, so an absent row never reads as a null
 result.
+
+Two notes specific to the observed-value family. Its metrics are computed on observed values only,
+so under MNAR a case's mean is a biased estimate of its true mean and the bias may differ by group.
+And because those metrics are in the variables' own clinical units rather than bounded, that aspect
+gets **one box plot per variable** (`preliminary_descriptives_box_{variable}.png`) instead of one
+shared figure — a panel holding SpO₂ next to lactate would flatten the smaller of the two.
 
 ## Detailed Documentation
 

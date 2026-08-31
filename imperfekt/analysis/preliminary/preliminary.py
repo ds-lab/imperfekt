@@ -8,6 +8,7 @@ import polars as pl
 from scipy.stats import shapiro
 
 from imperfekt.analysis.intravariable import autocorrelation
+from imperfekt.analysis.preliminary.case_metrics import compute_case_value_metrics
 from imperfekt.analysis.utils import pretty_printing, visualization_utils
 
 
@@ -26,10 +27,21 @@ class PreliminaryResults:
         self.multivariate_normality: pl.DataFrame = pl.DataFrame()
         self.shapiro_wilk: pl.DataFrame = pl.DataFrame()
         self.descriptive_stats: pl.DataFrame = pl.DataFrame()
+        self.cm_case_metrics: pl.DataFrame | None = None
         self.plots = PreliminaryPlots()
 
 
 class Preliminary:
+    # Case-level summary measures of the observed values.
+    CASE_METRIC_COLS: list[str] = [
+        "value_mean",
+        "value_min",
+        "value_max",
+        "value_iqr",
+        "value_slope",
+        "value_first",
+    ]
+
     def __init__(
         self,
         df: pl.DataFrame,
@@ -360,9 +372,73 @@ class Preliminary:
 
         return self
 
+    def case_metrics(
+        self,
+        min_obs_spread: int = 2,
+        min_obs_slope: int = 2,
+        slope_time_unit: str = "hour",
+        save_results: bool = True,
+    ) -> "Preliminary":
+        """
+        Compute case-level summary measures of the observed values, one row per (case, variable).
+
+        Metrics (over observed values only):
+            value_mean  : arithmetic mean — the case's overall level
+            value_min   : lowest observed value (trough)
+            value_max   : highest observed value (peak)
+            value_iqr   : Q75 - Q25 — within-case variability
+            value_slope : rate of change, in the variable's own units per slope_time_unit
+                          (default: per hour). A rate rather than the total change across
+                          the record, because the total change is the rate times the
+                          record's duration and so mostly encodes how long the case was
+                          observed: with a fixed underlying rate it tracks duration at
+                          rho ~ 0.94, and two cohorts with identical physiology but
+                          different record lengths would test as significantly different.
+            value_first : first observed value in clock order — the baseline reading
+
+        Results stored in:
+            self.results.cm_case_metrics — one row per (case × variable)
+
+        Parameters:
+            min_obs_spread (int): Minimum observations required for value_iqr.
+            min_obs_slope (int): Minimum observations required for value_slope. The rate
+                is unbiased but noisy over very short spans; raise this to be stricter.
+            slope_time_unit (str): Time unit of value_slope — "second", "minute", "hour"
+                (default) or "day". Ignored when the clock column is not temporal, where
+                the rate is per observation.
+            save_results (bool): Whether to save the CSV to save_path.
+
+        Returns:
+            self: Supports method chaining.
+        """
+        path = None
+        if self.save_path and save_results:
+            path = Path(self.save_path) / "case_metrics"
+            path.mkdir(parents=True, exist_ok=True)
+
+        base = compute_case_value_metrics(
+            df=self.df,
+            cols=self.cols,
+            id_col=self.id_col,
+            clock_col=self.clock_col,
+            clock_no_col=self.clock_no_col,
+            min_obs_spread=min_obs_spread,
+            min_obs_slope=min_obs_slope,
+            slope_time_unit=slope_time_unit,
+        )
+        self.results.cm_case_metrics = base.select(
+            [self.id_col, "variable", *self.CASE_METRIC_COLS]
+        )
+
+        if save_results and path:
+            self.results.cm_case_metrics.write_csv(path / "case_metrics.csv")
+
+        return self
+
     def run(self, lags: int = 20, save_results: bool = True, use: str = "pairwise"):
         """
-        Runs all preliminary analyses: autocorrelation and correlation.
+        Runs all preliminary analyses: descriptive statistics, normality tests,
+        autocorrelation, correlation, and the case-level summary measures.
 
         Parameters:
             lags (int): Number of lags for autocorrelation.
@@ -376,6 +452,7 @@ class Preliminary:
         self.multivariate_normality(save_results=save_results)
         self.autocorrelation(lags=lags, save_results=save_results)
         self.correlation(use=use, save_results=save_results)
+        self.case_metrics(save_results=save_results)
         return self
 
     def generate_html_report(

@@ -15,6 +15,7 @@ This module provides a comprehensive suite of preliminary statistical analyses f
    - [Multivariate Normality Test](#3-multivariate-normality-test-multivariate_normality)
    - [Correlation Analysis](#4-correlation-analysis-correlation)
    - [Autocorrelation Analysis](#5-autocorrelation-analysis-autocorrelation)
+   - [Case-Level Observed-Value Metrics](#6-case-level-observed-value-metrics-case_metrics)
 5. [Usage Example](#usage-example)
 6. [References](#references)
 
@@ -53,11 +54,13 @@ Preliminary
 │   ├── multivariate_normality()     # Multivariate normality (Henze-Zirkler)
 │   ├── correlation(use=)             # Spearman correlation matrix + heatmap
 │   ├── autocorrelation(lags=)        # Lagged autocorrelation + scatter plots
+│   ├── case_metrics()                # Per-case summary measures of observed values
 │   ├── run()                         # Execute all analyses
 │   └── generate_html_report()        # Create HTML summary report
 │
 └── results: PreliminaryResults
     ├── descriptive_stats: pl.DataFrame
+    ├── cm_case_metrics: pl.DataFrame | None
     ├── shapiro_wilk: pl.DataFrame
     ├── multivariate_normality: pl.DataFrame
     ├── correlation: pl.DataFrame
@@ -238,6 +241,72 @@ For grouped/longitudinal data, the implementation:
 
 ---
 
+### 6. Case-Level Observed-Value Metrics (`case_metrics`)
+
+Reduces each case's series to **one row per (case, variable)** summarizing the *observed values*.
+
+Unlike the metrics of the intravariable, intervariable and irregularity modules, these are
+plain **descriptive summary measures of the data itself**, not constructed imperfection
+indices. They share the `case_metrics` name and frame shape so the observed values can enter
+the same [group comparison](../README.md#group-comparison) as the imperfection metrics.
+
+#### Why per case, and not per timestamp
+
+Observations within a case are correlated, so pooling raw timestamps across groups and testing
+them treats each observation as independent. That inflates $n$ by one to two orders of magnitude,
+makes p-values meaningless, and lets cases with the most observations dominate the result.
+
+The standard remedy is the **summary-measures** (or *two-stage*) approach [[6]](#references):
+reduce each case's series to a single number per variable, then apply an ordinary test across
+cases. The metrics below are the summary measures; the group comparison is the second stage.
+
+#### Metrics
+
+For a case with observed values $v_1, \dots, v_n$ at times $t_1 \le \dots \le t_n$
+(nulls excluded), where $n$ is the number of *observed* values of that variable:
+
+| Metric | Formula | Units | Defined when |
+|--------|---------|-------|--------------|
+| `value_mean` | $\bar{v} = \frac{1}{n}\sum_i v_i$ | variable's own | $n \ge 1$ |
+| `value_min` | $\min_i v_i$ | variable's own | $n \ge 1$ |
+| `value_max` | $\max_i v_i$ | variable's own | $n \ge 1$ |
+| `value_iqr` | $Q_{75}(v) - Q_{25}(v)$ | variable's own | $n \ge$ `min_obs_spread` |
+| `value_slope` | $\hat{\beta} = \dfrac{\mathrm{Cov}(t, v)}{\mathrm{Var}(t)}$ | variable's own **per hour** | $n \ge$ `min_obs_slope` and $t_n > t_1$ |
+| `value_first` | $v_1$ | variable's own | $n \ge 1$ |
+
+
+The time axis is seconds from `clock_col`, converted to the unit given by `slope_time_unit`. When
+`clock_col` is not temporal the `clock_no_col` index is used instead and the rate is per
+observation, with `slope_time_unit` ignored.
+
+#### Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `min_obs_spread` | 2 | Minimum observations for `value_iqr` |
+| `min_obs_slope` | 2 | Minimum observations for `value_slope` |
+| `slope_time_unit` | `"hour"` | Unit of `value_slope`: `"second"`, `"minute"`, `"hour"` or `"day"` |
+| `save_results` | `True` | Write `case_metrics/case_metrics.csv` to `save_path` |
+
+
+#### Output
+
+**`cm_case_metrics`** — one row per (case, variable), with the `id` column, `variable`, and the six
+metric columns above. A case with **no** observed values of a variable yields an all-null row
+rather than no row, so that differential availability stays visible rather than silently
+shrinking the sample.
+
+#### Interpretation caveats
+
+| Caveat | Consequence |
+|--------|-------------|
+| Computed on observed values only | Under MNAR, a case's mean is a biased estimate of its true mean, and the bias may differ by group. This is why the observed-value and imperfection comparisons belong side by side. |
+| Unweighted over irregular samples | `value_mean` over-weights densely sampled stretches. Cross-read against the [irregularity](../irregularity/README.md) aspect. |
+| `value_slope` is noisy on short records | The rate is unbiased at any record length, but its variance grows as the observed span shrinks. Raise `min_obs_slope` if that matters. |
+| Availability is itself a finding | In the group comparison, `pct_defined` reads as "% of cases in which this variable was ever recorded", and `definedness_q_value` tests whether that differs by group. |
+
+---
+
 ## Usage Example
 
 ```python
@@ -277,6 +346,10 @@ preliminary = Preliminary(
 # Run all analyses
 preliminary.run(lags=10, save_results=True, use="pairwise")
 
+# Or just the per-case summary measures of the observed values
+preliminary.case_metrics(save_results=True)
+print(preliminary.results.cm_case_metrics)  # one row per (case, variable)
+
 # Generate HTML report
 preliminary.generate_html_report(
     report_path="preliminary_report.html", title="Preliminary Analysis Report"
@@ -303,3 +376,6 @@ preliminary.generate_html_report(
 5. **Vallat, R.** (2018). Pingouin: statistics in Python. *Journal of Open Source Software*, 3(31), 1026. https://doi.org/10.21105/joss.01026
    - Used for: `pingouin.multivariate_normality` implementation of the Henze-Zirkler test.
    - Documentation: https://pingouin-stats.org/build/html/generated/pingouin.multivariate_normality.html
+
+6. **Matthews, J. N. S., Altman, D. G., Campbell, M. J., & Royston, P.** (1990). Analysis of serial measurements in medical research. *BMJ*, 300(6719), 230-235. https://doi.org/10.1136/bmj.300.6719.230
+   - Used for: the summary-measures ("two-stage") rationale behind `case_metrics` — reducing each case's series to one value per variable before testing across cases, rather than pooling correlated within-case observations.
