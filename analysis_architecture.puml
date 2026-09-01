@@ -16,20 +16,35 @@ package Imperfection {
             - clock_col: str
             - clock_no_col: str
             - cols: list
+            - alpha: float
             - save_path: Path
             - plot_library: str
             - renderer: str
             - results: IntravariableResults
+            {static} CASE_METRIC_COLS: list
+            {static} INVERTED_AXES: frozenset
+            {static} STRATUM_COL: str
+            {static} COMPLETE_COL: str
+            {static} CROSS_VARIABLE_STRATUM_COL: str
 
             .. operations ..
             + IntravariableImperfection()
             + column_statistics()
             + gap_statistics()
+            + gap_returns()
             + markov_chain_summary()
             + autocorrelation()
             + windowed_significance()
             + date_time_statistics()
+            + case_metrics()
+            + assign_strata()
+            + assign_strata_cross_variable()
             + run()
+            + generate_html_report()
+            + _build_case_metric_base()
+            + _stratify_per_variable()
+            + _stratify_cross_variable()
+            + _build_summary()
             + _path()
             + _generate_clock_no_col()
         }
@@ -43,34 +58,63 @@ package Imperfection {
         package markov_chain_summary {}
         package autocorrelation {}
         package windowed_significance {}
-        
-        
+        package "html_report_generator" as intravariable_html_report_generator {}
+
+
         windowed_significance ---[hidden]up- IntravariableImperfection
         column_statistics ---[hidden]up- IntravariableImperfection
         gap_statistics---[hidden]up- IntravariableImperfection
         date_time_statistics ---[hidden]up- IntravariableImperfection
         markov_chain_summary --[hidden]up- IntravariableImperfection
         autocorrelation --[hidden]up- IntravariableImperfection
+        intravariable_html_report_generator --[hidden]up- IntravariableImperfection
 
         ' ----------------------------
         ' Container for computed tables
         ' ----------------------------
         class IntravariableResults {
             ..attributes..
-                - column_statistics: DataFrame
-                - column_case_level_statistics: DataFrame
-                - gap_observation_runs: DataFrame
-                - gap_returns: DataFrame
-                - markov: DataFrame
-                - autocorrelation: DataFrame
-                - observations_around_indicated: dict[DataFrame]
-                - windowed_significance: DataFrame
+                - cs_overall_statistics: DataFrame
+                - cs_case_level_statistics: DataFrame
+                - gs_gaps_observation_runs: DataFrame
+                - gs_gaps_df: dict<DataFrame>
+                - gs_gap_dominant: dict<DataFrame>
+                - gs_gap_burstiness: dict<DataFrame>
+                - gr_gap_returns: DataFrame
+                - gr_gap_kruskal: dict
+                - mc_markov_summary: dict
+                - ac_autocorrelation: dict
+                - ws_observations_around_indicated: dict
+                - ws_mwu_result: DataFrame
+                - dt_date_time_statistics: dict
+                - cm_case_metrics: DataFrame
+                - cm_pairwise_correlations: dict<DataFrame>
+                - cm_cross_variable_correlations: DataFrame
+                - plots: IntravariablePlots
+            .. operations ..
+                + __init__()
+        }
+
+        class IntravariablePlots {
+            .. attributes ..
+                - cs_imperfection_histogram: dict
+                - cs_imperfection_boxplot: dict
+                - gs_gap_lengths_violin: dict
+                - gr_gap_returns_boxplot: dict
+                - gr_posthoc_pval_heatmap: dict
+                - gr_posthoc_es_heatmap: dict
+                - mc_heatmap: dict
+                - ac_lag_plot: dict
+                - ws_overlay_histogram: dict
+                - ws_multi_boxplot: dict
+                - dt_month_daytime_heatmap: dict
             .. operations ..
                 + __init__()
         }
 
         ' Association: each “imperfection” instance owns one results object
         IntravariableImperfection *-- IntravariableResults
+        IntravariableResults *-- IntravariablePlots
     }
 
     package intervariable {
@@ -87,10 +131,15 @@ package Imperfection {
             - clock_col: str
             - clock_no_col: str
             - cols: list
+            - alpha: float
             - save_path: Path
             - plot_library: str
             - renderer: str
             - results: IntervariableResults
+            {static} CASE_METRIC_COLS: list
+            {static} INVERTED_AXES: frozenset
+            {static} STRATUM_COL: str
+            {static} COMPLETE_COL: str
 
             .. operations ..
             + IntervariableImperfection()
@@ -102,10 +151,14 @@ package Imperfection {
             + asymmetric_correlation()
             + asymmetric_lagged_cross_correlation()
             + visualize_missingness()
+            + case_metrics()
+            + assign_strata()
             + run()
+            + generate_html_report()
+            + _build_summary()
             + _path()
             + _generate_clock_no_col()
-            
+
         }
 
         ' ----------------------------
@@ -113,38 +166,140 @@ package Imperfection {
         ' ----------------------------
         package row_statistics {}
         package mcar {}
-        package symmetric {}
-        package asymmetric {}
-        
+        package marmnar {}
+        package symmetric_correlation {}
+        package asymmetric_analysis {}
+        package "html_report_generator" as intervariable_html_report_generator {}
+
         row_statistics --[hidden]up- IntervariableImperfection
         mcar --[hidden]up- IntervariableImperfection
-        symmetric --[hidden]up- IntervariableImperfection
-        asymmetric --[hidden]up- IntervariableImperfection
+        marmnar --[hidden]up- IntervariableImperfection
+        symmetric_correlation --[hidden]up- IntervariableImperfection
+        asymmetric_analysis --[hidden]up- IntervariableImperfection
+        intervariable_html_report_generator --[hidden]up- IntervariableImperfection
 
         ' ----------------------------
         ' Container for computed tables
         ' ----------------------------
         class IntervariableResults {
             .. attributes ..
-            - row_statistics: pl.DataFrame
-            - row_case_level_statistics: pl.DataFrame
-            - null_row_statistics: pl.DataFrame
-            - null_row_case_level_statistics: pl.DataFrame
-            - mcar_results: pl.DataFrame
+            - rs_overall_statistics: pl.DataFrame
+            - rs_case_level_statistics: pl.DataFrame
+            - rs_empty_statistics: tuple
+            - rs_empty_case_level_statistics: pl.DataFrame
+            - mcar_results: dict
             - mar_mnar_results: pl.DataFrame
-            - symmetric_correlation: pl.DataFrame
-            - chi2_intervariable_matrix: pl.DataFrame
-            - symmetric_crosscorrelation: dict<pDataFrame>
-            - asymmetric_statistical_results: dict<pDataFrame>
-            - asymmetric_crosscorrelation: dict<pDataFrame>
-            
-        
+            - sc_symmetric_correlation: pl.DataFrame
+            - sc_symmetric_crosscorrelation: dict<pl.DataFrame>
+            - ac_asymmetric_statistical_results: dict<pl.DataFrame>
+            - ac_asymmetric_crosscorrelation: dict<pl.DataFrame>
+            - cm_case_metrics: pl.DataFrame
+            - cm_pairwise_correlations: pl.DataFrame
+            - plots: IntervariablePlots
+
+            .. operations ..
+            + __init__()
+        }
+
+        class IntervariablePlots {
+            .. attributes ..
+            - rs_case_level_histogram: Figure
+            - rs_case_level_boxplot: Figure
+            - mcar_upset_plot: Figure
+            - sc_lag_scatter_plot: dict<Figure>
+            - sc_correlation_heatmap: Figure
+            - sc_correlation_dendogram: Figure
+            - ac_multi_histogram: dict<Figure>
+            - ac_multi_boxplot: dict<Figure>
+            - ac_lag_scatter_plot: dict<Figure>
             .. operations ..
             + __init__()
         }
 
         ' Association: each “imperfection” instance owns one results object
         IntervariableImperfection *-- IntervariableResults
+        IntervariableResults *-- IntervariablePlots
+    }
+
+    ' ----------------------------
+    ' Irregularity analysis package
+    ' ----------------------------
+    package irregularity {
+
+        ' ----------------------------
+        ' Core analysis class
+        ' ----------------------------
+        class Irregularity {
+            .. attributes ..
+            - df: pl.DataFrame
+            - id_col: str
+            - clock_col: str
+            - save_path: Path
+            - plot_library: str
+            - renderer: str
+            - results: IrregularityResults
+            - _delta_t_df: pl.DataFrame
+            {static} CASE_METRIC_COLS: list
+            {static} INVERTED_AXES: frozenset
+            {static} STRATUM_COL: str
+
+            .. operations ..
+            + __init__()
+            + interval_statistics()
+            + dominant_frequency()
+            + burstiness()
+            + interval_autocorrelation()
+            + case_entropy_adherence()
+            + case_metrics()
+            + assign_strata()
+            + run()
+            + _compute_intervals()
+            + _build_summary()
+            + _path()
+        }
+
+        ' ----------------------------
+        ' Dedicated sub‑package
+        ' ----------------------------
+        package interval_statistics {}
+        package burstiness {}
+
+        interval_statistics --[hidden]up- Irregularity
+        burstiness --[hidden]up- Irregularity
+
+        ' ----------------------------
+        ' Container for computed tables
+        ' ----------------------------
+        class IrregularityResults {
+            .. attributes ..
+            - ins_case_statistics: pl.DataFrame
+            - ins_global_statistics: pl.DataFrame
+            - domf_frequency_summary: pl.DataFrame
+            - domf_bin_counts: pl.DataFrame
+            - bu_case_burstiness: pl.DataFrame
+            - bu_global_burstiness: pl.DataFrame
+            - ia_autocorrelation: pl.DataFrame
+            - ea_case_entropy_adherence: pl.DataFrame
+            - cm_case_metrics: pl.DataFrame
+            - cm_pairwise_correlations: pl.DataFrame
+            - plots: IrregularityPlots
+            .. operations ..
+            + __init__()
+        }
+
+        class IrregularityPlots {
+            .. attributes ..
+            - ins_cv_violin
+            - domf_interval_frequency_bar
+            - bu_burstiness_violin
+            - ia_acf_plot
+            .. operations ..
+            + __init__()
+        }
+
+        ' Association: each irregularity instance owns one results object
+        Irregularity *-- IrregularityResults
+        IrregularityResults *-- IrregularityPlots
     }
 
         ' ----------------------------
@@ -158,36 +313,66 @@ package Imperfection {
             - clock_col: str
             - clock_no_col: str
             - cols: list
+            - alpha: float
             - save_path: Path
             - plot_library: str
             - renderer: str
             - results: PreliminaryResults
+            {static} CASE_METRIC_COLS: list
 
             .. operations ..
             + __init__()
+            + describe_df()
+            + multivariate_normality()
+            + shapiro_wilk()
             + correlation()
             + autocorrelation()
-            + shapiro_wilk()
-            + describe_df()
+            + case_metrics()
             + run()
+            + generate_html_report()
             + _plot_heatmap()
             + _path()
             + _generate_clock_no_col()
         }
 
+        ' ----------------------------
+        ' Dedicated sub‑package
+        ' ----------------------------
+        package "case_metrics" as preliminary_case_metrics {}
+        package "html_report_generator" as preliminary_html_report_generator {}
+
+        preliminary_case_metrics --[hidden]up- Preliminary
+        preliminary_html_report_generator --[hidden]up- Preliminary
+
         class PreliminaryResults {
             .. attributes ..
             - correlation: pl.DataFrame
             - autocorrelation: dict<str, pl.DataFrame>
+            - multivariate_normality: pl.DataFrame
             - shapiro_wilk: pl.DataFrame
             - descriptive_stats: pl.DataFrame
+            - cm_case_metrics: pl.DataFrame
+            - plots: PreliminaryPlots
+            .. operations ..
+            + __init__()
+        }
+
+        class PreliminaryPlots {
+            .. attributes ..
+            - violin: dict<Figure>
+            - correlation_heatmap: Figure
+            - autocorrelation_lag_plot: dict<Figure>
+            - qq_plot: dict<Figure>
             .. operations ..
             + __init__()
         }
 
         ' Association: each preliminary analysis instance owns one results object
         Preliminary *-- PreliminaryResults
+        PreliminaryResults *-- PreliminaryPlots
     }
+
+
 
     ' ----------------------------
     ' Imperfekt class
@@ -199,24 +384,62 @@ package Imperfection {
         - clock_col: str
         - clock_no_col: str
         - cols: list
+        - alpha: float
         - save_path: Path
         - plot_library: str
         - renderer: str
+        - imperfection: str
+        - plausibility_method: str
+        - plausibility_threshold: float
+        - plausibility_scope: str
+        - plausibility_missing_as: str
+        - plausibility_reference_ranges: dict
+        - missingness_mask: pl.DataFrame
         - preliminary: Preliminary
         - intravariable: IntravariableImperfection
         - intervariable: IntervariableImperfection
+        - irregularity: Irregularity
+        - group_results: dict
+        - event_results: dict
+        - group_comparison_descriptives: pl.DataFrame
+        - group_comparison_results: pl.DataFrame
+        - group_comparison_posthoc: pl.DataFrame
+        - group_comparison_plots: dict
+        - cross_aspect_correlations: pl.DataFrame
+        - cross_aspect_correlation_matrix: pl.DataFrame
+        {static} _GROUP_COMPARISON_ASPECTS: tuple
+        {static} _CROSS_ASPECT_SCHEMA: dict
 
         .. operations ..
         + __init__()
         + run()
+        + run_grouped_analysis()
+        + run_event_based_analysis()
+        + cross_aspect_correlation()
+        + generate_html_reports()
+        + _collect_group_frames()
+        + _check_group_differences()
+        + _fdr_by_family()
+        + _run_group_posthoc()
+        + _plot_group_differences()
+        + _plot_aspect_descriptives()
+        + _report_group_differences()
+        + _collect_case_metric_axes()
+        + _build_correlation_matrix()
+        + _report_cross_aspect_correlation()
+        + _path()
+        + _generate_clock_no_col()
+        + _initial_check()
     }
 
     ' Associations for Imperfekt dependencies
     Imperfekt *-- Preliminary
     Imperfekt *-- IntravariableImperfection
     Imperfekt *-- IntervariableImperfection
+    Imperfekt *-- Irregularity
 
     Preliminary -[hidden]right- IntravariableImperfection
     IntravariableImperfection -[hidden]right- IntervariableImperfection
+    IntervariableImperfection -[hidden]right- Irregularity
 }
 @enduml

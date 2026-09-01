@@ -87,6 +87,25 @@ the function safe for leakage-free cross-validation and for fitting once on a po
 applying to each subgroup so labels stay comparable. Call the generic function directly to
 median-bisect any pair of columns with your own labels.
 
+### Metric Orthogonality
+
+Each module's `cm_pairwise_correlations` covers only the pairs *within* one aspect, since that is
+all axis selection needs. `cross_aspect_correlation()` joins every aspect's case metrics on the
+case id and correlates all of them against each other — Spearman, pairwise-complete, with a
+Fisher-z CI, because a $\rho$ near zero over few cases is an absence of evidence rather than
+evidence of absence. Pairs are labelled `within_aspect` / `cross_aspect` and sorted by descending
+$|\rho|$: the claim is that *all* pairs are low, so the largest one is the binding evidence.
+
+```python
+analyzer.cross_aspect_correlation()        # add include_observed_values=True for the value_* metrics
+analyzer.cross_aspect_correlations         # one row per metric pair
+analyzer.cross_aspect_correlation_matrix   # the same values, square, for a heatmap
+```
+
+Some pairs are high by construction rather than by cohort — `avg_indicated_pct` is
+`co_concentration` scaled by the fraction of imperfect timestamps, and it is also the mean of the
+per-variable `indicated_pct` values. Read those as a property of the metric definitions.
+
 ## Group Comparison
 
 `run_grouped_analysis(annotation_col=..., analysis_mode="metrics")` computes the case-level metrics

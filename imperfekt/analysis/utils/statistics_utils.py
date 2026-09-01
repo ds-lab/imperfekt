@@ -518,6 +518,35 @@ def benjamini_hochberg(p_values) -> np.ndarray:
     return q
 
 
+def spearman_ci(
+    rho: float,
+    n: int,
+    confidence_level: float = 0.95,
+) -> tuple[float, float]:
+    """
+    Confidence interval for a Spearman rank correlation via the Fisher z transform
+    to make small correlations interpretable.
+
+    Uses the Bonett-Wright standard error, ``sqrt(1.06 / (n - 3))``, which is the
+    Spearman-specific correction to the Pearson Fisher-z interval.
+
+    Parameters:
+        rho (float): Spearman correlation coefficient.
+        n (int): Number of complete pairs the coefficient was computed over.
+        confidence_level (float): Coverage of the interval.
+
+    Returns:
+        tuple[float, float]: (lower bound, upper bound).
+    """
+    if n < 4 or np.isnan(rho) or abs(rho) >= 1.0:
+        return float("nan"), float("nan")
+
+    se = np.sqrt(1.06 / (n - 3))
+    z_crit = stats.norm.ppf(1 - (1 - confidence_level) / 2) # default: 1.96 for 95% CI
+    z = np.arctanh(rho)
+    return float(np.tanh(z - z_crit * se)), float(np.tanh(z + z_crit * se))
+
+
 def mwu_effect_size_ci(
     x1: np.ndarray,
     x2: np.ndarray,
@@ -531,7 +560,7 @@ def mwu_effect_size_ci(
     Parameters:
         x1, x2: Arrays of data for the two groups.
         n_bootstrap: Number of bootstrap samples.
-        ci: Confidence level for the interval.
+        confidence_level: Confidence level for the interval.
         random_state: For reproducibility.
 
     Returns:

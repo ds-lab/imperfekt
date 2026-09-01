@@ -12,6 +12,7 @@ from imperfekt.analysis.utils import (
     masking,
     pretty_printing,
     statistics_utils,
+    stratification,
     visualization_utils,
 )
 from imperfekt.analysis.utils.events import (
@@ -186,6 +187,10 @@ class Imperfekt:
         self.group_comparison_results: pl.DataFrame | None = None
         self.group_comparison_posthoc: pl.DataFrame | None = None
         self.group_comparison_plots: dict = {}
+
+        # Cross-aspect metric orthogonality
+        self.cross_aspect_correlations: pl.DataFrame | None = None
+        self.cross_aspect_correlation_matrix: pl.DataFrame | None = None
 
     def run(
         self,
@@ -790,6 +795,294 @@ class Imperfekt:
                     ]
                 )
             )
+
+    def _collect_case_metric_axes(
+        self,
+        include_observed_values: bool,
+        variables: list | None,
+        save_results: bool,
+    ) -> tuple[pl.DataFrame | None, dict]:
+        """
+        Gather every aspect's case-level metrics into one case-per-row frame.
+
+        Axis names are ``{variable}_{metric}`` for the per-variable aspects and
+        ``{metric}`` for the rest, prefixed with the aspect only where two aspects would
+        otherwise claim the same name.
+
+        Parameters:
+            include_observed_values (bool): Include the preliminary aspect's metrics.
+            variables (list | None): Variables to include for the per-variable aspects.
+            save_results (bool): Passed to any case_metrics() call that has to be made.
+
+        Returns:
+            tuple: (wide frame or None, axis name -> {aspect, variable, metric}).
+        """
+        keep_variables = variables if variables is not None else self.cols
+        long_frames = []
+
+        for aspect, attr, module_cls, facet_col, family in self._GROUP_COMPARISON_ASPECTS:
+            if family == "observed_values" and not include_observed_values:
+                continue
+
+            module = getattr(self, attr)
+            if module.results.cm_case_metrics is None:
+                module.case_metrics(save_results=save_results)
+            metrics = module.results.cm_case_metrics
+
+            if metrics is None or metrics.height == 0:
+                pretty_printing.rich_warning(
+                    f"No {aspect} case metrics available — aspect excluded from the "
+                    "cross-aspect correlation."
+                )
+                continue
+
+            metric_cols = [c for c in module_cls.CASE_METRIC_COLS if c in metrics.columns]
+            if not metric_cols:
+                continue
+
+            # A non-faceted aspect is the faceted case with a single, null variable.
+            variable = (
+                pl.col(facet_col)
+                if facet_col is not None and facet_col in metrics.columns
+                else pl.lit(None, dtype=pl.Utf8)
+            )
+            long_frames.append(
+                metrics.select(
+                    pl.col(self.id_col),
+                    variable.alias("variable"),
+                    pl.col(metric_cols).cast(pl.Float64),
+                )
+                .filter(pl.col("variable").is_null() | pl.col("variable").is_in(keep_variables))
+                .unpivot(
+                    index=[self.id_col, "variable"],
+                    on=metric_cols,
+                    variable_name="metric",
+                    value_name="value",
+                )
+                .with_columns(pl.lit(aspect).alias("aspect"))
+            )
+
+        if not long_frames:
+            return None, {}
+
+        tidy = pl.concat(long_frames).with_columns(
+            pl.when(pl.col("variable").is_null())
+            .then(pl.col("metric"))
+            .otherwise(pl.col("variable") + "_" + pl.col("metric"))
+            .alias("axis")
+        )
+        # Disambiguate only where it is actually needed, so axis names stay readable.
+        tidy = tidy.with_columns(
+            pl.when(pl.col("aspect").n_unique().over("axis") > 1)
+            .then(pl.col("aspect") + "_" + pl.col("axis"))
+            .otherwise(pl.col("axis"))
+            .alias("axis")
+        )
+
+        duplicates = tidy.height - tidy.unique(subset=[self.id_col, "axis"]).height
+        if duplicates:
+            pretty_printing.rich_warning(
+                f"{duplicates} duplicate (case, metric) value(s) across the case metric "
+                "frames; keeping the first of each."
+            )
+            tidy = tidy.unique(subset=[self.id_col, "axis"], keep="first", maintain_order=True)
+
+        meta = {
+            row["axis"]: {
+                "aspect": row["aspect"],
+                "variable": row["variable"],
+                "metric": row["metric"],
+            }
+            for row in tidy.select(["axis", "aspect", "variable", "metric"])
+            .unique(maintain_order=True)
+            .iter_rows(named=True)
+        }
+        wide = tidy.pivot(on="axis", index=self.id_col, values="value")
+        return wide, meta
+
+    def cross_aspect_correlation(
+        self,
+        include_observed_values: bool = False,
+        variables: list | None = None,
+        confidence_level: float = 0.95,
+        save_results: bool = True,
+    ) -> pl.DataFrame:
+        """
+        Spearman correlations between every pair of case-level metrics, across aspects
+        to verify whether the imperfection dimensions measure distinct attributes of data quality.
+
+        Every pair carries a Fisher-z confidence interval alongside the point estimate.
+        For an orthogonality claim the interval is the substance: a rho near zero over few
+        cases is an absence of evidence, not evidence of absence, and only the width tells
+        the two apart.
+
+        Note that some pairs are related by construction and are expected to correlate:
+        ``avg_indicated_pct`` is ``co_concentration`` scaled by the fraction of imperfect
+        timestamps, for instance.
+
+        Results stored in:
+            self.cross_aspect_correlations       — one row per metric pair
+            self.cross_aspect_correlation_matrix — the same values as a square matrix
+
+        Parameters:
+            include_observed_values (bool): Also include the preliminary aspect's observed-
+                value metrics. Off by default: they describe the measurements, not the
+                imperfection, and are a separate question — the same split the grouped
+                analysis makes with its two FDR families.
+            variables (list | None): Restrict the per-variable aspects to these variables.
+                Defaults to all analysed columns, which makes the axis count grow as
+                n_variables x n_metrics.
+            confidence_level (float): Coverage of the Fisher-z intervals.
+            save_results (bool): Whether to save CSVs to save_path.
+
+        Returns:
+            pl.DataFrame: The pair table, also stored on self.cross_aspect_correlations.
+        """
+        path = None
+        if self.save_path and save_results:
+            path = self.save_path / "cross_aspect_correlation"
+            path.mkdir(parents=True, exist_ok=True)
+
+        joined, meta = self._collect_case_metric_axes(
+            include_observed_values, variables, save_results
+        )
+        axes = list(meta)
+        
+        # Schema of the cross-aspect correlation table, used to build a typed empty result.
+        _CROSS_ASPECT_SCHEMA = {
+            "axis_1": pl.Utf8,
+            "aspect_1": pl.Utf8,
+            "variable_1": pl.Utf8,
+            "metric_1": pl.Utf8,
+            "axis_2": pl.Utf8,
+            "aspect_2": pl.Utf8,
+            "variable_2": pl.Utf8,
+            "metric_2": pl.Utf8,
+            "pair_type": pl.Utf8,
+            "corr": pl.Float64,
+            "abs_corr": pl.Float64,
+            "ci_lower": pl.Float64,
+            "ci_upper": pl.Float64,
+            "n_complete_cases": pl.Int64,
+        }
+
+        if joined is None or len(axes) < 2:
+            pretty_printing.rich_warning(
+                "Fewer than two case-level metrics are available — no cross-aspect "
+                "correlation was computed."
+            )
+            self.cross_aspect_correlations = None
+            self.cross_aspect_correlation_matrix = None
+            return pl.DataFrame(schema=_CROSS_ASPECT_SCHEMA)
+
+        rows = []
+        for i, axis_x in enumerate(axes):
+            for axis_y in axes[i + 1 :]:
+                corr, n_complete = stratification.pair_corr(joined, axis_x, axis_y)
+                ci_lower, ci_upper = statistics_utils.spearman_ci(
+                    corr, n_complete, confidence_level
+                )
+                meta_x, meta_y = meta[axis_x], meta[axis_y]
+                rows.append(
+                    {
+                        "axis_1": axis_x,
+                        "aspect_1": meta_x["aspect"],
+                        "variable_1": meta_x["variable"],
+                        "metric_1": meta_x["metric"],
+                        "axis_2": axis_y,
+                        "aspect_2": meta_y["aspect"],
+                        "variable_2": meta_y["variable"],
+                        "metric_2": meta_y["metric"],
+                        "pair_type": (
+                            "within_aspect"
+                            if meta_x["aspect"] == meta_y["aspect"]
+                            else "cross_aspect"
+                        ),
+                        "corr": corr,
+                        "abs_corr": float(abs(corr)) if not np.isnan(corr) else float("nan"),
+                        "ci_lower": ci_lower,
+                        "ci_upper": ci_upper,
+                        "n_complete_cases": n_complete,
+                    }
+                )
+
+        table = pl.DataFrame(rows, schema=_CROSS_ASPECT_SCHEMA).sort(
+            ["abs_corr", "n_complete_cases"], descending=[True, True], nulls_last=True
+        )
+        self.cross_aspect_correlations = table
+        self.cross_aspect_correlation_matrix = self._build_correlation_matrix(table, axes)
+
+        if save_results and path:
+            table.write_csv(path / "cross_aspect_correlations.csv")
+            self.cross_aspect_correlation_matrix.write_csv(path / "correlation_matrix.csv")
+
+        if self.renderer:
+            self._report_cross_aspect_correlation(table)
+
+        return table
+
+    @staticmethod
+    def _build_correlation_matrix(table: pl.DataFrame, axes: list[str]) -> pl.DataFrame:
+        """
+        Reshape the pair table into a square, symmetric correlation matrix.
+
+        The long table is the one to analyse; this form is for plotting a heatmap and for
+        dropping into a report, and carries an "axis" label column naming each row.
+
+        Parameters:
+            table (pl.DataFrame): Output of cross_aspect_correlation().
+            axes (list[str]): Axis names, defining the row and column order.
+
+        Returns:
+            pl.DataFrame: An "axis" column followed by one column per axis.
+        """
+        lookup = {
+            (row["axis_1"], row["axis_2"]): row["corr"] for row in table.iter_rows(named=True)
+        }
+        matrix = {"axis": axes}
+        for axis_y in axes:
+            matrix[axis_y] = [
+                1.0
+                if axis_x == axis_y
+                else lookup.get((axis_x, axis_y), lookup.get((axis_y, axis_x), float("nan")))
+                for axis_x in axes
+            ]
+        return pl.DataFrame(matrix)
+
+    def _report_cross_aspect_correlation(self, table: pl.DataFrame) -> None:
+        """Print a short summary of the metric orthogonality to the console."""
+        defined = table.filter(pl.col("abs_corr").is_not_null() & pl.col("abs_corr").is_not_nan())
+        undefined = table.height - defined.height
+        pretty_printing.rich_info(
+            f"Cross-aspect correlation: {defined.height} metric pair(s) with a defined "
+            "Spearman correlation"
+            + (f", {undefined} undefined." if undefined else ".")
+        )
+        if defined.height == 0:
+            return
+
+        for pair_type in ("cross_aspect", "within_aspect"):
+            subset = defined.filter(pl.col("pair_type") == pair_type)
+            if subset.height == 0:
+                continue
+            pretty_printing.rich_info(
+                f"  {pair_type}: median |rho|={subset['abs_corr'].median():.3f}, "
+                f"max |rho|={subset['abs_corr'].max():.3f}, "
+                f"{int((subset['abs_corr'] >= 0.5).sum())} of {subset.height} at |rho| >= 0.5"
+            )
+        print(
+            defined.head(5).select(
+                [
+                    "pair_type",
+                    "axis_1",
+                    "axis_2",
+                    "corr",
+                    "ci_lower",
+                    "ci_upper",
+                    "n_complete_cases",
+                ]
+            )
+        )
 
     def run_event_based_analysis(
         self,
