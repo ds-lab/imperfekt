@@ -12,7 +12,7 @@ from imperfekt.analysis.intervariable.intervariable import IntervariableImperfec
 from imperfekt.analysis.intravariable.intravariable import IntravariableImperfection
 from imperfekt.features.core import FeatureGenerator
 
-__version__ = "0.4.0"
+__version__ = "0.5.3"
 __all__ = [
     "Imperfekt",
     "IntravariableImperfection",

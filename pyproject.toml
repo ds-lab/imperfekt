@@ -61,13 +61,6 @@ dev = [
     "pytest-cov>=4.1.0",
     "ruff>=0.1.0",
     "mypy>=1.7.0",
-    "pre-commit>=3.5.0",
-]
-# For documentation
-docs = [
-    "mkdocs>=1.5.0",
-    "mkdocs-material>=9.5.0",
-    "mkdocstrings[python]>=0.24.0",
 ]
 
 [tool.hatch.build.targets.wheel]
